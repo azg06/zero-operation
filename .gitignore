@@ -1,0 +1,22 @@
+# Godot 4 项目缓存与导入
+.godot/
+*.uid
+
+# 导出产物（GitHub 单文件上限 100MB，构建产物不入库；用 export_presets.cfg 自行导出）
+*.exe
+*.pck
+*.zip
+win_export/
+web_export/
+android/
+
+# 编辑器与系统
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地调试
+user://
+*.cfg.local
