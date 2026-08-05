@@ -1,0 +1,78 @@
+name: Build and deploy to VibeHub
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: vibehub-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Godot 4.7.1 and export templates
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o godot.zip \
+            https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip
+          curl -fsSL --retry 3 -o templates.tpz \
+            https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_export_templates.tpz
+          unzip -q godot.zip
+          mkdir -p templates_tmp
+          unzip -q templates.tpz -d templates_tmp
+          mkdir -p "$HOME/.local/share/godot/export_templates/4.7.1.stable"
+          cp -r templates_tmp/templates/* "$HOME/.local/share/godot/export_templates/4.7.1.stable/"
+
+      - name: Build static site
+        run: |
+          mkdir -p web_export
+          ./Godot_v4.7.1-stable_linux.x86_64 --headless --path . --export-release "Web" web_export/index.html
+
+      - name: Install verified VibeHub CLI
+        if: github.event_name == 'push'
+        run: |
+          installer="$(mktemp)"
+          curl -fsSL --retry 3 https://vibe.lumigrav.space/downloads/vibehub-cli/install.sh -o "$installer"
+          sh "$installer"
+          rm -f "$installer"
+
+      - name: Create concise release note
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pull_request="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+              --jq '.[0] | select(.) | "PR #\(.number) · \(.head.ref) · \(.title)"' \
+              2>/dev/null || true
+          )"
+          if [ -n "$pull_request" ]; then
+            release_note="$pull_request"
+          else
+            commit_title="$(git log -1 --pretty=%s)"
+            release_note="直接推送 · ${commit_title:0:1000}"
+          fi
+          printf '%s\n' "$release_note" > "$RUNNER_TEMP/vibehub-release-note.txt"
+
+      - name: Publish built files
+        if: github.event_name == 'push'
+        env:
+          VIBEHUB_TOKEN: ${{ secrets.VIBEHUB_PROJECT_TOKEN }}
+        run: |
+          "$HOME/.local/bin/vibehub" update \
+            --slug y4UesI6v \
+            --dir web_export \
+            --note-file "$RUNNER_TEMP/vibehub-release-note.txt"
