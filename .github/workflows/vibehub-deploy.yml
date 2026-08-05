@@ -33,7 +33,9 @@ jobs:
           cp -r templates_tmp/templates/* "$HOME/.local/share/godot/export_templates/4.7.1.stable/"
 
       - name: Build static site
-        run: ./Godot_v4.7.1-stable_linux.x86_64 --headless --path . --export-release "Web" web_export/index.html
+        run: |
+          mkdir -p web_export
+          ./Godot_v4.7.1-stable_linux.x86_64 --headless --path . --export-release "Web" web_export/index.html
 
       - name: Install verified VibeHub CLI
         if: github.event_name == 'push'
