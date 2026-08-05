@@ -37,9 +37,6 @@ jobs:
           mkdir -p web_export
           ./Godot_v4.7.1-stable_linux.x86_64 --headless --path . --export-release "Web" web_export/index.html
 
-      - name: Inspect export files
-        run: ls -laR web_export
-
       - name: Install verified VibeHub CLI
         if: github.event_name == 'push'
         run: |
