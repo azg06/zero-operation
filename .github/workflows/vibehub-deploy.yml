@@ -3,7 +3,7 @@ name: Build and deploy to VibeHub
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -19,23 +19,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Godot 4.7.1 and export templates
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 3 -o godot.zip \
-            https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip
-          curl -fsSL --retry 3 -o templates.tpz \
-            https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_export_templates.tpz
-          unzip -q godot.zip
-          mkdir -p templates_tmp
-          unzip -q templates.tpz -d templates_tmp
-          mkdir -p "$HOME/.local/share/godot/export_templates/4.7.1.stable"
-          cp -r templates_tmp/templates/* "$HOME/.local/share/godot/export_templates/4.7.1.stable/"
-
+      # Agent: replace this block after detecting the repository's package manager and build script.
       - name: Build static site
         run: |
-          mkdir -p web_export
-          ./Godot_v4.7.1-stable_linux.x86_64 --headless --path . --export-release "Web" web_export/index.html
+          mkdir -p web_export && curl -fsSL --retry 3 -o godot.zip https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip && curl -fsSL --retry 3 -o templates.tpz https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_export_templates.tpz && unzip -q godot.zip && mkdir -p templates_tmp && unzip -q templates.tpz -d templates_tmp && mkdir -p $HOME/.local/share/godot/export_templates/4.7.1.stable && cp -r templates_tmp/templates/* $HOME/.local/share/godot/export_templates/4.7.1.stable/ && ./Godot_v4.7.1-stable_linux.x86_64 --headless --path . --export-release Web web_export/index.html
 
       - name: Install verified VibeHub CLI
         if: github.event_name == 'push'
