@@ -41,6 +41,10 @@ func _gui_input(event: InputEvent) -> void:
 		for d in G.deployables:
 			if d["kind"] != "beacon" or d["team"] != G.player.team:
 				continue
+			if G.mode == "breakthrough" and G.bt != null:
+				var dz: float = d["pos"].z
+				if (dz < G.game.bt_rear_z()) if G.player.team == "ru" else (dz > G.game.bt_front_z()):
+					continue
 			if Vector2(d["pos"].x - wx, d["pos"].z - wz).length() < 16:
 				G.hud.spawn_point = d
 				G.hud.spawn_mate = null
@@ -63,7 +67,7 @@ func _gui_input(event: InputEvent) -> void:
 		var best = null
 		var bd := 24.0
 		for f in G.flags:
-			if f.owner_team != G.player.team:
+			if f.owner_team != G.player.team or (G.mode == "breakthrough" and f.zone_locked):
 				continue
 			var d := Vector2(f.pos.x - wx, f.pos.z - wz).length()
 			if d < bd:
@@ -95,8 +99,11 @@ func _draw() -> void:
 	for f in G.flags:
 		var cx := _w2m(f.pos.x, ws, s)
 		var cy := _w2m(f.pos.z, ws, s)
+		var locked: bool = G.mode == "breakthrough" and f.zone_locked
 		var col: Color
-		if f.contested:
+		if locked:
+			col = Color(0.45, 0.49, 0.53)
+		elif f.contested:
 			col = UiTheme.WARN.lerp(Color(1, 1, 1), 0.5 + sin(_blink * 8) * 0.5)
 		elif f.owner_team != null:
 			col = UiTheme.FRIENDLY if f.owner_team == G.player.team else UiTheme.ENEMY
@@ -105,6 +112,19 @@ func _draw() -> void:
 		draw_circle(Vector2(cx, cy), 8, Color(col.r, col.g, col.b, 0.32))
 		draw_arc(Vector2(cx, cy), 8, 0, TAU, 24, col, 1.6)
 		draw_string(UiTheme.font(), Vector2(cx - 5, cy + 4), f.id, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color.WHITE)
+		if locked:
+			draw_string(UiTheme.font(), Vector2(cx - 5, cy + 18), "锁", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.62, 0.66, 0.7))
+	# 突破模式:前沿封锁线(下一区域未开放)+ 防守方后撤线(已攻陷区域禁入)
+	if G.mode == "breakthrough" and G.bt != null:
+		var lock_col := Color(UiTheme.WARN.r, UiTheme.WARN.g, UiTheme.WARN.b, 0.8)
+		var fz: float = G.game.bt_front_z()
+		var ly := _w2m(fz, ws, s)
+		draw_line(Vector2(0, ly), Vector2(s, ly), lock_col, 1.5)
+		draw_string(UiTheme.font(), Vector2(0, ly - 6), "未开放区域封锁线", HORIZONTAL_ALIGNMENT_CENTER, s, 11, lock_col)
+		if G.player.team == "ru":
+			var rz: float = G.game.bt_rear_z()
+			var ry := _w2m(rz, ws, s)
+			draw_line(Vector2(0, ry), Vector2(s, ry), Color(lock_col.r, lock_col.g, lock_col.b, 0.45), 1.0)
 	# 载具图标:有人驾驶的己方载具(青色方块)
 	for v in G.vehicles:
 		if v.dead or v.driver == null:
@@ -149,7 +169,7 @@ func _draw() -> void:
 			Color(UiTheme.FRIENDLY.r, UiTheme.FRIENDLY.g, UiTheme.FRIENDLY.b, 0.8), 2.2)
 	# 己方控制点位:可点击部署到前线
 	for f in G.flags:
-		if f.owner_team != G.player.team:
+		if f.owner_team != G.player.team or (G.mode == "breakthrough" and f.zone_locked):
 			continue
 		var x := _w2m(f.pos.x, ws, s)
 		var y := _w2m(f.pos.z, ws, s)

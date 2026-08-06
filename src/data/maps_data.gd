@@ -75,11 +75,11 @@ static func build_maps() -> Dictionary:
 	jungle.ground_photo = "rock_04"; jungle.tiles = 9; jungle.base_color = Color.html("#55663c")
 	jungle.road_color = Color(0.47, 0.39, 0.26, 0.55); jungle.rut_color = Color(0.29, 0.24, 0.15, 0.5)
 	jungle.plaza_color = Color(0.51, 0.44, 0.29, 0.6)
-	jungle.river = -42.0
+	jungle.river = -55.0
 	jungle.sectors = [
-		[{ "id": "A", "x": -26, "z": -80 }, { "id": "B", "x": 24, "z": -76 }],
-		[{ "id": "A", "x": -24, "z": -8 }, { "id": "B", "x": 26, "z": 4 }],
-		[{ "id": "A", "x": -26, "z": 76 }, { "id": "B", "x": 24, "z": 80 }],
+		[{ "id": "A", "x": -26, "z": -110 }, { "id": "B", "x": 24, "z": -106 }],
+		[{ "id": "A", "x": -24, "z": -6 }, { "id": "B", "x": 26, "z": 2 }],
+		[{ "id": "A", "x": -26, "z": 106 }, { "id": "B", "x": 24, "z": 110 }],
 	]
 	MD["bt_jungle"] = jungle
 
@@ -96,9 +96,9 @@ static func build_maps() -> Dictionary:
 	harbor.plaza_color = Color(0.29, 0.28, 0.26, 0.9)
 	harbor.sea = true
 	harbor.sectors = [
-		[{ "id": "A", "x": -28, "z": -82 }, { "id": "B", "x": 26, "z": -78 }],
-		[{ "id": "A", "x": -25, "z": -6 }, { "id": "B", "x": 27, "z": 6 }],
-		[{ "id": "A", "x": -27, "z": 78 }, { "id": "B", "x": 25, "z": 82 }],
+		[{ "id": "A", "x": -28, "z": -110 }, { "id": "B", "x": 26, "z": -106 }],
+		[{ "id": "A", "x": -25, "z": -4 }, { "id": "B", "x": 27, "z": 4 }],
+		[{ "id": "A", "x": -27, "z": 106 }, { "id": "B", "x": 25, "z": 110 }],
 	]
 	MD["bt_harbor"] = harbor
 
@@ -115,9 +115,9 @@ static func build_maps() -> Dictionary:
 	peak.plaza_color = Color(0.35, 0.37, 0.4, 0.6)
 	peak.night = true
 	peak.sectors = [
-		[{ "id": "A", "x": -25, "z": -78 }, { "id": "B", "x": 27, "z": -82 }],
-		[{ "id": "A", "x": -27, "z": 4 }, { "id": "B", "x": 25, "z": -6 }],
-		[{ "id": "A", "x": -24, "z": 80 }, { "id": "B", "x": 26, "z": 76 }],
+		[{ "id": "A", "x": -25, "z": -108 }, { "id": "B", "x": 27, "z": -112 }],
+		[{ "id": "A", "x": -27, "z": 2 }, { "id": "B", "x": 25, "z": -8 }],
+		[{ "id": "A", "x": -24, "z": 110 }, { "id": "B", "x": 26, "z": 106 }],
 	]
 	MD["bt_peak"] = peak
 
