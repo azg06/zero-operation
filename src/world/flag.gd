@@ -8,6 +8,7 @@ var progress := 0.0                     # -100 .. 100
 var radius := 13.0
 var sector := 0                         # 突破模式区域号
 var locked := false
+var zone_locked := false                # 突破模式:该旗帜所在区域尚未解锁(封锁中)
 var contested := false
 var veh_slot = null                     # 旗帜绑定载具
 
@@ -153,6 +154,7 @@ func flag_color() -> Color:
 func update_flag(dt: float) -> void:
 	_t += dt
 	_cloth_mat.set_shader_parameter("wave_t", _t)
-	var col := flag_color()
+	# 突破模式封锁区域:整体置灰,提示尚未开放
+	var col := Color.html("#767676") if zone_locked else flag_color()
 	_cloth_mat.set_shader_parameter("albedo", col)
-	_ring_mat.albedo_color = Color(col, 0.45 + sin(_t * 4) * 0.15)
+	_ring_mat.albedo_color = Color(col, 0.28 if zone_locked else 0.45 + sin(_t * 4) * 0.15)

@@ -38,6 +38,7 @@ enabled=PackedStringArray("sky_3d", "minimize_html_build")
 [rendering]
 
 renderer/rendering_method.mobile="forward_plus"
+renderer/rendering_method.web="gl_compatibility"
 textures/vram_compression/import_etc2_astc=true
 lights_and_shadows/directional_shadow/size=8192
 lights_and_shadows/directional_shadow/soft_shadow_filter_quality=3

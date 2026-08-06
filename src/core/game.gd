@@ -4,6 +4,9 @@
 var drain_t := 0.0
 var arty = null                        # 炮火支援 { pos, shells, interval, t }
 var nv_spot_t := 0.0                   # 夜视仪索敌计时(每 0.3s 刷新标记)
+var _bt_oob := {}                      # 突破模式越界遣返 { actor -> 剩余宽限秒 }
+const BT_OOB_PLAYER := 2.8             # 玩家越界宽限(秒)
+const BT_OOB_BOT := 0.9                # AI 越界宽限(秒)
 
 
 ## def 字段访问(兼容 WeaponDef / Dictionary / null)
@@ -96,6 +99,10 @@ func setup_map(map_id: String) -> void:
 			f.owner_team = "ru"
 			f.progress = -100
 		G.bt = { "sector": 0, "total": T.sectors.size() }
+		_bt_oob.clear()
+		# 未解锁的区域整体封锁(旗帜置灰 / 不可部署 / 闯入即遣返)
+		for f in G.flags:
+			f.zone_locked = f.sector > 0
 	# 空中单位(仅征服模式)
 	for a in G.aircraft:
 		a.dispose()
@@ -253,14 +260,17 @@ func deploy(class_id: String, loadout) -> void:
 		var px = sm.pos.x + cos(a) * r
 		var pz = sm.pos.z + sin(a) * r
 		G.player.spawn(Vector3(px, G.ground_h.call(px, pz) if G.ground_h.is_valid() else 0.0, pz))
-	elif sp != null and sp is Dictionary and sp.get("kind") == "beacon" and sp["team"] == G.player.team:
+	elif sp != null and sp is Dictionary and sp.get("kind") == "beacon" and sp["team"] == G.player.team \
+			and (G.mode != "breakthrough" or G.bt == null \
+				or ((sp["pos"].z >= bt_rear_z()) if G.player.team == "ru" else (sp["pos"].z <= bt_front_z()))):
 		# 重生信标部署(侦察兵部署点)
 		var a3 := Utils.rand(TAU)
 		var r3 := Utils.rand(2, 4)
 		var px3 = sp["pos"].x + cos(a3) * r3
 		var pz3 = sp["pos"].z + sin(a3) * r3
 		G.player.spawn(Vector3(px3, G.ground_h.call(px3, pz3) if G.ground_h.is_valid() else 0.0, pz3))
-	elif sp != null and sp.owner_team == G.player.team:
+	elif sp != null and sp.owner_team == G.player.team \
+			and (G.mode != "breakthrough" or G.bt == null or sp.sector <= G.bt["sector"]):
 		var a2 := Utils.rand(TAU)
 		var r2 := Utils.rand(6, 12)
 		var px2 = sp.pos.x + cos(a2) * r2
@@ -304,6 +314,10 @@ func spawn_actor(actor) -> void:
 	var beacons := []
 	for d in G.deployables:
 		if d["kind"] == "beacon" and d["team"] == team:
+			if G.mode == "breakthrough" and G.bt != null:
+				var bz2: float = d["pos"].z
+				if (bz2 < bt_rear_z()) if team == "ru" else (bz2 > bt_front_z()):
+					continue
 			beacons.append(d["pos"])
 	if not beacons.is_empty() and randf() < 0.4:
 		pos = Utils.choice(beacons)
@@ -887,6 +901,7 @@ func update_game(dt: float) -> void:
 
 	if G.mode == "breakthrough":
 		_update_breakthrough(dt)
+		_update_bt_zones(dt)
 	else:
 		_update_conquest(dt)
 
@@ -959,11 +974,122 @@ func _update_breakthrough(dt: float) -> void:
 		if G.bt["sector"] >= G.bt["total"]:
 			end_match(true)
 			return
+		# 下一区域解锁(封锁解除,可部署可进入)
+		for f in G.flags:
+			if f.sector == G.bt["sector"]:
+				f.zone_locked = false
+				f.contested = false
 		G.hud.banner("区域已突破!兵力值 +100 — 向第 " + str(G.bt["sector"] + 1) + "/" + str(G.bt["total"]) + " 区域推进!")
 		AudioSys.capture(true)
 		# 攻守双方重新规划目标
 		for b in G.bots:
 			b.pick_objective(true)
+
+
+## ============ 突破模式:区域封锁(未解锁区域禁止进入/部署) ============
+## 前沿封锁线:当前区域与下一区域之间的分界线(双方都不可越过)
+func bt_front_z() -> float:
+	if G.bt == null:
+		return G.world_size - 8.0
+	var sec: int = G.bt["sector"]
+	var mx := -INF
+	var mn := INF
+	for f in G.flags:
+		if f.sector == sec:
+			mx = maxf(mx, f.pos.z)
+		elif f.sector == sec + 1:
+			mn = minf(mn, f.pos.z)
+	if is_inf(mn):
+		# 最后区域:前沿止于防守方基地之前,进攻方不能冲进对方出生点
+		return (mx + (G.world_size - 16.0)) / 2.0
+	return (mx + mn) / 2.0
+
+
+## 后撤封锁线:防守方不得进入已攻陷区域(进攻方可以自由回到后方)
+func bt_rear_z() -> float:
+	if G.bt == null:
+		return -(G.world_size - 8.0)
+	var sec: int = G.bt["sector"]
+	var mx := -INF
+	var mn := INF
+	for f in G.flags:
+		if f.sector == sec - 1:
+			mx = maxf(mx, f.pos.z)
+		elif f.sector == sec:
+			mn = minf(mn, f.pos.z)
+	if is_inf(mx):
+		# 第一区域:后撤线止于进攻方基地之前,防守方不能冲进对方出生点
+		return (mn + (-(G.world_size - 16.0))) / 2.0
+	return (mx + mn) / 2.0
+
+
+## 是否越界:进攻方不可越过前沿;防守方不可越过前沿,也不可退回已攻陷区域
+func _bt_is_oob(team: String, z: float) -> bool:
+	if team == "us":
+		return z > bt_front_z()
+	return z < bt_rear_z()
+
+
+## 越界遣返目标点:双方各自当前区域的出生线
+func _bt_kick_pos(team: String) -> Vector3:
+	if G.bt != null and G.bt_spawns != null:
+		var sec: int = mini(G.bt["sector"], G.bt_spawns["att"].size() - 1)
+		var arr: Array = G.bt_spawns["att"][sec] if team == "us" else G.bt_spawns["def"][sec]
+		if not arr.is_empty():
+			return Utils.choice(arr)
+	# 兜底:双方基地
+	var bz: float = (G.world_size - 16.0) if team == "ru" else -(G.world_size - 16.0)
+	return Vector3(0, 0, bz)
+
+
+## 将越界者遣返回己方战线(载具一并拉回)
+func _bt_kick(actor) -> void:
+	var target := _bt_kick_pos(actor.team)
+	var v = actor.get("vehicle") if actor.get("vehicle") != null else null
+	if v != null and is_instance_valid(v) and not v.dead:
+		v.pos = target
+		v.speed = 0.0
+		v.steer = 0.0
+		v.mesh.position = target
+		actor.pos = target
+	else:
+		actor.pos = target
+		actor.vel = Vector3.ZERO
+	if actor == G.player:
+		G.hud.hint("已返回战线 — 前方区域尚未开放!")
+
+
+## 每帧检查:进入封锁区域的玩家/AI 先警告,宽限结束后遣返
+func _update_bt_zones(dt: float) -> void:
+	if G.mode != "breakthrough" or G.bt == null or G.bt_spawns == null:
+		_bt_oob.clear()
+		return
+	if G.state != "playing":
+		_bt_oob.clear()
+		return
+	var actors: Array = []
+	if G.player != null and G.player.alive:
+		actors.append(G.player)
+	for b in G.bots:
+		if b.alive:
+			actors.append(b)
+	for a in actors:
+		var oob: bool = _bt_is_oob(a.team, a.pos.z)
+		if not oob:
+			if _bt_oob.has(a):
+				_bt_oob.erase(a)
+			continue
+		var t: float = _bt_oob.get(a, 0.0)
+		if t <= 0.0:
+			t = BT_OOB_PLAYER if a == G.player else BT_OOB_BOT
+			if a == G.player:
+				G.hud.hint("前方区域尚未开放,即将返回战线!")
+		t -= dt
+		if t <= 0.0:
+			_bt_oob.erase(a)
+			_bt_kick(a)
+		else:
+			_bt_oob[a] = t
 
 
 ## 点位易主 → 在该点位附近部署一辆载具
