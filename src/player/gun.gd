@@ -7,8 +7,10 @@ const ADS_POS := Vector3(0, -0.0755, -0.26)
 const ELBOW_R := Vector3(0.1, -0.46, 0.4)
 const ELBOW_L := Vector3(-0.11, -0.44, 0.36)
 
-var def                         # WeaponDef
+var def                         # WeaponDef(改装后为实例级副本,不污染全局表)
 var id := ""
+var mods_cfg := {}              # 改装配置 {槽位: 改装件id}(setup 时读档)
+var mag_cap := 30               # 应用 mag_ammo 后的弹匣上限(HUD 余量条/换弹判断基准)
 var player = null               # Player
 var group: Node3D = null        # 武器模型(vm_camera 子节点)
 var muzzle: Node3D = null
@@ -42,6 +44,14 @@ var shot_streak := 0              # 连射计数(后坐力/散布递增)
 var last_shot_t := -99.0
 var _kick_side := -1.0            # 水平后坐模式方向(左右交替)
 var kick_y := 0.0                 # 视角模型水平后坐
+# === 枪械改装应用后的运行时倍率(setup 时一次性计算,避免每帧开销) ===
+var _dmg_mult := 1.0
+var _reload_mult := 1.0
+var _recoil_mult := 1.0
+var _recoil_pitch_mult := 1.0
+var _hip_spread_mult := 1.0
+var _spread_mult := 1.0
+var _suppressed := false          # 消音器:射击静音
 
 var _mag: Node3D = null             # 弹匣(直插 MeshInstance3D 或弯弹匣 Node3D 根)
 var _mag_y0 := 0.0
@@ -52,9 +62,9 @@ var _bolt_base := Vector3.ZERO
 var _pump: MeshInstance3D = null
 var _pump_base := Vector3.ZERO
 var _slide: MeshInstance3D = null
-var _slide_base_x := 0.0
+var _slide_base_z := 0.0
 var _rocket: Node3D = null              # 火箭筒膛内弹(换弹时隐藏→装入)
-var _scope_model := false
+var scope_ads := false                  # 历史:4倍镜改装用(满开镜全屏放大+隐藏枪身);4x 移除后恒为 false,保留兼容(def.scope 驱动镜罩)
 var _bullet_type := 0                    # 0=rifle 1=sniper 2=shotgun 3=pistol
 
 var _right_hand: Node3D = null
@@ -72,7 +82,9 @@ func _init(weapon_id: String, p) -> void:
 	def = WeaponsData.W()[weapon_id]
 	id = weapon_id
 	player = p
-	group = WeaponModels.build(weapon_id, true)
+	_apply_mods()
+	# mods_cfg 已由上方 _apply_mods() 就绪(load_cfg 含默认标准件),传入后 viewmodel 挂载改装件
+	group = WeaponModels.build(weapon_id, true, mods_cfg)
 	muzzle = group.get_meta("muzzle")
 	ammo = def.mag
 	reserve = def.reserve
@@ -81,26 +93,27 @@ func _init(weapon_id: String, p) -> void:
 		_mag = group.get_meta("mag")
 		_mag_y0 = _mag.position.y
 		_mag_x0 = _mag.position.x
-	# 弹匣动画类型:AK/SVD 前挂后卡(侧摆),机枪弹鼓/弹链箱(旋转),其余直插(下沉)
+	# 弹匣动画类型:AK/SVD 前挂后卡(侧摆),机枪弹鼓/弹链箱(旋转),P90 顶置弹匣(上抽),其余直插(下沉)
 	_mag_anim = "down"
 	if weapon_id in ["ak", "svd"]:
 		_mag_anim = "side"
 	elif weapon_id in ["rpd", "m249", "pkm"]:
 		_mag_anim = "drum"
+	elif weapon_id == "p90":
+		_mag_anim = "up"
 	if group.has_meta("pump"):
 		_pump = group.get_meta("pump")
 		_pump_base = _pump.position
 	if group.has_meta("slide"):
 		_slide = group.get_meta("slide")
-	_slide_base_x = 0.0
+	_slide_base_z = 0.0
 	if _slide != null:
-		_slide_base_x = _slide.position.x
+		_slide_base_z = _slide.position.z
 	if group.has_meta("rocket"):
 		_rocket = group.get_meta("rocket")
 	if group.has_meta("bolt"):
 		_bolt = group.get_meta("bolt")
 		_bolt_base = _bolt.position
-	_scope_model = def.scope
 	_bullet_type = 0
 	if weapon_id in ["awm", "m24", "svd"]:
 		_bullet_type = 1
@@ -122,6 +135,48 @@ func _init(weapon_id: String, p) -> void:
 		_hand_l1 = Vector3(0, -0.1, -0.12)
 	_hip_pos = def.view_hip if def.view_hip != null else HIP_POS
 	_ads_pos = def.view_ads if def.view_ads != null else Vector3(0, -def.sight_y, def.ads_z)
+
+
+## 改装应用层:读档 → 聚合属性 → 构建实例级 def 副本(不污染 WeaponsData 全局表)
+func _apply_mods() -> void:
+	mods_cfg = WeaponModsData.load_cfg(id)
+	if mods_cfg.is_empty():
+		mag_cap = def.mag
+		return
+	var eff := WeaponModsData.total_effects(mods_cfg)
+	var applied := 0
+	for slot in mods_cfg:
+		if not WeaponModsData.effect_total(mods_cfg, slot).is_empty():
+			applied += 1
+	if applied > 0:
+		_dmg_mult = float(eff.get("dmg_mult", 1.0))
+		_reload_mult = float(eff.get("reload_mult", 1.0))
+		_recoil_mult = float(eff.get("recoil_mult", 1.0))
+		_recoil_pitch_mult = float(eff.get("recoil_pitch_mult", 1.0))
+		_hip_spread_mult = float(eff.get("hip_spread_mult", 1.0))
+		_spread_mult = float(eff.get("spread_mult", 1.0))
+		_suppressed = bool(eff.get("suppress", false))
+		# 静态属性写入 def 副本(伤害/射速/开镜速度/弹匣容量/备弹),运行时只读副本
+		var nd: WeaponsData.WeaponDef = WeaponModsData.clone_def(def)
+		nd.damage = def.damage * _dmg_mult
+		nd.rpm = maxf(10.0, def.rpm * float(eff.get("fire_rate_mult", 1.0)))
+		nd.ads_time = maxf(0.02, def.ads_time / float(eff.get("ads_speed_mult", 1.0)))
+		var mag_extra: int = int(eff.get("mag_ammo", 0))
+		nd.mag = maxi(1, def.mag + mag_extra)
+		nd.reserve = maxi(0, def.reserve + mag_extra)
+		def = nd
+	# === optic 视野决策:红点/全息近无放大(BF 手感);4倍镜改装已移除 ===
+	# 决策规则:改装件 id 判定(opt_std 不干预);狙击枪(def.scope)自带 zoom_fov 数据值更小,
+	# 任何 optic 改装都不覆盖其 zoom(红点/全息只换镜模型),避免削弱狙击本体的开镜倍率。
+	var optic_id: String = String(mods_cfg.get("optic", "opt_std"))
+	if (optic_id == "opt_reddot" or optic_id == "opt_holo") and not def.scope:
+		# 红点/全息:近无放大(仅轻微收 FOV 的 BF 手感);狙击不覆盖
+		# 纯标准件组合时 def 仍是全局表引用:先构建副本再写,不污染 WeaponsData 全局表
+		if def == WeaponsData.W()[id]:
+			def = WeaponModsData.clone_def(def)
+		def.zoom_fov = 78.0
+	mag_cap = def.mag
+	print("[MODS] %s 应用了 %d 个改装件" % [id, applied])
 
 
 func equip() -> void:
@@ -147,7 +202,7 @@ func can_ads() -> bool:
 func current_spread() -> float:
 	var d = def
 	var p = player
-	var s := lerpf(d.spread_hip, d.spread_ads, ads_amount)
+	var s := lerpf(d.spread_hip * _hip_spread_mult, d.spread_ads, ads_amount)
 	var speed := Vector2(p.vel.x, p.vel.z).length()
 	# 移动惩罚:腰射移动影响大,开镜大幅减免
 	s += d.spread_move * clampf(speed / 6.0, 0, 1) * (1 - ads_amount * 0.85)
@@ -163,7 +218,7 @@ func current_spread() -> float:
 		s += 2.2
 	s += p.suppression * 0.9  # 压制降低精度
 	s += bloom * (1 - ads_amount * 0.45)
-	return s * (PI / 180.0)
+	return s * _spread_mult * (PI / 180.0)
 
 
 func try_fire() -> void:
@@ -216,24 +271,24 @@ func try_fire() -> void:
 			dir = (dir + right * (cos(a) * r) + up * (sin(a) * r)).normalized()
 			# 弹道:下坠补偿 + 穿透 + 部位倍率(内部结算到 fire_hitscan)
 			Utils.ballistic_fire(p, def, G.camera.global_position, dir, mv)
-		AudioSys.shoot(def.kind, p.pos, true)
+		AudioSys.shoot_weapon(id, def.kind, p.pos, true, _suppressed)
 
 	# === 3A 后坐力曲线:首发高、连射递增、水平左右模式、开镜降低 ===
 	var ads_scale := lerpf(1.0, 0.62, ads_amount)
 	var k: float = def.recoil_first if shot_streak <= 0 else minf(1.0 + def.recoil_ramp * float(shot_streak), 1.5)
-	p.recoil_pitch += def.recoil_pitch * k * ads_scale * (PI / 180.0)
+	p.recoil_pitch += def.recoil_pitch * k * ads_scale * (_recoil_mult * _recoil_pitch_mult) * (PI / 180.0)
 	# 水平后坐:72% 概率换向(左右交替但有模式感)
 	if randf() < 0.72:
 		_kick_side = -_kick_side
-	p.recoil_yaw += _kick_side * Utils.rand(0.55, 1.0) * def.recoil_yaw * k * ads_scale * (PI / 180.0)
+	p.recoil_yaw += _kick_side * Utils.rand(0.55, 1.0) * def.recoil_yaw * k * ads_scale * _recoil_mult * (PI / 180.0)
 	# 摄像机微后坐(开火瞬间视角震动,随后坐力弹簧回正)
-	p.cam_kick_pitch += def.recoil_cam * k * (0.5 + ads_scale * 0.5)
-	p.cam_kick_yaw += _kick_side * Utils.rand(0.2, 0.7) * def.recoil_cam * 0.4 * k
+	p.cam_kick_pitch += def.recoil_cam * k * (0.5 + ads_scale * 0.5) * _recoil_mult
+	p.cam_kick_yaw += _kick_side * Utils.rand(0.2, 0.7) * def.recoil_cam * 0.4 * k * _recoil_mult
 	# 视角模型后坐:后缩 + 上仰 + 水平侧移(开镜收敛 80%,枪口不挡瞄准视野)
 	var vm_k := lerpf(1.0, 0.2, ads_amount)   # 腰射 1.0 不变;满开镜 0.2
-	kick_z += def.recoil_vm * k * vm_k
-	kick_rot += def.recoil_vm * 1.6 * k * vm_k
-	kick_y += Utils.rand(0.01, 0.024) * k * vm_k
+	kick_z += def.recoil_vm * k * vm_k * _recoil_mult
+	kick_rot += def.recoil_vm * 1.6 * k * vm_k * _recoil_mult
+	kick_y += Utils.rand(0.01, 0.024) * k * vm_k * _recoil_mult
 	# 连射散布递增(开镜减半)
 	bloom = minf(bloom + def.spread_bloom * (1.0 + 0.12 * float(shot_streak)), def.spread_bloom_max)
 	shot_streak = mini(shot_streak + 1, 9)
@@ -279,7 +334,11 @@ func try_fire() -> void:
 func _drop_mag() -> void:
 	if _mag == null:
 		return
-	G.effects.spawn_mag(_mag.global_position)
+	# _mag 属于 vm_camera(own_world_3d 独立 SubViewport)子树,其 global_position 是视角模型层
+	# 局部世界坐标,直接传入会把弹匣放到原点附近;与 muzzle_world_main 同约定:
+	# 经主相机全局变换把 视角模型层局部坐标 → 主世界坐标
+	var world_pos: Vector3 = G.camera.global_transform * (group.transform * _mag.position)
+	G.effects.spawn_mag(world_pos)
 
 
 ## 左手换弹路径
@@ -326,8 +385,36 @@ func _hand_path(t: float) -> Vector3:
 		return grip.lerp(A, ez.call((t - 0.86) / 0.14))
 
 
+## P90 顶置弹匣换弹专用左手轨迹:新弹匣全程绑定左手(随手动),不读 _mag.position(无循环依赖)
+## P := 弹匣插入位 Vector3(0, _mag_y0, -0.06);P_hand := P 下方 0.06 抓握位(弹匣在手背上 0.06)
+func _hand_path_up(t: float) -> Vector3:
+	var A := _hand_l0
+	var C := _hand_l2
+	var P := Vector3(0, _mag_y0, -0.06)
+	var P_hand := P - Vector3(0, 0.06, 0.015)
+	var grip_old := P + Vector3(0, -0.035, 0.012)   # 旧匣抓握位(参考 _hand_path 0-0.15 段)
+	var ez := func(x: float) -> float: return x * x * (3 - 2 * x)
+	if t < 0.15:
+		# 抓旧匣
+		return A.lerp(grip_old, ez.call(t / 0.15))
+	elif t < 0.55:
+		# 抽完匣,手回口袋(0.55 前回到屏外)
+		return grip_old.lerp(C, ez.call((t - 0.15) / 0.4))
+	elif t < 0.78:
+		# 从口袋拿出新匣举到插入位;x 加弧线先右绕再回中,避免穿枪身
+		var k: float = ez.call((t - 0.55) / 0.23)
+		var x := lerpf(C.x, P_hand.x, k) + sin(k * PI) * 0.12
+		return Vector3(x, lerpf(C.y, P_hand.y, k), lerpf(C.z, P_hand.z, k))
+	elif t < 0.86:
+		# 停留:放匣拍实
+		return P_hand
+	else:
+		# 收手回握把
+		return P_hand.lerp(A, ez.call((t - 0.86) / 0.14))
+
+
 func reload() -> void:
-	if reloading or ammo >= def.mag or reserve <= 0:
+	if reloading or ammo >= mag_cap or reserve <= 0:
 		return
 	reloading = true
 	reload_t = 0
@@ -337,13 +424,16 @@ func reload() -> void:
 	_reload_dur = _reload_duration()
 
 
-## 换弹时长:战术(余弹)> 空仓;霰弹枪按单发周期装填(每发 1 弹)
+## 换弹时长:战术(余弹)> 空仓;霰弹枪按单发周期装填(每发 1 弹);改装 reload_mult 全局倍率
 func _reload_duration() -> float:
+	var base: float
 	if def.pellets > 1:
-		return maxf(0.45, def.reload_time / float(def.mag))
-	if _tac:
-		return def.reload_tac if def.reload_tac > 0 else def.reload_time * 0.78
-	return def.reload_time
+		base = maxf(0.45, def.reload_time / float(def.mag))
+	elif _tac:
+		base = def.reload_tac if def.reload_tac > 0 else def.reload_time * 0.78
+	else:
+		base = def.reload_time
+	return base * _reload_mult
 
 
 func update(dt: float) -> void:
@@ -380,7 +470,7 @@ func update(dt: float) -> void:
 				# 霰弹枪:逐发上弹(每发 1 弹),未满则链式开始下一发
 				ammo += 1
 				reserve -= 1
-				if ammo < def.mag and reserve > 0:
+				if ammo < mag_cap and reserve > 0:
 					reload_t = 0
 					reload_stage = 0
 					_reload_dur = _reload_duration()
@@ -389,8 +479,9 @@ func update(dt: float) -> void:
 					reloading = false
 					_pump_last = true   # 最后一发(或装满)才泵动上膛
 			else:
-				# 战地真实规则:整匣更换,弹匣余弹丢弃
-				var take2: int = mini(def.mag, reserve)
+				# 整匣更换:弹匣余弹归还备用弹药,ammo+reserve 总数守恒
+				reserve += ammo
+				var take2: int = mini(mag_cap, reserve)
 				ammo = take2
 				reserve -= take2
 				reloading = false
@@ -518,6 +609,39 @@ func update(dt: float) -> void:
 					_mag.visible = true
 					_mag.rotation.z = 0
 					_mag.position.y = _mag_y0
+			elif _mag_anim == "up":
+				# P90 顶置弹匣(y+ 上方):向上抽出 → 掉落 → 左手从屏外口袋(_hand_l2)拿出新弹匣 → 拍实(向下拍入枪身,否则会穿进机匣)
+				# 幅度 0.14 参考直插的 0.16;P90 弹匣为 z 向长条(0.3,不算短),故保持 0.14
+				if t < 0.15:
+					_mag.visible = true
+					_mag.position.y = _mag_y0
+					_mag.rotation.z = 0
+				elif t < 0.32:
+					var k: float = ez.call((t - 0.15) / 0.17)
+					_mag.position.y = _mag_y0 + k * 0.14
+					_mag.rotation.z = sin(k * PI * 2) * 0.15
+				elif t < 0.55:
+					if _mag.visible:
+						_mag.visible = false
+						_mag.rotation.z = 0
+						_drop_mag()
+				elif t < 0.78:
+					# 新弹匣由左手从屏外口袋拿出(非凭空出现):弹匣全程绑定左手(_hand_path_up),
+					# 手沿弧线(先右绕再回中)绕过枪身举到插入位 P(0,y0,-0.06);弹匣位于左手上方
+					# (0,0.06,0.015),t=0.78 时恰落插入位(数学验证:P_hand+(0,0.06,0.015)=P ✓);
+					# t=0.55 时弹匣在 y≈-0.28 屏外,从屏外"拿出来"
+					_mag.visible = true
+					var k: float = ez.call((t - 0.55) / 0.23)
+					_mag.position = _hand_path_up(t) + Vector3(0, 0.06, 0.015)
+					_mag.rotation.z = 0.5 * (1 - k)
+				elif t < 0.86:
+					_mag.visible = true
+					_mag.position.y = _mag_y0 - sin((t - 0.78) / 0.08 * PI) * 0.012
+					_mag.rotation.z = 0
+				else:
+					_mag.visible = true
+					_mag.position.y = _mag_y0
+					_mag.rotation.z = 0
 			else:
 				if t < 0.15:
 					_mag.visible = true
@@ -538,8 +662,11 @@ func update(dt: float) -> void:
 				else:
 					_mag.visible = true
 					_mag.position.y = _mag_y0
-		# 左手路径(跟随弹匣)
-		_left_hand.position = _hand_path(t)
+		# 左手路径:P90 换弹走 up 专用轨迹(新弹匣绑手),其余武器保持原轨迹
+		if _mag_anim == "up" and reloading:
+			_left_hand.position = _hand_path_up(t)
+		else:
+			_left_hand.position = _hand_path(t)
 		# 火箭筒:膛内弹抽出→装入
 		if _rocket != null:
 			_rocket.visible = not (t > 0.15 and t < 0.78)
@@ -557,13 +684,13 @@ func update(dt: float) -> void:
 		# 霰弹枪:装填完毕泵动上膛(仅空仓链式装填的最后一发)
 		if _pump != null and t > 0.88 and pump_t <= 0 and not _tac and _pump_last:
 			pump_t = 0.0001
-		# 手枪专属:末尾套筒后拉上膛(沿枪管轴)
+		# 手枪专属:末尾套筒后拉上膛(沿枪管轴 z:向后拉再复位,枪口朝 -Z,套筒 z 长 0.19-0.24,0.03 行程≈15%)
 		if _slide != null and not _tac:
 			if t > 0.84 and t < 0.97:
 				var st := (t - 0.84) / 0.13
-				_slide.position.x = _slide_base_x - sin(st * PI) * 0.03
+				_slide.position.z = _slide_base_z + sin(st * PI) * 0.03
 			else:
-				_slide.position.x = _slide_base_x
+				_slide.position.z = _slide_base_z
 		# 落定抖动
 		if t > 0.82 and t < 0.96:
 			var s2 := sin((t - 0.82) / 0.14 * PI)
@@ -620,10 +747,13 @@ func update(dt: float) -> void:
 			if _pump != null:
 				_pump.position = _pump_base
 		elif _pump != null:
-			_pump.position.x = _pump_base.x - sin(pt * PI) * 0.06
+			# 泵动护木沿枪管轴 z 前后运动:护木(cyl z 轴长 0.12)位于枪身前段 z=-0.34,枪口朝 -Z;
+			# 负 sin = 先向 -Z(朝枪口)前推再复位,即装填完毕"推弹入膛"的收尾微动(完整后拉上膛相位含在 0.45s 泵动内),
+			# 幅度 0.06 ≈ 护木长度一半,行程醒目
+			_pump.position.z = _pump_base.z - sin(pt * PI) * 0.06
 			g.rotation.x += sin(pt * PI) * 0.06
-	# 狙击开镜:全屏放大 + 镜模型遮罩,隐藏枪身模型
-	if def.scope:
+	# === 旧方案恢复:镜罩武器(def.scope 狙击,scope_ads 兼容位)满开镜隐藏枪身,2D 镜罩接管画面 ===
+	if def.scope or scope_ads:
 		g.visible = ads_amount < 0.7 and draw_t > 0.1
 
 

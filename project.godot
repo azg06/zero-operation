@@ -47,7 +47,7 @@ environment/ssao/half_size=false
 environment/ssil/half_size=false
 anti_aliasing/quality/use_debanding=true
 environment/screen_space_reflection/half_size=false
-environment/volumetric_fog/volume_size=96
+environment/volumetric_fog/volume_size=64
 
 [xr]
 

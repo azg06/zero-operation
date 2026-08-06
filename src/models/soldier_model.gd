@@ -26,21 +26,51 @@ static func _add(parent: Node3D, mesh: MeshInstance3D, x: float, y: float, z: fl
 	return mesh
 
 
+## 兵种皮肤配色(每兵种 3 套;standard 与无 skin 参数时完全一致)
+const SKINS := {
+	"assault": {
+		"standard": { "uniform": "#4a5548", "vest": "#3a4a5a", "helmet": "#3a4438", "gear": "#33382e", "gear2": "#565a44" },
+		"arctic": { "uniform": "#cfd6d8", "vest": "#aeb8bd", "helmet": "#dde2e4", "gear": "#8e979b", "gear2": "#bcc4c8", "cover": "#e8ecee", "strap": "#5a6670" },
+		"night": { "uniform": "#23262c", "vest": "#171a20", "helmet": "#2c2f36", "gear": "#0f1216", "gear2": "#1d2128", "cover": "#14181e", "strap": "#0a0d10" },
+	},
+	"engineer": {
+		"standard": { "uniform": "#8a6a3e", "vest": "#c07a34", "helmet": "#96682f", "gear": "#5c4a30", "gear2": "#7c6640" },
+		"desert": { "uniform": "#c4a46c", "vest": "#b08c50", "helmet": "#ccb074", "gear": "#8a7448", "gear2": "#a8905e", "cover": "#d8c088", "strap": "#a8905e" },
+		"black": { "uniform": "#3a3a40", "vest": "#26262c", "helmet": "#44444c", "gear": "#1c1c22", "gear2": "#32323a", "cover": "#101014", "strap": "#26262e" },
+	},
+	"support": {
+		"standard": { "uniform": "#4a5c44", "vest": "#3a4c38", "helmet": "#40503c", "gear": "#2c3a2c", "gear2": "#4e5e4a" },
+		"brown": { "uniform": "#5c4c3a", "vest": "#6e5838", "helmet": "#52442e", "gear": "#3a3228", "gear2": "#5e4e3a", "cover": "#6a5638", "strap": "#463a2a" },
+		"gray": { "uniform": "#5a5e64", "vest": "#484c52", "helmet": "#62666c", "gear": "#34383e", "gear2": "#50545a", "cover": "#6e7278", "strap": "#3c4046" },
+	},
+	"recon": {
+		"standard": { "uniform": "#5c6c4a", "vest": "#4a5c3c", "helmet": "#54643f", "gear": "#38462c", "gear2": "#6c7c54" },
+		"urban": { "uniform": "#6e747a", "vest": "#585e64", "helmet": "#767c82", "gear": "#44484e", "gear2": "#62686e", "cover": "#82888e", "strap": "#50565c" },
+		"white": { "uniform": "#d8dcde", "vest": "#c2c8cc", "helmet": "#e4e8ea", "gear": "#a8aeb2", "gear2": "#ccd2d4", "cover": "#f0f2f4", "strap": "#b4babd" },
+	},
+}
+
+
 ## AI 士兵:膝关节双腿 + 可编程持枪臂组 + 兵种专属外观
 ## 返回 Node3D,meta: leg_l{thigh,knee}, leg_r, upper, rig
-static func build_soldier(team: String, weapon_id: String, class_id := "assault") -> Node3D:
+static func build_soldier(team: String, weapon_id: String, class_id := "assault", skin := "standard") -> Node3D:
 	var g := Node3D.new()
 	g.name = "Soldier"
 	var is_us: bool = team == "us"
-	var uniform := _mat(Color.html("#4a5548") if is_us else Color.html("#5a4a42"), 0.95)
-	var vest := _mat(Color.html("#3a4a5a") if is_us else Color.html("#6a3a32"), 0.9)
-	var skin := _mat(Color.html("#c8a080"), 0.8)
-	var helmet := _mat(Color.html("#3a4438") if is_us else Color.html("#4a3a34"), 0.85)
+	# 防御:未知皮肤 id(含跨兵种皮肤)一律回退本兵种 standard
+	var cl_skins: Dictionary = SKINS.get(class_id, SKINS["assault"])
+	if not cl_skins.has(skin):
+		skin = "standard"
+	var pal: Dictionary = cl_skins[skin]
+	var uniform := _mat(Color.html(pal["uniform"]), 0.95)
+	var vest := _mat(Color.html(pal["vest"]), 0.9)
+	var skin_mat := _mat(Color.html("#c8a080"), 0.8)
+	var helmet := _mat(Color.html(pal["helmet"]), 0.85)
 	var accent := _mat(Color.html("#00ff88") if is_us else Color.html("#ff5500"), 0.9, true)
-	var gear := _mat(Color.html("#33382e"), 0.92)                  # 装具深色
-	var gear2 := _mat(Color.html("#565a44"), 0.92)                 # 装具帆布色
-	var boot := _mat(Color.html("#26221e"), 0.9)                   # 靴
-	var brass := _mat(Color.html("#c8a860"), 0.5)                  # 弹链铜色
+	var gear := _mat(Color.html(pal["gear"]), 0.92)                  # 装具深色
+	var gear2 := _mat(Color.html(pal["gear2"]), 0.92)                # 装具帆布色
+	var boot := _mat(Color.html("#26221e"), 0.9)                     # 靴
+	var brass := _mat(Color.html("#c8a860"), 0.5)                    # 弹链铜色
 
 	# 腿:髋部枢轴(大腿) + 膝关节(小腿) + 护膝 + 靴
 	var mk_leg := func(x: float) -> Dictionary:
@@ -82,7 +112,7 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 	_add(upper, _box(0.44, 0.4, 0.28, vest), 0, 0.17, 0)          # 背心
 	_add(upper, _box(0.45, 0.05, 0.29, accent), 0, 0.35, 0)       # 队伍识别条
 	_add(upper, _box(0.4, 0.1, 0.26, gear), 0, 0.42, 0)           # 肩颈线/领口护具
-	_add(upper, _box(0.2, 0.22, 0.2, skin), 0, 0.57, 0)           # 头
+	_add(upper, _box(0.2, 0.22, 0.2, skin_mat), 0, 0.57, 0)           # 头
 	_add(upper, _box(0.24, 0.12, 0.24, helmet), 0, 0.69, 0)       # 头盔
 	_add(upper, _box(0.25, 0.03, 0.25, gear), 0, 0.635, 0)        # 头盔箍带
 	_add(upper, _box(0.06, 0.05, 0.05, gear), 0, 0.665, -0.13)    # 夜视仪座
@@ -145,6 +175,10 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 				st.rotation.z = -0.25 + i * 0.17
 				_add(upper, st, -0.18 + i * 0.12, 0.44, 0.06)
 
+	# 皮肤轻量装饰(头盔套/肩带/背包色块,仅非 standard 皮肤)
+	if skin != "standard":
+		_apply_skin_decor(upper, class_id, skin, pal)
+
 	# 持枪臂组(rig)
 	var rig := Node3D.new()
 	rig.position = Vector3(0, 0.35, 0)
@@ -166,6 +200,33 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 	return g
 
 
+## 皮肤轻量装饰:头盔套 + 双肩带 + 腰封 + 兵种色块 + 夜视仪(夜间/雪地)
+static func _apply_skin_decor(upper: Node3D, class_id: String, skin: String, pal: Dictionary) -> void:
+	var cover := _mat(Color.html(pal.get("cover", pal["helmet"])), 0.9)
+	var strap := _mat(Color.html(pal.get("strap", pal["gear2"])), 0.92)
+	_add(upper, _box(0.26, 0.022, 0.26, cover), 0, 0.752, 0)                 # 头盔套(盖住盔顶)
+	_add(upper, _box(0.09, 0.03, 0.27, strap), -0.13, 0.4, -0.02)             # 左肩带
+	_add(upper, _box(0.09, 0.03, 0.27, strap), 0.13, 0.4, -0.02)              # 右肩带
+	_add(upper, _box(0.4, 0.04, 0.02, strap), 0, 0.06, 0.14)                  # 腰封色带
+	match class_id:
+		"support":
+			_add(upper, _box(0.32, 0.3, 0.02, strap), 0, 0.18, 0.32)           # 背包盖布
+		"recon":
+			_add(upper, _box(0.2, 0.07, 0.05, cover), 0.16, 0.33, 0.19)        # 电台包盖
+			for i in 5:                                                        # 额外伪装布条
+				var st := _box(0.05, 0.14, 0.03, cover)
+				st.rotation.z = -0.3 + i * 0.2
+				_add(upper, st, -0.2 + i * 0.1, 0.46, 0.08)
+		"assault":
+			_add(upper, _box(0.1, 0.05, 0.04, strap), 0.08, 0.24, -0.17)       # 胸前袋盖
+		"engineer":
+			_add(upper, _box(0.34, 0.035, 0.21, strap), 0, 0.13, 0.05)         # 护胸横带
+	if skin == "night" or skin == "arctic":
+		var nvg := _mat(Color(0.1, 0.9, 0.3), 0.3, true)                       # 夜视仪(绿透镜)
+		_add(upper, _box(0.026, 0.02, 0.03, nvg), -0.035, 0.66, -0.128)
+		_add(upper, _box(0.026, 0.02, 0.03, nvg), 0.035, 0.66, -0.128)
+
+
 ## 圆柱网格助手(z 轴,供背筒/天线等)
 static func _cylx(rt: float, rb: float, h: float, mat: Material) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
@@ -180,12 +241,15 @@ static func _cylx(rt: float, rb: float, h: float, mat: Material) -> MeshInstance
 
 
 ## 玩家第一人称下半身(低头可见 + 投影)
+## skin: 皮肤 id(与 build_soldier 共用 SKINS 表;本身体无头/盔,采用 assault 兵种配色,
+##        standard 与旧版完全一致);未知皮肤 id 回退 standard
 ## 返回 Node3D,meta: leg_l{thigh,knee}, leg_r
-static func build_player_body() -> Node3D:
+static func build_player_body(skin := "standard") -> Node3D:
 	var g := Node3D.new()
 	g.name = "PlayerBody"
-	var uniform := _mat(Color.html("#4a5548"), 0.95)
-	var vest := _mat(Color.html("#3a4a5a"), 0.9)
+	var pal: Dictionary = SKINS.get("assault", SKINS["assault"]).get(skin, SKINS["assault"]["standard"])
+	var uniform := _mat(Color.html(pal["uniform"]), 0.95)
+	var vest := _mat(Color.html(pal["vest"]), 0.9)
 	var boot := _mat(Color.html("#2a2622"), 0.9)
 	var accent := _mat(Color.html("#00ff88"), 0.9, true)
 

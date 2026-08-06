@@ -73,6 +73,12 @@ var sus_phase := 0.0
 var sus_amp := 0.0
 var respawn_protect := 0.0         # 重生保护剩余时间:无敌 + 半透明闪烁,防原地 pop-in
 var _wreck_warned := false         # 残骸重生倒计时提示已播
+# === 渐进车损 + 残骸燃烧 ===
+var _damage_stage := 0             # 车损档位:0=完好 1=焦痕(<60%) 2=重度焦痕+冒烟(<30%)
+var _smoke_t := 0.0                # 重度车损冒烟间隔计时
+var _burn_t := 0.0                 # 残骸燃烧剩余时间(前 12s 火焰,后 6s 余烬只烟)
+var _burn_light: OmniLight3D = null
+var _burn_timer := 0.0             # 燃烧粒子发射间隔计时
 # === 卡死检测与脱困(滑动解析之外的兜底) ===
 var stuck_t := 0.0              # 持续踩油门但净位移极小的累计时间
 var stuck_net := Vector2.ZERO   # 卡死窗口内累计净位移(矢量求和,原地抖动互消)
@@ -141,7 +147,7 @@ func fire_cannon(shooter) -> void:
 	var md := muzzle_world()
 	var shell_def := { "damage": 230.0, "splash": 8.5, "speed": 75.0, "cn": "125mm 主炮", "name": "坦克主炮", "tracer": Color.html("#ffe0a0") }
 	G.effects.spawn_rocket(shooter, shell_def, md[0], md[1])
-	AudioSys.rpg_fire(pos)
+	AudioSys.veh_weapon(type, pos)
 	G.effects.muzzle(md[0], md[1], true)
 	G.effects.shake(1.1 if driver == G.player else 0.0)
 
@@ -163,7 +169,7 @@ func fire_auto(shooter) -> void:
 	# 弹道结算(下坠补偿 + 穿透 + 部位倍率)
 	Utils.ballistic_fire(shooter, w, md[0], dir, md[0])
 	G.effects.muzzle(md[0], dir, true)
-	AudioSys.shoot("lmg", pos, shooter == G.player)
+	AudioSys.veh_weapon(type, pos)
 
 
 func damage(amount: float, attacker) -> void:
@@ -181,6 +187,14 @@ func damage(amount: float, attacker) -> void:
 			G.hud.hint("引擎受损!动力大幅下降")
 	part_regen_t = 6.0
 	hp -= amount
+	# 渐进车损:按耐久比例两阶段焦痕材质(一次性 set,避免每帧重复)
+	var ratio: float = hp / float(def["hp"])
+	if ratio < 0.3 and _damage_stage < 2:
+		_damage_stage = 2
+		_apply_damage_material(Color.html("#2a2824"), 0.9)
+	elif ratio < 0.6 and _damage_stage < 1:
+		_damage_stage = 1
+		_apply_damage_material(Color.html("#3a3833"), 0.85)
 	if driver == G.player:
 		G.hud.hint("载具耐久 " + str(maxi(0, int(ceil(hp / def["hp"] * 100)))) + "%")
 	if hp <= 0:
@@ -243,8 +257,10 @@ func destroy(attacker) -> void:
 		if d == G.player:
 			d.exit_vehicle(true)
 			d.damage(300, pos, attacker, { "cn": "载具殉爆", "name": "殉爆" })
+			print("[CREW] 载具殉爆 type=%s driver=player 乘员必死" % type)
 		else:
-			d.take_damage(300, attacker, false, { "cn": "载具殉爆", "name": "殉爆" })
+			d.take_damage(9999.0, attacker, false, { "cn": "载具殉爆", "name": "殉爆" })
+			print("[CREW] 载具殉爆 type=%s driver=bot%d 乘员必死" % [type, d.id])
 	# 残骸外观
 	var wreck_mat := StandardMaterial3D.new()
 	wreck_mat.albedo_color = Color.html("#161412")
@@ -253,6 +269,69 @@ func destroy(attacker) -> void:
 	mesh.position.y -= 0.25
 	speed = 0
 	AudioSys.engine_stop()
+	_start_burn()
+
+
+## 残骸燃烧启动:12s 火焰 + 6s 余烬,橙色 OmniLight 挂残骸上方(纯视觉,不产生伤害)
+func _start_burn() -> void:
+	_burn_t = 18.0
+	_burn_timer = 0.0
+	if _burn_light == null:
+		_burn_light = OmniLight3D.new()
+		_burn_light.light_color = Color.html("#ff7a20")
+		_burn_light.omni_range = 9.0
+		_burn_light.light_energy = 1.1
+		_burn_light.shadow_enabled = false
+		add_child(_burn_light)
+	print("[BURN] 残骸燃烧开始 type=", type)
+
+
+func _stop_burn() -> void:
+	_burn_t = 0.0
+	_burn_timer = 0.0
+	if _burn_light != null:
+		_burn_light.queue_free()
+		_burn_light = null
+
+
+## 残骸燃烧更新:车体前中后 3 点喷火 + 少量烟(间隔 0.12-0.18s),
+## 灯光随燃烧时间 sin 闪烁衰减;12s 后余烬期只留烟,灯熄灭
+func _update_burn(dt: float) -> void:
+	var q: float = G.effects.fx_scale
+	if _burn_light != null:
+		_burn_light.position = pos + Vector3(0, def["seat"].y * 0.75, 0)
+	if _burn_t > 6.0:
+		_burn_timer -= dt
+		if _burn_timer <= 0:
+			_burn_timer = Utils.rand(0.12, 0.18)
+			var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
+			for k in 3:
+				var off := fwd * (k - 1) * float(def["radius"]) * 0.6
+				var p := pos + Vector3(off.x + Utils.rand(-0.4, 0.4),
+					def["seat"].y * 0.3 + Utils.rand(0.1, 0.5), off.z + Utils.rand(-0.4, 0.4))
+				if randf() < q:
+					G.effects.fire_spawn(p.x, p.y, p.z,
+						Utils.rand(-0.4, 0.4), Utils.rand(0.4, 1.1), Utils.rand(-0.4, 0.4),
+						Utils.rand(0.3, 0.55), Utils.rand(0.4, 0.7), Utils.rand(0.7, 1.3))
+				if randf() < 0.5:
+					G.effects.smoke_spawn(p.x, p.y, p.z,
+						Utils.rand(-0.3, 0.3), Utils.rand(1.0, 2.2), Utils.rand(-0.3, 0.3),
+						Utils.rand(0.5, 1.0), 0.2, 0.18, 0.16, -0.15, Utils.rand(0.8, 1.3))
+		var k := clampf(_burn_t / 12.0, 0.2, 1.0)
+		_burn_light.light_energy = 1.1 * k * (0.6 + 0.4 * sin(G.time * 26.0 + pos.x * 3.1))
+	elif _burn_light != null:
+		# 余烬期:只留烟,灯光熄灭
+		_burn_timer -= dt
+		if _burn_timer <= 0:
+			_burn_timer = Utils.rand(0.25, 0.4)
+			var p := pos + Vector3(Utils.rand(-0.8, 0.8), def["seat"].y * 0.4, Utils.rand(-0.8, 0.8))
+			G.effects.smoke_spawn(p.x, p.y, p.z,
+				Utils.rand(-0.3, 0.3), Utils.rand(1.2, 2.4), Utils.rand(-0.3, 0.3),
+				Utils.rand(0.8, 1.4), 0.24, 0.22, 0.2, -0.2, Utils.rand(1.0, 1.6))
+		_burn_light.light_energy = maxf(0.0, _burn_light.light_energy - dt * 2.0)
+		if _burn_light.light_energy <= 0.0:
+			_burn_light.queue_free()
+			_burn_light = null
 
 
 func _set_all_materials(node: Node, mat: Material) -> void:
@@ -260,6 +339,14 @@ func _set_all_materials(node: Node, mat: Material) -> void:
 		if o is MeshInstance3D:
 			o.material_override = mat
 		_set_all_materials(o, mat)
+
+
+## 车损焦痕材质一次性应用(比原色暗 35% 左右 + 高粗糙)
+func _apply_damage_material(color: Color, rough: float) -> void:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mat.roughness = rough
+	_set_all_materials(mesh, mat)
 
 
 func respawn() -> void:
@@ -289,6 +376,9 @@ func respawn() -> void:
 	sus_amp = 0
 	respawn_protect = 2.0
 	_wreck_warned = false
+	_stop_burn()
+	_damage_stage = 0
+	_smoke_t = 0.0
 	stuck_t = 0.0
 	stuck_net = Vector2.ZERO
 	unstuck_t = 0.0
@@ -388,12 +478,24 @@ func update_vehicle(dt: float) -> void:
 	if dead:
 		# 炸毁 10 秒后在出生点重新部署(末 2 秒提示,重生自带 2s 无敌保护)
 		wreck_t += dt
+		if _burn_t > 0 or _burn_light != null:
+			_burn_t = maxf(0.0, _burn_t - dt)
+			_update_burn(dt)
 		if wreck_t > 8 and not _wreck_warned:
 			_wreck_warned = true
 			G.hud.hint("载具即将在出生点重新部署(重生保护 2s)")
 		if wreck_t > 10:
 			respawn()
 		return
+	# 重度车损:车顶周期冒烟(0.5s 一次,参考 aircraft 冒烟参数)
+	if _damage_stage >= 2:
+		_smoke_t -= dt
+		if _smoke_t <= 0:
+			_smoke_t = 0.5
+			G.effects.smoke_spawn(
+				pos.x + Utils.rand(-0.35, 0.35), pos.y + def["seat"].y + Utils.rand(0.1, 0.4), pos.z + Utils.rand(-0.35, 0.35),
+				Utils.rand(-0.3, 0.3), Utils.rand(1.0, 2.2), Utils.rand(-0.3, 0.3),
+				Utils.rand(0.5, 1.0), 0.2, 0.18, 0.16, -0.15, Utils.rand(0.8, 1.3))
 	# 重生保护:2s 内无敌 + 半透明闪烁;玩家上车后立即正常显示
 	if respawn_protect > 0:
 		respawn_protect = maxf(0.0, respawn_protect - dt)
@@ -428,7 +530,7 @@ func update_vehicle(dt: float) -> void:
 					fire_cannon(driver)
 				else:
 					fire_auto(driver)
-		AudioSys.engine_update(speed * (0.5 if is_tank() else 1.0))
+		AudioSys.engine_update(speed, def["max_speed"])
 	elif driver != null and ai_input != null:
 		# ---- AI 驾驶 ----
 		var ai: Dictionary = ai_input
@@ -604,6 +706,7 @@ func update_vehicle(dt: float) -> void:
 
 
 func dispose() -> void:
+	_stop_burn()
 	queue_free()
 
 

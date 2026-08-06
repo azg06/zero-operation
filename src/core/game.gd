@@ -86,6 +86,10 @@ func setup_map(map_id: String) -> void:
 			if G.hud.spawn_point.get("kind") == "beacon":
 				G.hud.spawn_point = null  # 信标网格已销毁
 	# 突破模式:全部目标点初始由防守方控制,仅当前区域可争夺
+	# 防御:build_world 已对无效 map_id 安全返回,此处键访问前置校验防中途中止
+	if not MapsData.M().has(map_id):
+		push_error("[GAME] setup_map 收到无效地图 id: \"%s\",跳过突破/征服装配" % map_id)
+		return
 	var T = MapsData.M()[map_id]
 	if G.mode == "breakthrough" and T.mode == "breakthrough":
 		for f in G.flags:
@@ -123,7 +127,15 @@ func start_match(mode := "conquest") -> void:
 		if (m.mode if m.mode != "" else "conquest") == mode:
 			pool.append(id)
 	var sel: String = G.sel_maps.get(mode, "random")
+	# 防御:地图池为空(非法模式/无匹配地图)时中止开局,防 Utils.choice 返回 Nil 赋给 String
+	if pool.is_empty():
+		push_error("[GAME] 无可用地图(mode=%s),已中止开局" % mode)
+		return
 	var map_id: String = Utils.choice(pool) if sel == "random" else sel
+	# 防御:选中的地图 id 不存在时中止开局,防 MapsData.M()[id] 键访问错误
+	if not MapsData.M().has(map_id):
+		push_error("[GAME] 未知地图 id \"%s\",已中止开局" % map_id)
+		return
 	setup_map(map_id)
 	G.time = 0
 	G.stats = { "kills": 0, "deaths": 0 }
@@ -155,6 +167,10 @@ func _start_campaign() -> void:
 	var ch := _campaign_chapter()
 	# 兜底装配:main 未创建 Campaign 节点时由 game 自行创建(与菜单子智能体约定不冲突)
 	var cm = G.get("campaign")
+	# 防御:旧实例已失效(悬空引用)时置空重建,绝不 add_child 到已释放节点
+	if cm != null and not is_instance_valid(cm):
+		G.set("campaign", null)
+		cm = null
 	if cm == null:
 		cm = Campaign.new()
 		G.main.add_child(cm)
@@ -439,7 +455,8 @@ func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vecto
 
 
 ## ============ 重生信标(侦察兵:小队隐蔽重生点,持续 90 秒) ============
-func spawn_beacon(p_owner) -> void:
+## 部署物出生点前导(四类部署物共用):朝向(玩家=相机朝向,AI=yaw)→ 前方 dist 米 → 贴地抬升 lift
+func _deploy_front_pos(p_owner, dist: float, lift: float) -> Vector3:
 	var fwd: Vector3
 	if p_owner == G.player:
 		fwd = -G.camera.global_transform.basis.z
@@ -447,8 +464,13 @@ func spawn_beacon(p_owner) -> void:
 		fwd = Vector3(-sin(p_owner.yaw if p_owner.get("yaw") != null else 0.0), 0, -cos(p_owner.yaw if p_owner.get("yaw") != null else 0.0))
 	fwd.y = 0
 	fwd = fwd.normalized()
-	var pos: Vector3 = p_owner.pos + fwd * 1.5
-	pos.y = G.ground_h.call(pos.x, pos.z) if G.ground_h.is_valid() else 0.0
+	var pos: Vector3 = p_owner.pos + fwd * dist
+	pos.y = (G.ground_h.call(pos.x, pos.z) if G.ground_h.is_valid() else 0.0) + lift
+	return pos
+
+
+func spawn_beacon(p_owner) -> void:
+	var pos: Vector3 = _deploy_front_pos(p_owner, 1.5, 0.0)
 	var g := Node3D.new()
 	# 信标杆
 	var pole := MeshInstance3D.new()
@@ -490,15 +512,7 @@ func spawn_beacon(p_owner) -> void:
 
 ## ============ C5 炸药(突击兵:定时 4 秒,大威力反工事/载具) ============
 func spawn_c5(p_owner) -> void:
-	var fwd: Vector3
-	if p_owner == G.player:
-		fwd = -G.camera.global_transform.basis.z
-	else:
-		fwd = Vector3(-sin(p_owner.yaw if p_owner.get("yaw") != null else 0.0), 0, -cos(p_owner.yaw if p_owner.get("yaw") != null else 0.0))
-	fwd.y = 0
-	fwd = fwd.normalized()
-	var pos: Vector3 = p_owner.pos + fwd * 1.3
-	pos.y = (G.ground_h.call(pos.x, pos.z) if G.ground_h.is_valid() else 0.0) + 0.05
+	var pos: Vector3 = _deploy_front_pos(p_owner, 1.3, 0.05)
 	var g := Node3D.new()
 	var blk := MeshInstance3D.new()
 	var bm := BoxMesh.new()
@@ -537,15 +551,7 @@ func spawn_c5(p_owner) -> void:
 
 ## ============ 反坦克地雷(全员可部署:敌方载具靠近引爆) ============
 func spawn_at_mine(p_owner) -> void:
-	var fwd: Vector3
-	if p_owner == G.player:
-		fwd = -G.camera.global_transform.basis.z
-	else:
-		fwd = Vector3(-sin(p_owner.yaw if p_owner.get("yaw") != null else 0.0), 0, -cos(p_owner.yaw if p_owner.get("yaw") != null else 0.0))
-	fwd.y = 0
-	fwd = fwd.normalized()
-	var pos: Vector3 = p_owner.pos + fwd * 1.2
-	pos.y = (G.ground_h.call(pos.x, pos.z) if G.ground_h.is_valid() else 0.0) + 0.03
+	var pos: Vector3 = _deploy_front_pos(p_owner, 1.2, 0.03)
 	var g := Node3D.new()
 	var disc := MeshInstance3D.new()
 	var cm := CylinderMesh.new()
@@ -585,15 +591,7 @@ func spawn_at_mine(p_owner) -> void:
 
 ## ============ 工程兵弹药包(部署物:补给弹药 + 恢复生命) ============
 func spawn_ammo_pack(p_owner) -> void:
-	var fwd: Vector3
-	if p_owner == G.player:
-		fwd = -G.camera.global_transform.basis.z
-	else:
-		fwd = Vector3(-sin(p_owner.yaw if p_owner.get("yaw") != null else 0.0), 0, -cos(p_owner.yaw if p_owner.get("yaw") != null else 0.0))
-	fwd.y = 0
-	fwd = fwd.normalized()
-	var pos: Vector3 = p_owner.pos + fwd * 1.4
-	pos.y = G.ground_h.call(pos.x, pos.z) if G.ground_h.is_valid() else 0.0
+	var pos: Vector3 = _deploy_front_pos(p_owner, 1.4, 0.0)
 	# 建模:弹药箱(程序化)
 	var g := Node3D.new()
 	var box := MeshInstance3D.new()

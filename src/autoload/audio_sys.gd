@@ -12,6 +12,33 @@ const BUS_UI := "UI"
 ## 直通 SFX 总线时表现为"滋滋/嘶嘶"声,低通后保留脚步声主频、去掉噪声尾巴
 const BUS_STEPS := "Steps"
 
+## 武器 id → 专属枪声文件(audio/guns 子目录);无专属音的武器回退通用 shoot_* 采样
+const GUN_SOUND_FILES := {
+	"m4": "m4a1_single_shot", "ak": "ak47", "scar": "scar_h", "aug": "aug_a3",
+	"ump": "ump45", "deagle": "deserteagle", "g17": "glock17", "m93r": "m93r",
+	"p226": "p226", "p90": "p90", "mp5": "mp5", "pkm": "pkm", "rpd": "rpd",
+	"m249": "m249", "awm": "awm", "m24": "m24", "svd": "svd", "m1014": "m1014",
+	"spas12": "spas12", "m1911": "m1911",
+}
+## 响度补偿:源 wav 实测这 4 个枪声素材峰值过低(ump45=0.089/-21dB、aug_a3=0.114/-18.8dB、
+## p90=0.114/-18.8dB、glock17=0.130/-17.7dB,其余 16 个 0.17-1.0 正常),运行时按文件名增益
+## (不预处理 wav),补偿后估算峰值≈0.25-0.3,与其他枪听感一致;键必须对应 GUN_SOUND_FILES 值
+const GUN_GAIN := { "ump45": 3.0, "aug_a3": 2.2, "p90": 2.2, "glock17": 2.0 }
+## 载具类型 → [音频文件, 参考距离, 最大距离](audio/vehicles 子目录)
+const VEH_SOUND_FILES := {
+	"tank": ["tank_gun", 25, 280],
+	"apc": ["ifv_autocannon", 18, 190],
+	"aa": ["aa_gun", 18, 190],
+	"heli": ["attack_heli", 20, 220],
+	"jet": ["fighter_missile", 24, 250],
+}
+## 载具类型 → 引擎采样前缀(audio/engines 子目录,<prefix>_engine_v<N>.wav,按 N 升序为档位)。
+## 素材复用:apc 用 ifv 素材;heli/jet 为空中类型(aircraft.gd 自管,此处仅注册供参考)
+const ENGINE_GEAR_FILES := {
+	"tank": "tank", "ifv": "ifv", "apc": "ifv",
+	"aa": "aa", "jeep": "jeep", "heli": "heli", "jet": "fighter",
+}
+
 ## 地图 → 脚步材质映射
 const STEP_TERRAIN := {
 	"city": "concrete", "desert": "sand", "snow": "snow",
@@ -25,8 +52,13 @@ var _step_players: Array[AudioStreamPlayer] = []  # 脚步专用小池:不与枪
 var _played_3d: Array[bool] = []  # 曾播放标记:替换最远声源时跳过从未播放的闲置池成员
 var _p2d := 0
 var _step_i := 0
-var _engine_player: AudioStreamPlayer = null
-var _wind_player: AudioStreamPlayer = null
+var _eng_players: Array[AudioStreamPlayer] = []   # 引擎 A/B 双 player(档位交叉淡化交替)
+var _eng_streams: Array[AudioStreamWAV] = []      # 当前载具类型的档位采样(按档位升序)
+var _eng_gear := -1                               # 当前档位索引
+var _eng_active := 0                              # 当前档位所在 player 下标(0/1 交替)
+var _eng_fade_in_t := 0.0                         # 新档淡入剩余时长(>0 时音量由计时器爬升)
+var _eng_tween: Tween = null                      # 旧档淡出 tween(0.15s → -60dB 后停)
+var _eng_gain := 1.0                              # 响度补偿:地面引擎类型增益(aa=1.8/jeep=1.5/其余 1.0)
 var _ambient_on := false
 var _rumble_t := 0.0
 var _distant_t := 0.0
@@ -94,10 +126,11 @@ func _ensure_lowpass(bus: String, cutoff: float) -> void:
 	AudioServer.add_bus_effect(idx, lp)
 
 
-func _snd(snd_name: String) -> AudioStream:
-	if not _cache.has(snd_name):
-		_cache[snd_name] = load("res://audio/" + snd_name + ".wav")
-	return _cache[snd_name]
+func _snd(snd_name: String, sub := "") -> AudioStream:
+	var key := (sub + "/" if sub != "" else "") + snd_name
+	if not _cache.has(key):
+		_cache[key] = load("res://audio/" + (sub + "/" if sub != "" else "") + snd_name + ".wav")
+	return _cache[key]
 
 
 func set_volume(v: float) -> void:
@@ -120,21 +153,21 @@ func unlock() -> void:
 	pass  # Godot 无需手势解锁
 
 
-## 播放 2D 音效(玩家自身 / UI),可指定总线
-func _play_2d(stream_name: String, vol := 1.0, pitch := 1.0, bus := BUS_SFX) -> void:
+## 播放 2D 音效(玩家自身 / UI),可指定总线;sub 指定 audio/ 下子目录
+func _play_2d(stream_name: String, vol := 1.0, pitch := 1.0, bus := BUS_SFX, sub := "") -> void:
 	var p := _players_2d[_p2d]
 	_p2d = (_p2d + 1) % _players_2d.size()
 	# 池复用前先 stop:直接换流会残留旧流缓冲(采样不连续 → 咔哒/嘶声)
 	p.stop()
-	p.stream = _snd(stream_name)
+	p.stream = _snd(stream_name, sub)
 	p.bus = bus
 	p.volume_db = linear_to_db(maxf(vol, 0.001))
 	p.pitch_scale = pitch
 	p.play()
 
 
-## 播放 3D 定位音效(空间化:距离衰减 + 左右声道)
-func _play_3d(stream_name: String, pos: Vector3, ref_dist := 10.0, max_dist := 130.0, vol := 1.0, pitch := 1.0) -> void:
+## 播放 3D 定位音效(空间化:距离衰减 + 左右声道);sub 指定 audio/ 下子目录
+func _play_3d(stream_name: String, pos: Vector3, ref_dist := 10.0, max_dist := 130.0, vol := 1.0, pitch := 1.0, sub := "") -> void:
 	if G.camera == null:
 		return
 	var d := G.camera.global_position.distance_to(pos)
@@ -159,7 +192,7 @@ func _play_3d(stream_name: String, pos: Vector3, ref_dist := 10.0, max_dist := 1
 				p = pl
 	# 池复用先 stop 旧流:直接换流会残留旧流缓冲,采样不连续 → 咔哒/嘶声
 	p.stop()
-	p.stream = _snd(stream_name)
+	p.stream = _snd(stream_name, sub)
 	p.bus = BUS_SFX
 	p.unit_size = ref_dist
 	p.max_distance = max_dist
@@ -171,7 +204,7 @@ func _play_3d(stream_name: String, pos: Vector3, ref_dist := 10.0, max_dist := 1
 
 
 # ==================== 枪声(音量/音高微随机,避免机械感) ====================
-func shoot(kind: String, pos: Vector3, is_player: bool) -> void:
+func shoot(kind: String, pos: Vector3, is_player: bool, suppressed := false) -> void:
 	var snd := "shoot_" + kind
 	if kind == "dmr":
 		snd = "shoot_dmr"
@@ -180,11 +213,49 @@ func shoot(kind: String, pos: Vector3, is_player: bool) -> void:
 	var pv := Utils.rand(0.94, 1.06)
 	var vv := Utils.rand(0.9, 1.1)
 	if is_player:
-		_play_2d(snd, 0.9 * vv, pv)
-		# 3D 环境尾音:玩家枪声也带空间反射,更有层次
-		_play_3d(snd, pos, 26, 150, 0.2, Utils.rand(0.9, 1.08))
+		if suppressed:
+			# 消音器枪声:复用现有采样大幅降音量 + 降音高(亚音速闷响感),无独立消音采样
+			_play_2d(snd, 0.26 * vv, Utils.rand(0.78, 0.88))
+			_play_3d(snd, pos, 26, 150, 0.04, Utils.rand(0.8, 0.92))
+		else:
+			_play_2d(snd, 0.9 * vv, pv)
+			# 3D 环境尾音:玩家枪声也带空间反射,更有层次
+			_play_3d(snd, pos, 26, 150, 0.2, Utils.rand(0.9, 1.08))
 	else:
 		_play_3d(snd, pos, 14, 160, vv, pv)
+
+
+## 武器专属枪声:命中 GUN_SOUND_FILES 注册表的武器播放 audio/guns 专属采样,
+## 参数与 shoot() 一致(音量/音高微随机 + 消音分支);无专属音的武器回退 shoot(kind)
+func shoot_weapon(weapon_id: String, kind: String, pos: Vector3, is_player: bool, suppressed := false) -> void:
+	var snd: String = GUN_SOUND_FILES.get(weapon_id, "")
+	if snd.is_empty():
+		shoot(kind, pos, is_player, suppressed)
+		return
+	var pv := Utils.rand(0.94, 1.06)
+	var vv := Utils.rand(0.9, 1.1)
+	# 响度补偿:这 4 个低峰值枪声按 GUN_GAIN 增益(其余文件 gain=1 无变化),
+	# 玩家 2D 主体音、玩家 3D 尾音(按 0.9 基准等比例)、bot 3D 三处同步放大
+	var gain: float = GUN_GAIN.get(snd, 1.0)
+	if is_player:
+		if suppressed:
+			# 消音器枪声:复用现有采样大幅降音量 + 降音高(亚音速闷响感),无独立消音采样
+			_play_2d(snd, 0.26 * vv, Utils.rand(0.78, 0.88), BUS_SFX, "guns")
+			_play_3d(snd, pos, 26, 150, 0.04, Utils.rand(0.8, 0.92), "guns")
+		else:
+			_play_2d(snd, 0.9 * gain * vv, pv, BUS_SFX, "guns")
+			# 3D 环境尾音:玩家枪声也带空间反射,更有层次
+			_play_3d(snd, pos, 26, 150, 0.2 * gain / 0.9, Utils.rand(0.9, 1.08), "guns")
+	else:
+		_play_3d(snd, pos, 14, 160, vv * gain, pv, "guns")
+
+
+## 载具武器开火(坦克主炮/APC/AA 机炮/直升机机炮/战斗机导弹):audio/vehicles 专属采样
+func veh_weapon(type: String, pos: Vector3) -> void:
+	if not VEH_SOUND_FILES.has(type):
+		return
+	var e: Array = VEH_SOUND_FILES[type]
+	_play_3d(e[0], pos, e[1], e[2], 1.0, Utils.rand(0.95, 1.05), "vehicles")
 
 
 func rpg_fire(pos: Vector3) -> void:
@@ -246,8 +317,9 @@ func explosion(pos: Vector3) -> void:
 			_play_2d("rumble", Utils.rand(0.4, 0.75), Utils.rand(0.72, 0.9), BUS_AMBIENCE)
 		elif d < 45:
 			# 次声冲击(低音 rumble)+ 火球主体(explosion)同时爆发
+			# 新 explosion.wav(4s)响度与持续能量高于旧素材,2D 近距层音量下调防过响(0.45-0.8 → 0.3-0.55)
 			_play_2d("rumble", Utils.rand(0.5, 0.9), Utils.rand(0.5, 0.68))
-			_play_2d("explosion", Utils.rand(0.45, 0.8), Utils.rand(0.55, 0.75))
+			_play_2d("explosion", Utils.rand(0.3, 0.55), Utils.rand(0.55, 0.75))
 			# 0.15s 延迟补碎屑/迸裂层(跳弹金属 + 弹落声合成,低音量随机)
 			get_tree().create_timer(0.15).timeout.connect(func():
 				_play_2d("ricochet", Utils.rand(0.2, 0.4), Utils.rand(1.15, 1.5))
@@ -289,91 +361,122 @@ func lose() -> void:
 
 
 # ==================== 载具引擎 ====================
-func engine_start() -> void:
-	if _engine_player != null:
+## 按载具类型启动引擎循环音:加载该类型全部档位采样(文件名数字后缀 v0-v9 升序,
+## 档位编号可不连续,如 ifv 只有 v1/v2、aa 只有 v0/v2),
+## A/B 双 player 支持档位交叉淡化;类型未知/素材缺失回退 engine_loop(不崩溃)
+func engine_start(v_type := "") -> void:
+	if not _eng_players.is_empty():
 		return
-	_engine_player = AudioStreamPlayer.new()
-	var s: AudioStreamWAV = _snd("engine_loop")
-	s.loop_mode = AudioStreamWAV.LOOP_FORWARD
-	s.loop_begin = 0
-	s.loop_end = int(s.get_length() * s.mix_rate)
-	_engine_player.stream = s
-	_engine_player.bus = BUS_SFX
-	_engine_player.volume_db = linear_to_db(0.09)
-	add_child(_engine_player)
-	_engine_player.play()
+	# 响度补偿:aa_engine(-12dB)/jeep_engine(-12.6dB) 素材峰值偏低,tank 0.50/ifv 0.79-0.83 正常
+	# → aa×1.8、jeep×1.5,tank/ifv/apc ×1.0(heli/jet 走 aircraft.gd 自管,不经此处)
+	_eng_gain = 1.8 if v_type == "aa" else (1.5 if v_type == "jeep" else 1.0)
+	var streams: Array[AudioStreamWAV] = []
+	var base: String = ENGINE_GEAR_FILES.get(v_type, "")
+	if base != "":
+		for v in range(10):
+			var path := "res://audio/engines/%s_engine_v%d.wav" % [base, v]
+			if ResourceLoader.exists(path):
+				streams.append(_snd("%s_engine_v%d" % [base, v], "engines"))
+	if streams.is_empty():
+		streams.append(_snd("engine_loop"))
+	for s in streams:
+		s.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		s.loop_begin = 0
+		s.loop_end = int(s.get_length() * s.mix_rate)
+	for i in 2:
+		var p := AudioStreamPlayer.new()
+		p.bus = BUS_SFX
+		add_child(p)
+		_eng_players.append(p)
+	_eng_streams = streams
+	_eng_gear = 0
+	_eng_active = 0
+	_eng_fade_in_t = 0.0
+	_eng_players[0].stream = _eng_streams[0]
+	_eng_players[0].pitch_scale = 1.0
+	_eng_players[0].volume_db = linear_to_db(0.18 * _eng_gain)
+	_eng_players[0].play()
 
 
-func engine_update(speed: float) -> void:
-	if _engine_player == null:
+## 档位交叉淡化:旧档 player 0.15s 淡出至 -60dB 后停(避免换流咔哒声),
+## 新档采样载入另一 player 淡入(0.25s,淡入音量由 engine_update 计时器爬升)
+func _engine_set_gear(gear: int) -> void:
+	if gear == _eng_gear or gear >= _eng_streams.size():
 		return
-	var f := 42.0 + absf(speed) * 7.5
-	# 滋滋声消除:原公式音高无上限,吉普 17m/s 时 pitch≈4.03×,engine_loop 的
-	# ADPCM 量化噪声与发动机谐波被整体抬进 8-16kHz 形成持续"嘶/嗡";钳制上限 1.6
-	_engine_player.pitch_scale = clampf(f / 42.0, 0.05, 1.6)
-	_engine_player.volume_db = linear_to_db(maxf(0.09 + minf(absf(speed) * 0.006, 0.06), 0.0))
+	var old := _eng_players[_eng_active]
+	_eng_active = 1 - _eng_active
+	_eng_gear = gear
+	if _eng_tween != null:
+		_eng_tween.kill()
+	_eng_tween = old.create_tween()
+	_eng_tween.tween_property(old, "volume_db", -60.0, 0.15)
+	_eng_tween.tween_callback(old.stop)
+	var newp := _eng_players[_eng_active]
+	newp.stop()
+	newp.stream = _eng_streams[gear]
+	newp.pitch_scale = 1.0
+	newp.volume_db = linear_to_db(0.002)
+	newp.play()
+	_eng_fade_in_t = 0.25
+
+
+## 档位按转速比切换:|speed|/max_speed 归一:2 档 → ≤0.45 档0 否则档1;
+## 3 档 → ≤0.3/≤0.65/否则 档0/1/2;同时音高微调 0.9-1.15、音量 (0.18+speed*0.007)×_eng_gain
+## (上限放宽到 0.5,容纳 aa×1.8 后 0.35 目标音量的放大空间)
+func engine_update(speed: float, max_speed := 1.0) -> void:
+	if _eng_players.is_empty():
+		return
+	var ratio := clampf(absf(speed) / maxf(max_speed, 0.01), 0.0, 1.0)
+	var n := _eng_streams.size()
+	var gear := 0
+	if n == 2:
+		gear = 1 if ratio > 0.45 else 0
+	elif n >= 3:
+		gear = 2 if ratio > 0.65 else (1 if ratio > 0.3 else 0)
+	if gear != _eng_gear:
+		_engine_set_gear(gear)
+	var p := _eng_players[_eng_active]
+	p.pitch_scale = lerpf(0.9, 1.15, ratio)
+	var target_v := clampf((0.18 + absf(speed) * 0.007) * _eng_gain, 0.0, 0.5)
+	# 新档淡入期:音量由计时器从 0.002 爬升到目标值,避免瞬时跳变爆音
+	if _eng_fade_in_t > 0:
+		_eng_fade_in_t -= get_process_delta_time()
+		if _eng_fade_in_t > 0:
+			p.volume_db = linear_to_db(maxf(lerpf(0.002, target_v, 1.0 - _eng_fade_in_t / 0.25), 0.0))
+			return
+	p.volume_db = linear_to_db(maxf(target_v, 0.0))
 
 
 func engine_stop() -> void:
-	if _engine_player == null:
+	if _eng_players.is_empty():
 		return
-	_engine_player.stop()
-	_engine_player.queue_free()
-	_engine_player = null
+	if _eng_tween != null:
+		_eng_tween.kill()
+		_eng_tween = null
+	for p in _eng_players:
+		p.stop()
+		p.queue_free()
+	_eng_players.clear()
+	_eng_streams.clear()
+	_eng_gear = -1
+	_eng_active = 0
+	_eng_fade_in_t = 0.0
+	_eng_gain = 1.0
 
 
 # ==================== 环境音 ====================
-## 开旷地图(风感强):沙漠 / 雪地 / 海边码头
-const WIND_OPEN_MAPS := ["desert", "snow", "bt_harbor"]
-## 滋滋声排查:用户反馈持续的刺耳噪声/嘶嘶声,默认关闭环境风噪循环
-## (wind_loop.wav 为纯噪声采样,循环端点不干净时被感知为电流声;置回 true 即恢复)
-const WIND_ENABLED := false
-
-
-## 风音量:0.6 基础,夜间图弱化、开旷图增强;WIND_ENABLED=false 时静音
-func _wind_volume() -> float:
-	if not WIND_ENABLED:
-		return 0.0
-	var v := 0.6
-	var md = MapsData.M().get(G.current_map)
-	if md != null:
-		if md.night:
-			v = 0.35
-		elif G.current_map in WIND_OPEN_MAPS:
-			v = 0.75
-	return v
-
-
-func _update_wind_volume() -> void:
-	if _wind_player != null:
-		_wind_player.volume_db = linear_to_db(_wind_volume())
-
+## 环境氛围 = 远处闷响 + 远距战场枪声(_process 定时随机触发)。
+## 风噪循环已整体移除:wind_loop.wav 为 7.7s 单声道纯噪声采样,实测响度仅约
+## -51dBFS(峰值 -43dB)近乎不可闻,且循环端点不干净曾被用户反馈为持续
+## "嘶嘶/电流声"——与飞机引擎曾弃用该采样(wind_loop→engine_loop)为同源
+## 质量问题,无修复价值,故连资源文件一并删除(见 aircraft.gd:71 历史注释)。
 
 func start_ambient() -> void:
 	_ambient_on = true
-	if _wind_player != null:
-		_update_wind_volume()  # 换图后刷新风量(夜间弱/开旷强)
-		return
-	if not WIND_ENABLED:
-		return  # 风噪已关闭:不创建 wind 循环(远处闷响/远距枪声氛围层不受影响)
-	_wind_player = AudioStreamPlayer.new()
-	var s: AudioStreamWAV = _snd("wind_loop")
-	s.loop_mode = AudioStreamWAV.LOOP_FORWARD
-	s.loop_begin = 0
-	s.loop_end = int(s.get_length() * s.mix_rate)
-	_wind_player.stream = s
-	_wind_player.bus = BUS_AMBIENCE
-	_wind_player.volume_db = linear_to_db(_wind_volume())
-	add_child(_wind_player)
-	_wind_player.play()
 
 
 func stop_ambient() -> void:
 	_ambient_on = false
-	if _wind_player != null:
-		_wind_player.stop()
-		_wind_player.queue_free()
-		_wind_player = null
 
 
 func _process(delta: float) -> void:

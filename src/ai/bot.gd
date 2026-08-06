@@ -115,6 +115,7 @@ var _far_zone := false             # 附近无战事:低频思考/缩短索敌
 var _think_every := 0.14
 # ---- 战场噪音静态日志(听觉感知;cap 48 条环形丢弃) ----
 static var _noise_log: Array = []
+var _crew_pose := ""                # 乘员姿态日志状态:"" / "seat" / "hidden"(仅状态变化时打印)
 
 
 ## 战场噪音广播:队友/敌方开火、爆炸落点写入静态日志,供所有 bot 错峰读取
@@ -209,6 +210,12 @@ func die(attacker) -> void:
 	deaths += 1
 	death_t = 0
 	(hb["sprite"] as Sprite3D).visible = false
+	# 乘员死亡载具受损失控:死亡瞬间仍持有载具 → 车损 25%(残车保留,可被接管)
+	# 若载具已毁(殉爆场景 v.dead)则不重复扣损
+	var v_crew = vehicle
+	if v_crew != null and not v_crew.dead:
+		v_crew.hp = maxf(1, v_crew.hp - v_crew.def["hp"] * 0.25)
+		print("[CREW] bot=%d 乘员死亡载具受损失控 type=%s hp=%.0f" % [id, v_crew.type, v_crew.hp])
 	_release_vehicle()
 	# 布娃娃激活时掉落手中武器,尸体手中枪隐藏
 	G.effects.spawn_dropped_weapon(weapon_id, pos + Vector3(0, 1.1, 0))
@@ -349,6 +356,7 @@ func _release_vehicle() -> void:
 		vehicle = null
 	vehicle_goal = null
 	drive_stuck = 0
+	_crew_pose = ""
 
 
 func take_damage(amount: float, attacker, head: bool, from_def) -> void:
@@ -970,6 +978,34 @@ func _exit_vehicle() -> void:
 		pos = Utils.move_collide(pos, 0.38, 1.75)
 
 
+## 驾驶兜底目标:objective 为空(如战役队友 follow 模式不参与占点)时,
+## 选择合理去向避免向心空驶(地图中心 Vector3.ZERO 常为敌方基地):
+## 1) 编队跟随(战役队友):跟随玩家当前位置;
+## 2) 否则取最近己方/中立据点(突破模式限当前区域,不去敌方据点送);
+## 3) 无据点可去:以载具当前位置为圆心小半径绕行巡逻(方位随 id+时间缓变,错峰且无循环)
+func _drive_fallback_goal(v) -> Vector3:
+	if _is_following():
+		return Vector3(follow.pos.x, 0, follow.pos.z)
+	var best: Flag = null
+	var best_d := INF
+	for f in G.flags:
+		if not is_instance_valid(f):
+			continue
+		if G.mode == "breakthrough" and G.bt != null and f.sector != G.bt["sector"]:
+			continue
+		if f.owner_team != null and f.owner_team != team:
+			continue  # 敌方据点:不兜底过去送
+		var d := Utils.dist_2d(v.pos.x, v.pos.z, f.pos.x, f.pos.z)
+		if d < best_d:
+			best_d = d
+			best = f
+	if best != null:
+		return Vector3(best.pos.x, 0, best.pos.z)
+	# 无据点:绕当前位置小半径巡逻(方位随时间缓变,不构成脚本循环)
+	var a := G.time * 0.25 + float(id) * 1.7
+	return Vector3(v.pos.x + cos(a) * 22.0, 0, v.pos.z + sin(a) * 22.0)
+
+
 func _drive(dt: float) -> void:
 	var v = vehicle
 	if v == null or v.dead or v.driver != self:
@@ -993,8 +1029,13 @@ func _drive(dt: float) -> void:
 			target = null
 		if target == null:
 			pick_objective()
-	# 驶向目标点
-	var goal = Vector3(objective.pos.x, 0, objective.pos.z) if objective != null else Vector3.ZERO
+	# 驶向目标点:objective 为空/失效时用兜底目标(见 _drive_fallback_goal),
+	# 绝不放空驶向地图中心(Vector3.ZERO 直指敌方基地方向)
+	var goal: Vector3
+	if objective != null and is_instance_valid(objective):
+		goal = Vector3(objective.pos.x, 0, objective.pos.z)
+	else:
+		goal = _drive_fallback_goal(v)
 	var dx = goal.x - v.pos.x
 	var dz = goal.z - v.pos.z
 	var dist := Vector2(dx, dz).length()
@@ -1089,36 +1130,38 @@ func _drive(dt: float) -> void:
 		unstuck_t -= dt
 		v.ai_input["fwd"] = -0.85
 		v.ai_input["steer"] = -steer
-	# ---- 乘员模型:坐在驾驶位 / 舱盖探身 ----
-	mesh.visible = true
-	mesh.rotation_order = EULER_ORDER_YXZ
-	var leg_l: Node3D = mesh.get_meta("leg_l")
-	var leg_l_knee: Node3D = mesh.get_meta("leg_l_knee")
-	var leg_r: Node3D = mesh.get_meta("leg_r")
-	var leg_r_knee: Node3D = mesh.get_meta("leg_r_knee")
-	var rig: Node3D = mesh.get_meta("rig")
+	# ---- 乘员模型:jeep 敞篷坐姿 / 坦克·步战·防空封闭装甲乘员保持隐藏 ----
 	if v.type == "jeep":
 		# 臀部落座(模型原点在脚底,座椅面高约 1.08,下沉 1.32 防站穿车顶)
 		var seat: Vector3 = v.seat_world()
+		mesh.visible = true
+		mesh.rotation_order = EULER_ORDER_YXZ
 		mesh.position = Vector3(seat.x, seat.y - 1.32, seat.z)
 		mesh.rotation = Vector3(0, v.yaw, 0)
+		var leg_l: Node3D = mesh.get_meta("leg_l")
+		var leg_r: Node3D = mesh.get_meta("leg_r")
 		if leg_l != null:
 			leg_l.visible = true
 			leg_r.visible = true
 			leg_l.rotation.x = 1.35
 			leg_r.rotation.x = 1.35
-			leg_l_knee.rotation.x = -1.35
-			leg_r_knee.rotation.x = -1.35
+			var leg_l_knee: Node3D = mesh.get_meta("leg_l_knee")
+			var leg_r_knee: Node3D = mesh.get_meta("leg_r_knee")
+			if leg_l_knee != null:
+				leg_l_knee.rotation.x = -1.35
+				leg_r_knee.rotation.x = -1.35
+		var rig: Node3D = mesh.get_meta("rig")
 		if rig != null:
 			rig.rotation.x = 0.1
+		if _crew_pose != "seat":
+			_crew_pose = "seat"
+			print("[CREW] bot=%d 驾驶中 jeep 坐姿 seat=%s" % [id, seat])
 	else:
-		# 坦克/步战/防空:舱盖探身(下半身隐藏,取驾驶舱口位置)
-		var seat2: Vector3 = v.seat_world()
-		mesh.position = Vector3(seat2.x, v.pos.y + 1.62, seat2.z)
-		mesh.rotation = Vector3(0, v.yaw + v.turret_yaw, 0)
-		if leg_l != null:
-			leg_l.visible = false
-			leg_r.visible = false
+		# 坦克/步战/防空:封闭装甲乘员不可见(登车已隐藏,驾驶中保持,不出现舱盖探身)
+		mesh.visible = false
+		if _crew_pose != "hidden":
+			_crew_pose = "hidden"
+			print("[CREW] bot=%d 驾驶中 %s 封闭装甲乘员隐藏" % [id, v.type])
 
 
 func update_bot(dt: float) -> void:
@@ -1389,6 +1432,8 @@ func update_bot(dt: float) -> void:
 						vehicle = v
 						mesh.visible = false
 						(hb["sprite"] as Sprite3D).visible = false
+						_crew_pose = ""
+						print("[CREW] bot=%d 登车 type=%s 乘员隐藏" % [id, v.type])
 						return
 					move_x = to_x2 / d2
 					move_z = to_z2 / d2
@@ -1503,7 +1548,7 @@ func update_bot(dt: float) -> void:
 		hold_fire = true  # 撤退中不还击
 	if engaging and react_t <= 0 and absf(dy) < 0.35 and not hold_fire:
 		var fired_rocket := false
-		# 工程兵:对载具/飞机发射 RPG(直射反载具核心)
+		# 工程兵:对载具/飞机发射 RPG(制导反载具核心;弹速 55 > 玩家 48,反装甲/防空需更远射程)
 		if class_id == "engineer" and rpg_cd <= 0 and target != null:
 			var tdef = target.get("def")
 			var is_veh: bool = (tdef is Dictionary and tdef.get("radius") != null) or target.get("air") == true
@@ -1512,8 +1557,10 @@ func update_bot(dt: float) -> void:
 				var aim: Vector3 = target.get("pos") + Vector3(0, 1.2, 0)
 				var tvel = target.get("vel")
 				if tvel != null:
+					# 制导火箭:提前量仅作初瞄,飞行中持续转向修正(距/40 保守过瞄,由引导收敛)
 					aim += (tvel as Vector3) * (pos.distance_to(target.get("pos")) / 40.0)
-				G.effects.spawn_rocket(self, { "cn": "RPG-7", "damage": 120.0, "splash": 6.5, "speed": 40.0 }, origin, (aim - origin).normalized())
+				# 第 5 参 target 启用制导:Vehicle/Aircraft 均提供 pos/dead,目标死亡自动解除制导转直坠
+				G.effects.spawn_rocket(self, { "cn": "RPG-7", "damage": 120.0, "splash": 6.5, "speed": 55.0 }, origin, (aim - origin).normalized(), target)
 				AudioSys.rpg_fire(pos)
 				Bot.report_noise(pos.x, pos.z, 3.0, team, G.time)  # 火箭巨响广播
 				rpg_cd = 3.6
@@ -1626,7 +1673,7 @@ func shoot_at(p_target) -> void:
 	Bot.report_noise(pos.x, pos.z, 1.3 if def.kind in ["sniper", "lmg"] else 1.0, team, G.time)
 	# 弹道:下坠补偿瞄准 + 穿透链 + 部位倍率(内部结算到 fire_hitscan)
 	Utils.ballistic_fire(self, def, origin, dir, origin)
-	AudioSys.shoot(def.kind, pos, false)
+	AudioSys.shoot_weapon(weapon_id, def.kind, pos, false)
 	G.effects.muzzle(origin, dir, def.kind == "sniper")
 
 

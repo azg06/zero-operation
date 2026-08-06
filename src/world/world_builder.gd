@@ -20,13 +20,6 @@ static func make_bt_ground_h(_T, _size: float) -> Callable:
 
 
 ## ==================== 共享材质工具 ====================
-static func _tex_pair(name: String) -> Dictionary:
-	return {
-		"map": load("res://textures/" + name + "_diff.jpg"),
-		"nor": load("res://textures/" + name + "_nor.jpg"),
-	}
-
-
 static func _std_tex(color: Color, rough: float, tex_name: String, metal := 0.0) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = color
@@ -387,6 +380,21 @@ static func dispose_world() -> void:
 ## ==================== 地图构建 ====================
 static func build_world(root: Node3D, theme_id: String) -> void:
 	dispose_world()
+	# 地图 id 校验:无效时清空世界状态后安全返回(绝不访问 MapsData.M()[id],防世界构建中途中止)
+	if not MapsData.M().has(theme_id):
+		push_error("[WORLD] 无效地图 id: \"%s\",已中止世界构建(可用: %s)" % [theme_id, MapsData.M().keys()])
+		G.current_map = ""
+		G.map_night = false
+		G.world_size = 0
+		G.bounds = 0
+		G.colliders = []
+		G.flags = []
+		G.spawns = { "us": [], "ru": [] }
+		G.vehicle_spawns = []
+		G.bt_spawns = null
+		G.destructibles = []
+		Utils.rebuild_collider_grid()  # 空网格重建:旧碰撞体索引全部失效
+		return
 	var T = MapsData.M()[theme_id]
 	var size: float = T.size
 	var road: float = T.road

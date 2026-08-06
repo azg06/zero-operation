@@ -2,7 +2,7 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://i6gt5t60l86v"
+uid="uid://c24w5t8lhd6h3"
 path="res://.godot/imported/rock_04_diff.jpg-bb1b44e0913aae6668d969a9f2fcc116.ctex"
 metadata={
 "vram_texture": false
@@ -15,7 +15,7 @@ dest_files=["res://.godot/imported/rock_04_diff.jpg-bb1b44e0913aae6668d969a9f2fc
 
 [params]
 
-compress/mode=0
+compress/mode=1
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
