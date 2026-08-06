@@ -82,9 +82,13 @@ func _draw_map_base(s: float) -> void:
 	# 旗帜(颜色分级 + 占领进度弧 + 争夺闪烁)
 	for f in G.flags:
 		var cp := _wm2(Vector2(f.pos.x, f.pos.z), ws, s)
+		var zone_locked: bool = G.mode == "breakthrough" and f.zone_locked
 		var fill: Color
 		var stroke: Color
-		if f.owner_team != null and f.owner_team == G.player.team:
+		if zone_locked:
+			fill = Color(0.4, 0.43, 0.47, 0.22)
+			stroke = Color(0.55, 0.58, 0.62)
+		elif f.owner_team != null and f.owner_team == G.player.team:
 			fill = Color(0.2, 0.85, 0.5, 0.35)
 			stroke = US_COL
 		elif f.owner_team != null:
@@ -99,9 +103,10 @@ func _draw_map_base(s: float) -> void:
 		draw_arc(cp, 7.5, 0, TAU, 24, stroke, 1.6)
 		# 占领进度弧(空心圆环片段,-100..100 映射 0..TAU)
 		var frac := clampf((f.progress + 100.0) / 200.0, 0, 1)
-		if frac > 0.01 and frac < 0.999:
+		if not zone_locked and frac > 0.01 and frac < 0.999:
 			draw_arc(cp, 10.5, -PI / 2, -PI / 2 + frac * TAU, 24, Color(stroke.r, stroke.g, stroke.b, 0.9), 2.2)
-		draw_string(UiTheme.font(), Vector2(cp.x - 8, cp.y + 4), f.id, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color.WHITE)
+		draw_string(UiTheme.font(), Vector2(cp.x - 8, cp.y + 4), f.id, HORIZONTAL_ALIGNMENT_LEFT, -1, 9,
+			Color(0.7, 0.72, 0.75) if zone_locked else Color.WHITE)
 
 
 func _draw() -> void:

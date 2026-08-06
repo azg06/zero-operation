@@ -4,9 +4,9 @@
 
 **所有对本项目的修改（代码/资源/场景/配置）完成后，必须同步重新打包 Windows exe。**
 
-- 输出目录：`E:\工作目录\exe`
+- 输出目录：`E:\工作目录\zero\exe`
 - 导出命令：
-  `& "E:\Godot\Godot_v4.7.1-stable_win64_console.exe" --headless --path "E:\工作目录\steel_frontline_godot" --export-release "Windows Desktop" "E:\工作目录\exe\零度行动.exe"`
+  `& "E:\Godot\Godot_v4.7.1-stable_win64_console.exe" --headless --path "E:\工作目录\zero\steel_frontline_godot" --export-release "Windows Desktop" "E:\工作目录\zero\exe\零度行动.exe"`
 - 导出预设：Windows Desktop（`export_presets.cfg`，embed_pck=true 单文件自包含）
 - 验收步骤：
   1. 命令 EXIT=0 且输出 `[ DONE ] savepack`
@@ -15,5 +15,5 @@
 
 ## 常用验证命令
 
-- 冒烟测试：`& "E:\Godot\Godot_v4.7.1-stable_win64_console.exe" --headless --path "E:\工作目录\steel_frontline_godot" --script "res://fx_smoke_test.gd"`
+- 冒烟测试：`& "E:\Godot\Godot_v4.7.1-stable_win64_console.exe" --headless --path "E:\工作目录\zero\steel_frontline_godot" --script "res://fx_smoke_test.gd"`
 - 模式试玩（注意 `--quit-after` 放在 `--` 之前）：`--headless --quit-after 500 -- --test-play conquest|breakthrough|campaign`
