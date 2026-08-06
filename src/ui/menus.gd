@@ -59,18 +59,37 @@ func _ready() -> void:
 	_build_loading()
 	_build_campaign_select()
 	_build_campaign_end()
+	_build_armory()
+	_build_battlepass()
+	_build_profile()
+	_build_store()
+	_make_toast()
 	hide_all()
 	_screens["menu"].visible = true
 	# 调试:--test-campaign-menu 直接打开战役章节选择屏(验证构建)
 	if OS.get_cmdline_user_args().has("--test-campaign-menu"):
 		hide_all()
 		_screens["campaign"].visible = true
+	# 调试:--test-armory-menu 直接打开枪械改装屏(验证 3D 预览 + 槽位/改装件构建)
+	if OS.get_cmdline_user_args().has("--test-armory-menu"):
+		hide_all()
+		_screens["armory"].visible = true
+		_armory_enter()
+	# 调试:--test-battlepass 直接打开战斗通行证屏(验证构建 + 皮肤装备交互)
+	if OS.get_cmdline_user_args().has("--test-battlepass"):
+		hide_all()
+		_screens["battlepass"].visible = true
+		_bp_load_equipped(_bp_class)
+		_refresh_bp_grid()
 
 
 func _process(dt: float) -> void:
-	# 战役 signal 懒连接(campaign 由 main 在 Menus 之后创建)
-	if not _campaign_connected and G.campaign != null:
-		_campaign_connected = true
+	# 战役 signal 懒连接(campaign 由 main 在 Menus 之后创建);
+	# 实例变化(切换/重建 Campaign)时先断开旧实例再重连,防结算信号挂到废弃实例上
+	if G.campaign != null and G.campaign != _campaign_src:
+		if _campaign_src != null and is_instance_valid(_campaign_src):
+			_campaign_src.chapter_finished.disconnect(_on_chapter_finished)
+		_campaign_src = G.campaign
 		G.campaign.chapter_finished.connect(_on_chapter_finished)
 	# 新闻滚动条
 	if _news_label != null and _screens.has("menu") and _screens["menu"].visible:
@@ -81,6 +100,10 @@ func _process(dt: float) -> void:
 			_news_label.text = NEWS[_news_i]
 			if _news_label.text == "":
 				_news_label.text = NEWS[0]
+	# 枪械改装 3D 预览自动旋转(拖拽时暂停)
+	if _screens.has("armory") and _screens["armory"].visible and _arm_pivot != null and not _arm_dragging:
+		_arm_yaw += dt * 0.4
+		_arm_pivot.rotation = Vector3(_arm_pitch, _arm_yaw, 0)
 	# 死亡重生倒计时(动画:数字跳动,归零解锁)
 	if _death_btn != null and _death_btn.is_inside_tree() and _screens.has("death") and _screens["death"].visible and _death_t > 0:
 		_death_t -= dt
@@ -145,24 +168,8 @@ func _build_main_menu() -> void:
 	dim.custom_minimum_size = Vector2(460, 0)
 	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	s.add_child(dim)
-	# ---- 顶部标签栏(BF2042:PLAY / COLLECTION / BATTLE PASS / PROFILE / STORE) ----
-	var tabs := HBoxContainer.new()
-	tabs.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	tabs.position = Vector2(26, 16)
-	tabs.add_theme_constant_override("separation", 26)
-	s.add_child(tabs)
-	var tab_play := UiTheme.make_label("游玩", 15, UiTheme.PRIMARY)
-	tabs.add_child(tab_play)
-	for t in ["收藏", "战斗通行证", "档案", "商店"]:
-		var tl2 := UiTheme.make_label(t, 15, UiTheme.TXT_DIM)
-		tabs.add_child(tl2)
-	# 装饰:标签下划线
-	var tab_line := ColorRect.new()
-	tab_line.color = UiTheme.PRIMARY
-	tab_line.position = Vector2(26, 42)
-	tab_line.size = Vector2(30, 2)
-	tab_line.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	s.add_child(tab_line)
+	# ---- 顶部标签栏(BF2042:PLAY / ARMORY / BATTLE PASS / PROFILE / STORE,可点击切换) ----
+	_make_tab_bar(s, "menu")
 	# ---- 右上:玩家卡 ----
 	var trow := VBoxContainer.new()
 	trow.set_anchors_preset(Control.PRESET_TOP_RIGHT)
@@ -985,7 +992,7 @@ func show_end(win: bool) -> void:
 
 ## ==================== 战役模式(战争故事):章节选择屏 + 结算屏 + 存档 ====================
 const CAMPAIGN_SAVE_PATH := "user://campaign_save.cfg"
-var _campaign_connected := false     # 章节结算 signal 懒连接标记
+var _campaign_src: Node = null       # 章节结算 signal 已连接实例(实例重建时断开旧/重连新)
 var _campaign_cur_index := -1        # 当前游玩章节索引(结算屏"下一章"定位)
 var _campaign_done: Array = []       # 已完成章节 id(存档)
 var _camp_grid: GridContainer
@@ -1189,6 +1196,15 @@ func show_campaign_end(win: bool) -> void:
 	if G.input_sys != null:
 		G.input_sys.unlock()
 	var chs: Array = _campaign_chapters()
+	# 直达游玩(--test-play campaign 等未经章节选择屏)时索引仍为 -1:按当前战役章节定位,兜底第 1 章
+	if _campaign_cur_index < 0:
+		if G.campaign != null:
+			for i in chs.size():
+				if str(chs[i].get("id", "")) == str(G.campaign.chapter_id):
+					_campaign_cur_index = i
+					break
+		if _campaign_cur_index < 0:
+			_campaign_cur_index = 0
 	var has_next: bool = win and (_campaign_cur_index + 1) < chs.size()
 	_camp_end_title.text = "任务完成" if win else "任务失败"
 	_camp_end_title.add_theme_color_override("font_color", Color(1, 0.85, 0.4) if win else Color(0.85, 0.4, 0.35))
@@ -1343,4 +1359,1209 @@ func show_loading(p_show: bool) -> void:
 func show_menu() -> void:
 	hide_all()
 	_screens["menu"].visible = true
+	_set_tab_active("menu")
+
+
+## ==================== 顶部标签栏(5 Tab:游玩/枪械/战斗通行证/档案/商店) ====================
+const TAB_IDS: Array = [
+	["menu", "游玩"], ["armory", "枪械"], ["battlepass", "战斗通行证"], ["profile", "档案"], ["store", "商店"],
+]
+const TAB_BTN_W := 92.0
+const TAB_PITCH := 118.0   # 按钮宽 92 + 间距 26
+const TAB_LINE_W := 52.0
+var _tab_btns: Dictionary = {}   # 屏id → {tabid: Button}
+var _tab_lines: Dictionary = {}  # 屏id → 下划线 ColorRect
+
+
+## 每个主界面各自挂一套标签栏(当前屏高亮,下划线跟随)
+func _make_tab_bar(parent: Control, active: String) -> void:
+	var tabs := HBoxContainer.new()
+	tabs.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	tabs.position = Vector2(26, 16)
+	tabs.add_theme_constant_override("separation", 26)
+	parent.add_child(tabs)
+	var line := ColorRect.new()
+	line.color = UiTheme.PRIMARY
+	line.position = Vector2(26, 42)
+	line.size = Vector2(TAB_LINE_W, 2)
+	line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	parent.add_child(line)
+	_tab_lines[active] = line
+	var btns := {}
+	for i in TAB_IDS.size():
+		var tid: String = TAB_IDS[i][0]
+		var b := Button.new()
+		b.theme = UiTheme.theme()
+		b.text = TAB_IDS[i][1]
+		b.flat = true
+		b.custom_minimum_size = Vector2(TAB_BTN_W, 30)
+		b.focus_mode = Control.FOCUS_NONE
+		b.add_theme_font_size_override("font_size", 15)
+		b.add_theme_color_override("font_color", UiTheme.TXT_DIM)
+		b.add_theme_color_override("font_hover_color", Color(0.9, 0.95, 0.98))
+		b.add_theme_color_override("font_pressed_color", UiTheme.PRIMARY)
+		b.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+		b.add_theme_stylebox_override("hover", StyleBoxEmpty.new())
+		b.add_theme_stylebox_override("pressed", StyleBoxEmpty.new())
+		b.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+		b.mouse_entered.connect(func(): AudioSys.ui_hover())
+		b.pressed.connect(func(): _switch_tab(tid))
+		tabs.add_child(b)
+		btns[tid] = b
+	_tab_btns[active] = btns
+	_set_tab_active(active)
+
+
+## 设置某屏标签栏的选中态(高亮色 + 下划线移动到对应 Tab)
+func _set_tab_active(id: String) -> void:
+	var btns: Dictionary = _tab_btns.get(id, {})
+	var line: ColorRect = _tab_lines.get(id)
+	if line == null and btns.is_empty():
+		return
+	var idx := 0
+	for i in TAB_IDS.size():
+		if TAB_IDS[i][0] == id:
+			idx = i
+			break
+	for tid in btns:
+		var b: Button = btns[tid]
+		b.add_theme_color_override("font_color", UiTheme.PRIMARY if tid == id else UiTheme.TXT_DIM)
+	if line != null:
+		var tx := 26.0 + float(idx) * TAB_PITCH + (TAB_BTN_W - TAB_LINE_W) * 0.5
+		if line.is_inside_tree():
+			var tw := line.create_tween()
+			tw.tween_property(line, "position:x", tx, 0.16).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		else:
+			line.position.x = tx
+
+
+## Tab 切换:隐藏全部界面 → 显示目标屏(游玩=主菜单;主菜单模式选择/播放后可随时切回)
+func _switch_tab(id: String) -> void:
+	AudioSys.ui()
+	if not _screens.has(id):
+		return
+	hide_all()
+	_screens[id].visible = true
+	_set_tab_active(id)
+	if id == "armory":
+		_armory_enter()
+	if id == "battlepass":
+		# 每次进入通行证屏重新读取已装备皮肤(存档可能在游戏内变更)
+		_bp_load_equipped(_bp_class)
+		_refresh_bp_grid()
+
+
+## ==================== 轻提示(底部弹出,自动淡出) ====================
+var _toast_l: Label = null
+
+
+func _make_toast() -> void:
+	_toast_l = UiTheme.make_label("", 14, Color(1, 1, 1))
+	_toast_l.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_toast_l.position = Vector2(0, -70)
+	_toast_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_toast_l.add_theme_stylebox_override("normal", UiTheme.stylebox(Color(0.0, 0.06, 0.09, 0.92), UiTheme.PRIMARY, 1, 2, 14))
+	_toast_l.visible = false
+	_toast_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_toast_l)
+
+
+func _toast(msg: String) -> void:
+	if _toast_l == null:
+		return
+	_toast_l.text = msg
+	_toast_l.visible = true
+	_toast_l.modulate.a = 1.0
+	var tw := _toast_l.create_tween()
+	tw.tween_property(_toast_l, "scale", Vector2(1.04, 1.04), 0.1)
+	tw.tween_interval(1.4)
+	tw.tween_property(_toast_l, "modulate:a", 0.0, 0.35)
+	tw.tween_callback(func(): _toast_l.visible = false)
+
+
+## ==================== 枪械改装界面(核心,三角洲风格:左选枪/中 3D/右槽位) ====================
+const ARM_SLOT_CN := { "muzzle": "枪口", "mag": "弹匣", "grip": "握把", "trigger": "扳机", "optic": "瞄具" }
+const STAT_CN := {
+	"mag_ammo": "弹匣容量", "reload_mult": "换弹速度", "recoil_mult": "后座控制", "recoil_pitch_mult": "垂直后座控制",
+	"hip_spread_mult": "腰射精度", "spread_mult": "散布精度", "ads_speed_mult": "开镜速度",
+	"fire_rate_mult": "射速", "dmg_mult": "伤害", "suppress": "隐蔽",
+}
+const KIND_CN := {
+	"rifle": "突击步枪", "smg": "冲锋枪", "lmg": "轻机枪", "shotgun": "霰弹枪",
+	"sniper": "狙击步枪", "pistol": "手枪", "rpg": "火箭筒", "dmr": "精确射手步枪",
+}
+## 兜底改装件数据(WeaponModsData 未就绪时界面仍可完整演示,键结构与其契约一致)
+const DEMO_MODS := {
+	"muzzle": {
+		"std_muzzle": { "n": "原装枪口", "d": "标准制式枪口,性能均衡", "s": {} },
+		"comp": { "n": "制退器", "d": "降低后座,便于连射控制", "s": { "recoil_mult": 0.85 } },
+		"supp": { "n": "消音器", "d": "消除枪口火光与噪音,隐蔽作战", "s": { "recoil_mult": 0.97, "suppress": true } },
+	},
+	"mag": {
+		"std_mag": { "n": "标准弹匣", "d": "制式供弹具", "s": {} },
+		"ext": { "n": "加长弹匣", "d": "增加弹药携带量", "s": { "mag_ammo": 12 } },
+		"quick": { "n": "快拔弹匣", "d": "快速换弹,牺牲少量容量", "s": { "reload_mult": 0.8, "mag_ammo": -3 } },
+	},
+	"grip": {
+		"std_grip": { "n": "原装握把", "d": "标准握持手感", "s": {} },
+		"ang": { "n": "直角握把", "d": "改善前握持,降低腰射散布", "s": { "hip_spread_mult": 0.85 } },
+		"vrt": { "n": "垂直握把", "d": "稳定后座,连发更可控", "s": { "recoil_mult": 0.9 } },
+	},
+	"trigger": {
+		"std_trigger": { "n": "原装扳机", "d": "标准扳机组", "s": {} },
+		"hair": { "n": "轻量化扳机", "d": "缩短扳机行程,射速提升", "s": { "fire_rate_mult": 1.08, "recoil_mult": 1.05 } },
+		"match": { "n": "比赛扳机", "d": "精准击发,减少动作扰动", "s": { "ads_speed_mult": 1.05, "fire_rate_mult": 1.04 } },
+	},
+	"optic": {
+		"std_optic": { "n": "机械瞄具", "d": "原装准星照门", "s": {} },
+		"holo": { "n": "全息瞄具", "d": "快速上镜,近战利器", "s": { "ads_speed_mult": 0.9 } },
+		"scope": { "n": "4x 光学瞄准镜", "d": "中远距离精确射击", "s": { "recoil_mult": 0.95, "hip_spread_mult": 1.15 } },
+	},
+}
+var _arm_weapon := ""                # 记住上次选择的武器(切 Tab 回来不丢)
+var _arm_cfg: Dictionary = {}        # 工作配置 {槽位: 件id}(未保存)
+var _arm_open_slot := ""
+var _arm_pivot: Node3D = null
+var _arm_yaw := 0.0
+var _arm_pitch := 0.0
+var _arm_dragging := false
+var _arm_list: VBoxContainer = null
+var _arm_slots: VBoxContainer = null
+var _arm_cur_label: Label = null
+var _mod_data: Dictionary = {}       # {槽位:{件id:{n,d,s}}} = 真实 MODS ∪ 兜底 DEMO_MODS
+var _mod_ready := false
+
+
+func _build_armory() -> void:
+	var s := _add_screen("armory")
+	_bg(s, Color(0.01, 0.03, 0.05, 0.9))
+	s.add_child(UiTheme.BattleBg.new())
+	_make_tab_bar(s, "armory")
+	var root := VBoxContainer.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.offset_left = 24
+	root.offset_top = 58
+	root.offset_right = -24
+	root.offset_bottom = -16
+	root.add_theme_constant_override("separation", 8)
+	s.add_child(root)
+	# 顶栏
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 14)
+	root.add_child(head)
+	head.add_child(UiTheme.make_label("枪械改装", 30, UiTheme.TXT))
+	head.add_child(UiTheme.make_label("ARMORY · 选配槽位 · 实时预览", 14, UiTheme.PRIMARY))
+	var hsp := Control.new()
+	hsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(hsp)
+	_arm_cur_label = UiTheme.make_label("未选择武器", 16, UiTheme.TXT_DIM)
+	head.add_child(_arm_cur_label)
+	# 主体三栏
+	var body := HBoxContainer.new()
+	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_theme_constant_override("separation", 12)
+	root.add_child(body)
+	# ---- 左:武器列表(按兵种/类别分组,可滚动) ----
+	var left_panel := UiTheme.make_panel(0.7)
+	left_panel.custom_minimum_size = Vector2(360, 0)
+	body.add_child(left_panel)
+	var lv := VBoxContainer.new()
+	lv.add_theme_constant_override("separation", 6)
+	left_panel.add_child(lv)
+	lv.add_child(UiTheme.make_label("选择武器", 15, UiTheme.PRIMARY))
+	var lscroll := ScrollContainer.new()
+	lscroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	lscroll.custom_minimum_size = Vector2(0, 420)
+	lv.add_child(lscroll)
+	_arm_list = VBoxContainer.new()
+	_arm_list.add_theme_constant_override("separation", 6)
+	lscroll.add_child(_arm_list)
+	# ---- 中:3D 武器预览(SubViewport 透明背景 + 相机 + 灯光 + 拖拽旋转) ----
+	var view_panel := UiTheme.make_panel(0.7)
+	view_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	view_panel.custom_minimum_size = Vector2(640, 0)
+	body.add_child(view_panel)
+	var vv := VBoxContainer.new()
+	vv.add_theme_constant_override("separation", 6)
+	view_panel.add_child(vv)
+	var vhead := HBoxContainer.new()
+	vv.add_child(vhead)
+	vhead.add_child(UiTheme.make_label("武器预览", 14, UiTheme.PRIMARY))
+	var vsp := Control.new()
+	vsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vhead.add_child(vsp)
+	var vhint := UiTheme.make_label("拖拽旋转 · 自动巡航 · 改装实时生效", 12, UiTheme.TXT_DIM)
+	vhint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	vhead.add_child(vhint)
+	var vpc := SubViewportContainer.new()
+	vpc.custom_minimum_size = Vector2(640, 420)
+	vpc.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vpc.stretch = true
+	vpc.mouse_filter = Control.MOUSE_FILTER_STOP
+	vpc.gui_input.connect(_armory_view_input)
+	vv.add_child(vpc)
+	var vp := SubViewport.new()
+	vp.size = Vector2i(640, 420)
+	vp.transparent_bg = true
+	vp.own_world_3d = true
+	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	vpc.add_child(vp)
+	var cam := Camera3D.new()
+	cam.current = true
+	cam.position = Vector3(0, 0.32, 2.6)
+	cam.fov = 34
+	vp.add_child(cam)
+	cam.look_at(Vector3(0, -0.02, -0.2), Vector3.UP)
+	var l1 := DirectionalLight3D.new()
+	l1.rotation_degrees = Vector3(-50, -35, 0)
+	l1.light_energy = 1.1
+	vp.add_child(l1)
+	var l2 := DirectionalLight3D.new()
+	l2.rotation_degrees = Vector3(15, 50, 0)
+	l2.light_energy = 0.45
+	vp.add_child(l2)
+	_arm_pivot = Node3D.new()
+	vp.add_child(_arm_pivot)
+	# ---- 右:槽位面板 ----
+	var right_panel := UiTheme.make_panel(0.7)
+	right_panel.custom_minimum_size = Vector2(470, 0)
+	body.add_child(right_panel)
+	var rv := VBoxContainer.new()
+	rv.add_theme_constant_override("separation", 8)
+	right_panel.add_child(rv)
+	rv.add_child(UiTheme.make_label("改装槽位", 15, UiTheme.PRIMARY))
+	_arm_slots = VBoxContainer.new()
+	_arm_slots.add_theme_constant_override("separation", 6)
+	_arm_slots.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	rv.add_child(_arm_slots)
+	# ---- 底部:恢复默认 / 保存改装 ----
+	var foot := HBoxContainer.new()
+	foot.alignment = BoxContainer.ALIGNMENT_CENTER
+	foot.add_theme_constant_override("separation", 20)
+	root.add_child(foot)
+	var b_reset := UiTheme.make_button("恢复默认", 15)
+	b_reset.custom_minimum_size = Vector2(180, 40)
+	b_reset.pressed.connect(func(): _armory_reset())
+	foot.add_child(b_reset)
+	var b_save := UiTheme.make_cta("保存改装", 16)
+	b_save.custom_minimum_size = Vector2(220, 40)
+	b_save.pressed.connect(func(): _armory_save())
+	foot.add_child(b_save)
+	_armory_build_list()
+
+
+## 进入枪械屏:初始化改装数据 + 恢复上次武器选择
+func _armory_enter() -> void:
+	_init_mod_data()
+	if _arm_weapon == "":
+		_arm_weapon = "m4"
+	if not WeaponsData.W().has(_arm_weapon):
+		_arm_weapon = WeaponsData.W().keys()[0]
+	_armory_select(_arm_weapon)
+
+
+func _armory_build_list() -> void:
+	for c in _arm_list.get_children():
+		_arm_list.remove_child(c)
+		c.queue_free()
+	var classes := WeaponsData.C()
+	for cid in classes:
+		var cls = classes[cid]
+		_arm_list.add_child(UiTheme.make_label(cls.icon + " " + cls.cn + " · " + cls.en, 13, cls.color))
+		var ids: Array = []
+		ids.append_array(cls.weapons)
+		ids.append_array(cls.shotguns)
+		for wid in ids:
+			_arm_list.add_child(_armory_weapon_btn(wid))
+	_arm_list.add_child(UiTheme.make_label("副武器 · SIDEARMS", 13, Color(0.55, 0.62, 0.7)))
+	for wid in WeaponsData.SECONDARIES:
+		_arm_list.add_child(_armory_weapon_btn(wid))
+
+
+func _armory_weapon_btn(wid: String) -> Button:
+	var w = WeaponsData.W()[wid]
+	var b := Button.new()
+	b.theme = UiTheme.theme()
+	b.toggle_mode = true
+	b.button_pressed = (wid == _arm_weapon)
+	b.custom_minimum_size = Vector2(0, 54)
+	b.text = w.cn + "\n" + str(KIND_CN.get(w.kind, w.kind)) + " · 伤害 " + str(w.damage) + " · 弹匣 " + str(w.mag)
+	b.add_theme_font_size_override("font_size", 13)
+	b.add_theme_color_override("font_color", UiTheme.TXT)
+	var sel: bool = wid == _arm_weapon
+	var bg := Color(0.0, 0.16, 0.2, 0.95) if sel else Color(0.0, 0.03, 0.05, 0.9)
+	var border := UiTheme.PRIMARY if sel else Color(0.22, 0.28, 0.34, 0.5)
+	b.add_theme_stylebox_override("normal", UiTheme.stylebox(bg, border, 1, 3, 6))
+	b.add_theme_stylebox_override("hover", UiTheme.stylebox(Color(0.0, 0.2, 0.26, 0.95), border, 1, 3, 6))
+	b.add_theme_stylebox_override("pressed", UiTheme.stylebox(bg, border, 1, 3, 6))
+	b.add_theme_stylebox_override("focus", UiTheme.stylebox(bg, border, 1, 3, 6))
+	UiTheme.wire_button(b)
+	b.pressed.connect(func(): _armory_select(wid))
+	return b
+
+
+## 选中武器:换配置 → 重建 3D → 刷新槽位
+func _armory_select(wid: String) -> void:
+	AudioSys.ui()
+	if wid != _arm_weapon or _arm_cfg.is_empty():
+		_arm_weapon = wid
+		_arm_cfg = _armory_defaults(wid)
+	_arm_open_slot = ""
+	_armory_build_list()
+	if _arm_cur_label != null:
+		_arm_cur_label.text = WeaponsData.W()[wid].cn
+	_armory_rebuild_view()
+	_armory_refresh_slots()
+
+
+## 3D 预览:重建武器模型(Visual 团队 build(id,with_hands,mods) 扩展前按 2 参调用)
+func _armory_rebuild_view() -> void:
+	if _arm_pivot == null:
+		return
+	for c in _arm_pivot.get_children():
+		_arm_pivot.remove_child(c)
+		c.queue_free()
+	var m := _build_weapon_view(_arm_weapon, _arm_cfg)
+	if m != null:
+		_arm_pivot.add_child(m)
+		_shadow_off(m)
+	_arm_pivot.rotation = Vector3(_arm_pitch, _arm_yaw, 0)
+
+
+func _armory_view_input(ev: InputEvent) -> void:
+	if _arm_pivot == null:
+		return
+	if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_LEFT:
+		_arm_dragging = ev.pressed
+	elif ev is InputEventMouseMotion and _arm_dragging:
+		_arm_yaw += ev.relative.x * 0.01
+		_arm_pitch = clampf(_arm_pitch + ev.relative.y * 0.008, -1.2, 1.2)
+		_arm_pivot.rotation = Vector3(_arm_pitch, _arm_yaw, 0)
+
+
+## 槽位面板:5 槽竖排,行=槽名+当前件+属性摘要;点击展开可选件(is_compatible 过滤)
+func _armory_refresh_slots() -> void:
+	for c in _arm_slots.get_children():
+		_arm_slots.remove_child(c)
+		c.queue_free()
+	for slot in ARM_SLOT_CN:
+		_arm_slots.add_child(_armory_slot_row(slot))
+
+
+func _armory_slot_row(slot: String) -> Control:
+	var is_open: bool = _arm_open_slot == slot
+	var panel := PanelContainer.new()
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	var border := UiTheme.PRIMARY if is_open else Color(0.25, 0.32, 0.4, 0.6)
+	panel.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.0, 0.05, 0.08, 0.92), border, 1, 2, 10))
+	var col := VBoxContainer.new()
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_theme_constant_override("separation", 4)
+	panel.add_child(col)
+	var head := HBoxContainer.new()
+	head.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	head.add_theme_constant_override("separation", 10)
+	col.add_child(head)
+	var sn := UiTheme.make_label(str(ARM_SLOT_CN.get(slot, slot)), 14, UiTheme.PRIMARY)
+	sn.custom_minimum_size = Vector2(52, 0)
+	head.add_child(sn)
+	var cur_id: String = str(_arm_cfg.get(slot, ""))
+	var cur_name := "—"
+	var cur_effect := ""
+	if cur_id != "" and _mod_data.get(slot, {}).has(cur_id):
+		var md: Dictionary = _mod_data[slot][cur_id]
+		cur_name = str(md.get("n", cur_id))
+		cur_effect = _mod_effect_text(md.get("s", {}))
+	var vn := VBoxContainer.new()
+	vn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(vn)
+	vn.add_child(UiTheme.make_label(cur_name, 14, UiTheme.TXT))
+	var ef := RichTextLabel.new()
+	ef.bbcode_enabled = true
+	ef.fit_content = true
+	ef.scroll_active = false
+	ef.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ef.add_theme_font_size_override("normal_font_size", 12)
+	ef.text = cur_effect if cur_effect != "" else "[color=#7a8790]无属性差异[/color]"
+	vn.add_child(ef)
+	var mark := UiTheme.make_label("▾" if not is_open else "▴", 14, UiTheme.TXT_DIM)
+	head.add_child(mark)
+	panel.gui_input.connect(func(ev: InputEvent):
+		if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_LEFT and ev.pressed:
+			AudioSys.ui()
+			_arm_open_slot = "" if is_open else slot
+			_armory_refresh_slots())
+	var opts := VBoxContainer.new()
+	opts.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	opts.add_theme_constant_override("separation", 3)
+	opts.visible = is_open
+	col.add_child(opts)
+	if is_open:
+		var pool: Dictionary = _mod_data.get(slot, {})
+		var scr := _wmd_script()
+		var def_mid := ""
+		if scr != null and _wmd_methods().has("default_mod"):
+			def_mid = str(scr.call("default_mod", slot))
+		for mid in pool:
+			if _mod_ready and scr != null and _wmd_methods().has("is_compatible"):
+				if not bool(scr.call("is_compatible", _arm_weapon, slot, mid)):
+					continue
+			opts.add_child(_armory_mod_item(slot, mid, pool[mid], def_mid))
+	return panel
+
+
+## 可选件条目:名称+描述+属性增减(绿加/红减),选中高亮
+func _armory_mod_item(slot: String, mid: String, md: Dictionary, def_mid := "") -> Control:
+	var equipped: bool = str(_arm_cfg.get(slot, "")) == mid
+	var is_std: bool = (def_mid != "" and mid == def_mid) or (def_mid == "" and str(mid).begins_with("std_"))
+	var item := PanelContainer.new()
+	item.mouse_filter = Control.MOUSE_FILTER_STOP
+	var border := UiTheme.PRIMARY if equipped else Color(0.2, 0.26, 0.32, 0.45)
+	item.add_theme_stylebox_override("panel", UiTheme.stylebox(
+		Color(0.0, 0.09, 0.12, 0.95) if equipped else Color(0.01, 0.04, 0.06, 0.9), border, 1, 2, 8))
+	var v := VBoxContainer.new()
+	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	v.add_theme_constant_override("separation", 2)
+	item.add_child(v)
+	var h := HBoxContainer.new()
+	h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	h.add_theme_constant_override("separation", 8)
+	v.add_child(h)
+	var name_l := UiTheme.make_label(str(md.get("n", mid)), 13, Color(0.9, 0.95, 0.98))
+	h.add_child(name_l)
+	if is_std:
+		var tag := UiTheme.make_label("标准", 11, UiTheme.TXT_DIM)
+		tag.add_theme_stylebox_override("normal", UiTheme.stylebox(Color(0.1, 0.14, 0.18, 0.8), Color(0.3, 0.36, 0.42, 0.5), 1, 1, 4))
+		h.add_child(tag)
+	if equipped:
+		var eq := UiTheme.make_label("已装备", 11, UiTheme.PRIMARY)
+		eq.add_theme_stylebox_override("normal", UiTheme.stylebox(Color(0.0, 0.22, 0.3, 0.85), UiTheme.PRIMARY, 1, 1, 4))
+		h.add_child(eq)
+	var d := UiTheme.make_label(str(md.get("d", "")), 11, UiTheme.TXT_DIM)
+	d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	v.add_child(d)
+	var eff_txt := _mod_effect_text(md.get("s", {}))
+	var ef := RichTextLabel.new()
+	ef.bbcode_enabled = true
+	ef.fit_content = true
+	ef.scroll_active = false
+	ef.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ef.add_theme_font_size_override("normal_font_size", 12)
+	ef.text = eff_txt if eff_txt != "" else "[color=#7a8790]无属性差异[/color]"
+	v.add_child(ef)
+	item.gui_input.connect(func(ev: InputEvent):
+		if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_LEFT and ev.pressed:
+			AudioSys.ui()
+			_arm_cfg[slot] = mid
+			_arm_open_slot = ""
+			_armory_refresh_slots()
+			_armory_rebuild_view())
+	return item
+
+
+## 属性摘要 BBCode(绿色加成/红色减益,属性名中文化)
+func _mod_effect_text(s: Variant) -> String:
+	if s == null or not (s is Dictionary):
+		return ""
+	var parts: Array = []
+	for key in s:
+		var line := _stat_line(str(key), s[key])
+		if line != "":
+			parts.append(line)
+	return " · ".join(parts)
+
+
+func _stat_line(key: String, val) -> String:
+	var cn: String = str(STAT_CN.get(key, key))
+	var green := "[color=#00FF88]"
+	var red := "[color=#ff6a55]"
+	match key:
+		"mag_ammo":
+			var iv := int(val)
+			return (green if iv >= 0 else red) + cn + " " + ("+" if iv >= 0 else "") + str(iv) + "[/color]"
+		"reload_mult", "recoil_mult", "recoil_pitch_mult", "hip_spread_mult", "spread_mult", "ads_speed_mult":
+			var p1 := (1.0 - float(val)) * 100.0
+			return (green if p1 >= 0.0 else red) + cn + " " + ("+" if p1 >= 0.0 else "-") + ("%.0f%%" % absf(p1)) + "[/color]"
+		"fire_rate_mult", "dmg_mult":
+			var p2 := (float(val) - 1.0) * 100.0
+			return (green if p2 >= 0.0 else red) + cn + " " + ("+" if p2 >= 0.0 else "-") + ("%.0f%%" % absf(p2)) + "[/color]"
+		"suppress":
+			return (green + cn + " 开启[/color]") if bool(val) else ""
+		_:
+			return green + cn + " " + str(val) + "[/color]"
+
+
+## 恢复默认:重读默认配置
+func _armory_reset() -> void:
+	AudioSys.ui()
+	_arm_cfg = _armory_defaults(_arm_weapon)
+	_arm_open_slot = ""
+	_armory_refresh_slots()
+	_armory_rebuild_view()
+	_toast("已恢复默认配置")
+
+
+## 保存改装:调用 WeaponModsData.save_cfg(weapon_id, cfg)(模块未就绪则提示)
+func _armory_save() -> void:
+	AudioSys.ui()
+	if _arm_weapon == "":
+		return
+	var scr := _wmd_script()
+	if scr != null and _wmd_methods().has("save_cfg"):
+		scr.call("save_cfg", _arm_weapon, _arm_cfg)
+		_toast("已保存 " + WeaponsData.W()[_arm_weapon].cn + " 的改装配置")
+	else:
+		_toast("改装数据模块未就绪 · 配置仅本次会话有效")
+
+
+func _armory_defaults(wid: String) -> Dictionary:
+	var scr := _wmd_script()
+	# 优先读存档配置(load_cfg 内含 defaults 回退),再退化到兜底演示件
+	if scr != null and _wmd_methods().has("load_cfg"):
+		var ld = scr.call("load_cfg", wid)
+		if ld is Dictionary and not ld.is_empty():
+			return ld
+	if scr != null and _wmd_methods().has("defaults"):
+		var d = scr.call("defaults", wid)
+		if d is Dictionary and not d.is_empty():
+			return d
+	var cfg := {}
+	for slot in ARM_SLOT_CN:
+		cfg[slot] = _armory_std_mod(slot)
+	return cfg
+
+
+## 槽位默认件:优先 WMD.default_mod(slot),再找兜底 "std_槽位",最后取第一件
+func _armory_std_mod(slot: String) -> String:
+	var scr := _wmd_script()
+	if scr != null and _wmd_methods().has("default_mod"):
+		var dm: String = str(scr.call("default_mod", slot))
+		if dm != "" and _mod_data.get(slot, {}).has(dm):
+			return dm
+	var pool: Dictionary = _mod_data.get(slot, {})
+	if pool.is_empty():
+		return ""
+	if pool.has("std_" + slot):
+		return "std_" + slot
+	for mid in pool:
+		return mid
+	return ""
+
+
+## 改装数据初始化:WeaponModsData.MODS(若有) ∪ DEMO_MODS 兜底(真实数据已覆盖的槽位不混入演示件)
+func _init_mod_data() -> void:
+	if not _mod_data.is_empty():
+		return
+	_mod_data = {}
+	var scr := _wmd_script()
+	_mod_ready = scr != null
+	var real: Dictionary = {}
+	if scr != null and scr.get_script_constant_map().has("MODS"):
+		var m: Variant = scr.get("MODS")
+		if m is Dictionary:
+			real = m
+	var names: Dictionary = ARM_SLOT_CN
+	if scr != null and scr.get_script_constant_map().has("SLOT_NAMES"):
+		var sn: Variant = scr.get("SLOT_NAMES")
+		if sn is Dictionary and not sn.is_empty():
+			names = sn
+	for slot in names:
+		_mod_data[slot] = {}
+		var pool: Dictionary = real.get(slot, {}) if real.has(slot) else {}
+		for mid in pool:
+			_mod_data[slot][mid] = pool[mid]
+		if not real.has(slot) and DEMO_MODS.has(slot):
+			for mid in DEMO_MODS[slot]:
+				if not _mod_data[slot].has(mid):
+					_mod_data[slot][mid] = DEMO_MODS[slot][mid]
+
+
+## ==================== WeaponModsData / WeaponModels 防御访问 ====================
+func _wmd_script() -> Script:
+	var p := "res://src/data/weapon_mods_data.gd"
+	if not ResourceLoader.exists(p):
+		return null
+	var s = load(p)
+	return s if s is Script else null
+
+
+var _wmd_methods_cache: Dictionary = {}
+func _wmd_methods() -> Dictionary:
+	if _wmd_methods_cache.is_empty():
+		var scr := _wmd_script()
+		if scr != null:
+			for m in scr.get_script_method_list():
+				_wmd_methods_cache[str(m.get("name"))] = true
+	return _wmd_methods_cache
+
+
+## WeaponModels.build(id, with_hands, mods):Visual 团队扩展前 build 只有 2 参,按参数数量防御调用
+func _build_weapon_view(wid: String, mods: Dictionary) -> Node3D:
+	var WM: Script = load("res://src/models/weapon_models.gd")
+	if WM == null:
+		return null
+	var nargs := 2
+	for m in WM.get_script_method_list():
+		if m.get("name") == "build":
+			nargs = int(m.get("args", []).size())
+			break
+	if nargs >= 3:
+		return WM.call("build", wid, false, mods)
+	return WM.call("build", wid, false)
+
+
+func _shadow_off(node: Node) -> void:
+	for c in node.get_children():
+		if c is GeometryInstance3D:
+			c.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_shadow_off(c)
+
+
+## ==================== 战斗通行证界面 ====================
+const BP_LEVEL := 32
+const BP_DEMO := {
+	"assault": [
+		{ "n": "丛林突击", "d": "丛林迷彩作战服,突击兵标准外观", "colors": [Color(0.24, 0.35, 0.23), Color(0.18, 0.29, 0.17), Color(0.11, 0.17, 0.11)], "lv": 1 },
+		{ "n": "雪原猎手", "d": "极地伪装,高海拔严寒作战", "colors": [Color(0.91, 0.93, 0.92), Color(0.73, 0.77, 0.77), Color(0.56, 0.64, 0.65)], "lv": 15 },
+		{ "n": "夜袭者", "d": "暗夜行动套装,低可见度渗透", "colors": [Color(0.1, 0.11, 0.13), Color(0.17, 0.2, 0.22), Color(0.05, 0.06, 0.07)], "lv": 40 },
+	],
+	"engineer": [
+		{ "n": "装甲工兵", "d": "重型护甲携行具,前线修械", "colors": [Color(0.55, 0.42, 0.24), Color(0.4, 0.3, 0.17), Color(0.25, 0.19, 0.12)], "lv": 1 },
+		{ "n": "废土技师", "d": "硝烟熏染的维修作战服", "colors": [Color(0.36, 0.34, 0.3), Color(0.28, 0.26, 0.23), Color(0.19, 0.18, 0.16)], "lv": 15 },
+		{ "n": "燃烧军团", "d": "烈焰涂装,反装甲精英", "colors": [Color(0.62, 0.22, 0.1), Color(0.45, 0.16, 0.08), Color(0.3, 0.1, 0.05)], "lv": 40 },
+	],
+	"support": [
+		{ "n": "战地医护", "d": "红十字标识补给装甲服", "colors": [Color(0.78, 0.8, 0.78), Color(0.55, 0.58, 0.55), Color(0.35, 0.38, 0.35)], "lv": 1 },
+		{ "n": "沙漠之狐", "d": "荒漠迷彩,中东战场补给线", "colors": [Color(0.72, 0.62, 0.4), Color(0.58, 0.5, 0.33), Color(0.42, 0.36, 0.24)], "lv": 15 },
+		{ "n": "幽灵信使", "d": "灰白数码迷彩,前线生命线", "colors": [Color(0.42, 0.44, 0.46), Color(0.3, 0.32, 0.34), Color(0.2, 0.21, 0.22)], "lv": 40 },
+	],
+	"recon": [
+		{ "n": "林地侦察", "d": "林地伪装网,观察手标配", "colors": [Color(0.28, 0.36, 0.22), Color(0.2, 0.27, 0.16), Color(0.13, 0.17, 0.1)], "lv": 1 },
+		{ "n": "冰原之眼", "d": "雪地吉利服,极地狙击手", "colors": [Color(0.9, 0.92, 0.94), Color(0.72, 0.76, 0.8), Color(0.55, 0.6, 0.64)], "lv": 15 },
+		{ "n": "暗影猎手", "d": "全黑夜战装具,无声无息", "colors": [Color(0.12, 0.12, 0.14), Color(0.2, 0.2, 0.23), Color(0.08, 0.08, 0.09)], "lv": 40 },
+	],
+}
+var _bp_class := "assault"
+var _bp_class_btns: Dictionary = {}
+var _bp_grid: GridContainer = null
+var _bp_sel: Dictionary = {}      # 兵种 → 选中的皮肤索引
+var _bp_skins: Dictionary = {}    # SoldierModel.SKINS(若有),结构归一化后使用
+var _bp_equipped: Dictionary = {} # 兵种 → 已装备皮肤 id(优先 SkinCfg 持久化,缺失时本地内存兜底)
+var _bp_purchase: Button = null
+var _skin_cfg: Script = null      # SkinCfg 脚本(Gameplay 团队交付,可能尚未存在 → 防御式加载)
+var _skin_cfg_missed := false     # 已尝试加载但失败/API 不符,不再重试
+
+
+func _build_battlepass() -> void:
+	var s := _add_screen("battlepass")
+	_bg(s, Color(0.01, 0.03, 0.05, 0.92))
+	s.add_child(UiTheme.BattleBg.new())
+	_make_tab_bar(s, "battlepass")
+	_bp_load_skins()
+	_bp_load_equipped(_bp_class)
+	var root := VBoxContainer.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.offset_left = 24
+	root.offset_top = 58
+	root.offset_right = -24
+	root.offset_bottom = -16
+	root.add_theme_constant_override("separation", 10)
+	s.add_child(root)
+	# 顶栏
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 14)
+	root.add_child(head)
+	head.add_child(UiTheme.make_label("战斗通行证", 30, UiTheme.TXT))
+	head.add_child(UiTheme.make_label("BATTLE PASS · 赛季 I", 14, UiTheme.PRIMARY))
+	var hsp := Control.new()
+	hsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(hsp)
+	head.add_child(UiTheme.make_label("通行证等级 " + str(BP_LEVEL), 16, UiTheme.PRIMARY))
+	# 等级进度条 + 每 10 级奖励标记
+	var bar_panel := UiTheme.make_panel(0.7)
+	root.add_child(bar_panel)
+	var bv := VBoxContainer.new()
+	bv.add_theme_constant_override("separation", 6)
+	bar_panel.add_child(bv)
+	var mark_titles := { 10: "徽章", 20: "挂件", 30: "武器皮肤", 40: "名片", 50: "战术动作",
+		60: "武器皮肤", 70: "载具皮肤", 80: "处决动作", 90: "特殊名片", 100: "大师皮肤" }
+	var marks := HBoxContainer.new()
+	bv.add_child(marks)
+	for lv in [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]:
+		var m := VBoxContainer.new()
+		m.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		m.alignment = BoxContainer.ALIGNMENT_CENTER
+		marks.add_child(m)
+		var reached: bool = lv <= BP_LEVEL
+		var box := ColorRect.new()
+		box.color = Color(0.0, 0.35, 0.45, 0.95) if reached else Color(0.1, 0.14, 0.18, 0.9)
+		box.custom_minimum_size = Vector2(26, 26)
+		box.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		m.add_child(box)
+		var tl := UiTheme.make_label("Lv." + str(lv), 10, UiTheme.PRIMARY if reached else UiTheme.TXT_DIM)
+		tl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		m.add_child(tl)
+		var tn := UiTheme.make_label(mark_titles[lv], 10, UiTheme.TXT_DIM)
+		tn.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		m.add_child(tn)
+	var track := HBoxContainer.new()
+	bv.add_child(track)
+	var fill := ColorRect.new()
+	fill.color = UiTheme.PRIMARY
+	fill.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	fill.size_flags_stretch_ratio = float(BP_LEVEL)
+	fill.custom_minimum_size = Vector2(0, 14)
+	track.add_child(fill)
+	var rest := ColorRect.new()
+	rest.color = Color(0.08, 0.12, 0.16, 0.9)
+	rest.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rest.size_flags_stretch_ratio = float(100 - BP_LEVEL)
+	rest.custom_minimum_size = Vector2(0, 14)
+	track.add_child(rest)
+	# 兵种标签 + 购买按钮
+	var ctab := HBoxContainer.new()
+	ctab.add_theme_constant_override("separation", 8)
+	root.add_child(ctab)
+	ctab.add_child(UiTheme.make_label("兵种皮肤", 15, UiTheme.PRIMARY))
+	for cid in WeaponsData.C():
+		var cb := UiTheme.make_button(WeaponsData.C()[cid].cn, 13)
+		cb.toggle_mode = true
+		cb.button_pressed = (cid == _bp_class)
+		cb.custom_minimum_size = Vector2(120, 32)
+		cb.pressed.connect(func(): _bp_switch_class(cid))
+		ctab.add_child(cb)
+		_bp_class_btns[cid] = cb
+	var csp := Control.new()
+	csp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ctab.add_child(csp)
+	_bp_purchase = UiTheme.make_cta("购买通行证", 14)
+	_bp_purchase.custom_minimum_size = Vector2(170, 32)
+	_bp_purchase.pressed.connect(func(): _toast("演示:购买通行证功能即将推出"))
+	ctab.add_child(_bp_purchase)
+	# 皮肤卡片网格(3 列)
+	var gpanel := UiTheme.make_panel(0.7)
+	gpanel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	root.add_child(gpanel)
+	_bp_grid = GridContainer.new()
+	_bp_grid.columns = 3
+	_bp_grid.add_theme_constant_override("h_separation", 12)
+	_bp_grid.add_theme_constant_override("v_separation", 12)
+	_bp_grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	gpanel.add_child(_bp_grid)
+	_refresh_bp_grid()
+
+
+func _bp_switch_class(cid: String) -> void:
+	AudioSys.ui()
+	_bp_class = cid
+	for k in _bp_class_btns:
+		_bp_class_btns[k].button_pressed = (k == cid)
+	_bp_load_equipped(cid)
+	_refresh_bp_grid()
+
+
+func _refresh_bp_grid() -> void:
+	for c in _bp_grid.get_children():
+		_bp_grid.remove_child(c)
+		c.queue_free()
+	var skins: Array = _bp_skins_for(_bp_class)
+	for i in skins.size():
+		_bp_grid.add_child(_bp_skin_card(skins[i], i))
+
+
+func _bp_skins_for(cid: String) -> Array:
+	if _bp_skins.has(cid) and not (_bp_skins[cid] as Array).is_empty():
+		return _bp_skins[cid]
+	return BP_DEMO.get(cid, [])
+
+
+## SkinCfg 防御式适配:Gameplay 团队交付 res://src/data/skin_cfg.gd(class_name SkinCfg,静态方法),
+## 未交付/API 不符时返回 null,界面降级为本地演示状态(装备仅存内存,不崩溃)。
+## 依赖 API: SkinCfg.get_skin(class_id: String) -> String; SkinCfg.save_skin(class_id: String, skin_id: String) -> void
+## 存档路径 user://skin_cfg.cfg,键 class_<class_id>,默认 "standard"(由 Gameplay 负责)
+func _bp_skin_cfg() -> Script:
+	if _skin_cfg != null or _skin_cfg_missed:
+		return _skin_cfg
+	if not ResourceLoader.exists("res://src/data/skin_cfg.gd"):
+		return null
+	var s: Script = load("res://src/data/skin_cfg.gd") as Script
+	if s == null or not (s.has_method("get_skin") and s.has_method("save_skin")):
+		_skin_cfg_missed = true
+		push_warning("[BP] SkinCfg 缺失 get_skin/save_skin,降级为本地演示装备")
+		return null
+	_skin_cfg = s
+	print("[BP] SkinCfg 已就绪,皮肤装备将持久化到 user://skin_cfg.cfg")
+	return _skin_cfg
+
+
+## 读取某兵种已装备皮肤 id(界面打开/兵种 Tab 切换时调用;SkinCfg 缺失时保留本地状态)
+func _bp_load_equipped(cid: String) -> void:
+	var cfg := _bp_skin_cfg()
+	if cfg != null:
+		_bp_equipped[cid] = str(cfg.call("get_skin", cid))
+
+
+## 装备皮肤:先落本地状态(即时反馈),再经 SkinCfg 持久化(防御式,失败不影响界面)
+func _bp_equip_skin(cid: String, sid: String, skin_name: String) -> void:
+	AudioSys.ui()
+	_bp_equipped[cid] = sid
+	var cfg := _bp_skin_cfg()
+	if cfg != null:
+		cfg.call("save_skin", cid, sid)
+		print("[BP] SkinCfg.save_skin(class=", cid, ", skin=", sid, ")")
+	_toast("已装备 " + skin_name)
+	_refresh_bp_grid()
+
+
+## 皮肤数据:优先 SoldierModel.SKINS(存在即用,支持 {皮肤id:{部件:色}} 与 [{n,d,colors,lv}] 两种结构),否则内置演示数据
+const SKIN_CN := { "standard": "原版制服", "arctic": "北极迷彩", "night": "夜战装", "desert": "荒漠迷彩",
+	"black": "黑色作战", "brown": "棕土涂装", "gray": "城市灰", "urban": "城市迷彩", "white": "雪地伪装" }
+const SKIN_PART_ORDER := ["uniform", "vest", "helmet", "gear", "gear2"]
+func _bp_load_skins() -> void:
+	_bp_skins = {}
+	var p := "res://src/models/soldier_model.gd"
+	if not ResourceLoader.exists(p):
+		return
+	var SM: Script = load(p)
+	if SM == null:
+		return
+	var raw: Variant = null
+	if SM.get_script_constant_map().has("SKINS"):
+		raw = SM.get("SKINS")
+	if raw is Dictionary:
+		for k in raw:
+			var arr: Array = []
+			var v = raw[k]
+			if v is Array:
+				for e in v:
+					if e is Dictionary:
+						var cols: Variant = e.get("colors", e.get("c", []))
+						var colors: Array = []
+						if cols is Array:
+							for cc in cols:
+								colors.append(_to_color(cc))
+						arr.append({
+							"id": str(e.get("id", "")),
+							"n": str(e.get("n", e.get("cn", e.get("name", "未命名皮肤")))),
+							"d": str(e.get("d", e.get("desc", ""))),
+							"colors": colors,
+							"lv": int(e.get("lv", e.get("level", 1))),
+						})
+					elif e is String:
+						arr.append({ "id": e, "n": e, "d": "", "colors": [], "lv": 1 })
+			elif v is Dictionary:
+				# 真实结构 {皮肤id: {uniform/vest/helmet/gear: "#hex"}}:皮肤名+配色色块(4)+演示等级
+				var i := 0
+				for sid in v:
+					var pal: Dictionary = v[sid]
+					var colors: Array = []
+					for part in SKIN_PART_ORDER:
+						if pal.has(part) and colors.size() < 4:
+							colors.append(_to_color(pal[part]))
+					arr.append({
+						"id": str(sid),
+						"n": str(SKIN_CN.get(sid, sid)),
+						"d": "兵种标准配色 · 部件涂装已应用",
+						"colors": colors,
+						"lv": [1, 20, 45][mini(i, 2)],
+					})
+					i += 1
+			_bp_skins[str(k)] = arr
+
+
+func _to_color(v) -> Color:
+	if v is Color:
+		return v
+	if v is String:
+		return Color.from_string(v, Color(0.5, 0.55, 0.6))
+	return Color(0.5, 0.55, 0.6)
+
+
+## 皮肤卡片:名称 + 配色色块条 + 描述 + 状态徽章 + 装备按钮;已装备卡片高亮边框+徽章;未解锁不可装备(点击提示等级不足)
+func _bp_skin_card(s: Dictionary, idx: int) -> Control:
+	var lv := int(s.get("lv", 1))
+	var unlocked: bool = lv <= BP_LEVEL
+	var selected: bool = _bp_sel.get(_bp_class) == idx
+	var sid := str(s.get("id", ""))
+	if sid == "":
+		sid = "bp_demo_" + str(idx)
+	var equipped_id := str(_bp_equipped.get(_bp_class, ""))
+	var equipped: bool = unlocked and equipped_id != "" and equipped_id == sid
+	var card := PanelContainer.new()
+	card.mouse_filter = Control.MOUSE_FILTER_STOP
+	var border := UiTheme.FRIENDLY if equipped else (UiTheme.PRIMARY if (selected and unlocked) else Color(0.2, 0.26, 0.32, 0.5))
+	card.add_theme_stylebox_override("panel", UiTheme.stylebox(
+		Color(0.0, 0.05, 0.08, 0.92) if unlocked else Color(0.02, 0.03, 0.05, 0.92),
+		border, 2 if equipped else 1, 2, 12))
+	var v := VBoxContainer.new()
+	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	v.add_theme_constant_override("separation", 6)
+	card.add_child(v)
+	var h := HBoxContainer.new()
+	h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	v.add_child(h)
+	h.add_child(UiTheme.make_label(str(s.get("n", "未命名皮肤")), 15, Color(0.9, 0.95, 0.98)))
+	var hsp := Control.new()
+	hsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	h.add_child(hsp)
+	var badge_txt := "已装备" if equipped else ("已解锁" if unlocked else "未解锁 · Lv." + str(lv))
+	var badge_col := UiTheme.FRIENDLY if (equipped or unlocked) else UiTheme.ENEMY
+	var badge := UiTheme.make_label(badge_txt, 11, badge_col)
+	badge.add_theme_stylebox_override("normal", UiTheme.stylebox(
+		Color(0.0, 0.28, 0.16, 0.85) if equipped else (Color(0.0, 0.2, 0.28, 0.8) if unlocked else Color(0.3, 0.08, 0.05, 0.8)),
+		UiTheme.FRIENDLY if equipped else Color.TRANSPARENT, 1 if equipped else 0, 1, 6))
+	h.add_child(badge)
+	var sw := HBoxContainer.new()
+	sw.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sw.add_theme_constant_override("separation", 4)
+	v.add_child(sw)
+	var colors: Array = s.get("colors", [])
+	if colors.is_empty():
+		colors = [Color(0.4, 0.45, 0.5), Color(0.3, 0.34, 0.38), Color(0.2, 0.23, 0.26)]
+	for c in colors:
+		var cb := ColorRect.new()
+		cb.color = c
+		cb.custom_minimum_size = Vector2(46, 14)
+		sw.add_child(cb)
+	var d := UiTheme.make_label(str(s.get("d", "")), 12, UiTheme.TXT_DIM)
+	d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	v.add_child(d)
+	# 装备按钮行(仅已解锁皮肤;已装备的置灰显示)
+	if unlocked:
+		var bh := HBoxContainer.new()
+		bh.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		bh.add_theme_constant_override("separation", 8)
+		v.add_child(bh)
+		var bhsp := Control.new()
+		bhsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		bh.add_child(bhsp)
+		var btn := UiTheme.make_button("装备", 12, Color(0.0, 0.3, 0.38, 0.9))
+		btn.custom_minimum_size = Vector2(84, 26)
+		if equipped:
+			btn.disabled = true
+			btn.text = "已装备"
+		else:
+			var cid := _bp_class
+			var skin_name := str(s.get("n", "未命名皮肤"))
+			btn.pressed.connect(func(): _bp_equip_skin(cid, sid, skin_name))
+		bh.add_child(btn)
+	card.gui_input.connect(func(ev: InputEvent):
+		if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_LEFT and ev.pressed:
+			AudioSys.ui()
+			if not unlocked:
+				_toast("通行证等级不足 · 需 Lv." + str(lv) + " 解锁该皮肤")
+				return
+			_bp_sel[_bp_class] = idx
+			_refresh_bp_grid())
+	return card
+
+
+## ==================== 档案界面 ====================
+func _build_profile() -> void:
+	var s := _add_screen("profile")
+	_bg(s, Color(0.01, 0.03, 0.05, 0.92))
+	s.add_child(UiTheme.BattleBg.new())
+	_make_tab_bar(s, "profile")
+	var root := VBoxContainer.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.offset_left = 24
+	root.offset_top = 58
+	root.offset_right = -24
+	root.offset_bottom = -16
+	root.add_theme_constant_override("separation", 10)
+	s.add_child(root)
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 14)
+	root.add_child(head)
+	head.add_child(UiTheme.make_label("个人档案", 30, UiTheme.TXT))
+	head.add_child(UiTheme.make_label("PROFILE · 作战记录与服役数据", 14, UiTheme.PRIMARY))
+	# 中段:左军衔卡 + 右生涯统计
+	var mid := HBoxContainer.new()
+	mid.add_theme_constant_override("separation", 14)
+	mid.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	root.add_child(mid)
+	var rank_panel := UiTheme.make_panel(0.7)
+	rank_panel.custom_minimum_size = Vector2(420, 0)
+	mid.add_child(rank_panel)
+	var rv := VBoxContainer.new()
+	rv.add_theme_constant_override("separation", 10)
+	rank_panel.add_child(rv)
+	var avatar := PanelContainer.new()
+	avatar.custom_minimum_size = Vector2(120, 120)
+	avatar.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.0, 0.2, 0.26, 0.9), UiTheme.PRIMARY, 2, 3, 10))
+	avatar.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	rv.add_child(avatar)
+	var al := UiTheme.make_label("SF-7749", 16, UiTheme.PRIMARY)
+	al.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	avatar.add_child(al)
+	var rank_l := UiTheme.make_label("上尉", 26, UiTheme.TXT)
+	rank_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rv.add_child(rank_l)
+	var rv2 := UiTheme.make_label("等级 32 · 服役时长 142 小时", 14, UiTheme.TXT_DIM)
+	rv2.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rv.add_child(rv2)
+	var xp_track := HBoxContainer.new()
+	rv.add_child(xp_track)
+	var xp_fill := ColorRect.new()
+	xp_fill.color = UiTheme.PRIMARY
+	xp_fill.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	xp_fill.size_flags_stretch_ratio = 64.0
+	xp_fill.custom_minimum_size = Vector2(0, 12)
+	xp_track.add_child(xp_fill)
+	var xp_rest := ColorRect.new()
+	xp_rest.color = Color(0.08, 0.12, 0.16, 0.9)
+	xp_rest.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	xp_rest.size_flags_stretch_ratio = 36.0
+	xp_rest.custom_minimum_size = Vector2(0, 12)
+	xp_track.add_child(xp_rest)
+	rv.add_child(UiTheme.make_label("军衔经验 64% · 距离下一军衔还差 36%", 12, UiTheme.TXT_DIM))
+	rv.add_child(UiTheme.make_label("军衔晋升:少尉 → 上尉 → 少校", 12, UiTheme.TXT_DIM))
+	var stats_panel := UiTheme.make_panel(0.7)
+	stats_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mid.add_child(stats_panel)
+	var sv := VBoxContainer.new()
+	sv.add_theme_constant_override("separation", 8)
+	stats_panel.add_child(sv)
+	sv.add_child(UiTheme.make_label("生涯统计", 15, UiTheme.PRIMARY))
+	var grid := GridContainer.new()
+	grid.columns = 4
+	grid.add_theme_constant_override("h_separation", 10)
+	grid.add_theme_constant_override("v_separation", 10)
+	grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	sv.add_child(grid)
+	var stats := [
+		["总击杀", "1,248", UiTheme.TXT],
+		["总阵亡", "862", UiTheme.TXT],
+		["KD 比值", "1.45", Color(1, 0.85, 0.4)],
+		["胜场", "86", UiTheme.FRIENDLY],
+		["胜率", "61%", UiTheme.FRIENDLY],
+		["最常用武器", "M4A1", UiTheme.TXT],
+		["总游戏时长", "142h", UiTheme.TXT],
+		["爆头率", "28%", UiTheme.TXT],
+	]
+	for st in stats:
+		grid.add_child(_stat_card(st[0], st[1], st[2]))
+	# 底部:最近战绩条形图 + 最近对局列表
+	var bot := HBoxContainer.new()
+	bot.add_theme_constant_override("separation", 14)
+	root.add_child(bot)
+	var chart_panel := UiTheme.make_panel(0.7)
+	chart_panel.custom_minimum_size = Vector2(560, 200)
+	bot.add_child(chart_panel)
+	var cv := VBoxContainer.new()
+	chart_panel.add_child(cv)
+	cv.add_child(UiTheme.make_label("最近战绩", 14, UiTheme.PRIMARY))
+	var bars := HBoxContainer.new()
+	bars.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	bars.alignment = BoxContainer.ALIGNMENT_CENTER
+	bars.add_theme_constant_override("separation", 14)
+	cv.add_child(bars)
+	var rounds := [ [true, 212], [true, 186], [false, 98], [true, 243], [false, 61], [true, 154], [true, 197], [false, 122] ]
+	for r in rounds:
+		var col := VBoxContainer.new()
+		col.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		col.add_theme_constant_override("separation", 3)
+		bars.add_child(col)
+		var tag := UiTheme.make_label("胜" if r[0] else "负", 11, UiTheme.FRIENDLY if r[0] else UiTheme.ENEMY)
+		tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		col.add_child(tag)
+		var spacer := Control.new()
+		spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		col.add_child(spacer)
+		var bar := ColorRect.new()
+		bar.color = UiTheme.FRIENDLY if r[0] else UiTheme.ENEMY
+		bar.custom_minimum_size = Vector2(38, maxi(14, int(r[1]) / 2))
+		col.add_child(bar)
+	var list_panel := UiTheme.make_panel(0.7)
+	list_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bot.add_child(list_panel)
+	var lp := VBoxContainer.new()
+	lp.add_theme_constant_override("separation", 6)
+	list_panel.add_child(lp)
+	lp.add_child(UiTheme.make_label("最近对局", 14, UiTheme.PRIMARY))
+	var matches := [
+		["断裂谷地", "征服", "212 : 178", true],
+		["风暴海岸", "突破", "147 : 153", false],
+		["迷雾森林", "征服", "243 : 150", true],
+		["钢铁工厂", "征服", "98 : 210", false],
+		["暗夜废墟", "突破", "186 : 164", true],
+	]
+	for mt in matches:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 10)
+		lp.add_child(row)
+		var tag := UiTheme.make_label("胜" if mt[3] else "负", 12, UiTheme.FRIENDLY if mt[3] else UiTheme.ENEMY)
+		tag.custom_minimum_size = Vector2(24, 0)
+		row.add_child(tag)
+		row.add_child(UiTheme.make_label(str(mt[0]) + " · " + str(mt[1]), 13, UiTheme.TXT))
+		var rowsp := Control.new()
+		rowsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(rowsp)
+		row.add_child(UiTheme.make_label(str(mt[2]), 13, UiTheme.TXT_DIM))
+
+
+func _stat_card(t: String, v: String, c: Color) -> Control:
+	var p := PanelContainer.new()
+	p.custom_minimum_size = Vector2(0, 74)
+	p.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.0, 0.05, 0.08, 0.9), Color(0.22, 0.28, 0.34, 0.5), 1, 2, 10))
+	var vc := VBoxContainer.new()
+	vc.alignment = BoxContainer.ALIGNMENT_CENTER
+	p.add_child(vc)
+	var vl := UiTheme.make_label(v, 22, c)
+	vl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vc.add_child(vl)
+	var tl := UiTheme.make_label(t, 12, UiTheme.TXT_DIM)
+	tl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vc.add_child(tl)
+	return p
+
+
+## ==================== 商店界面 ====================
+func _build_store() -> void:
+	var s := _add_screen("store")
+	_bg(s, Color(0.01, 0.03, 0.05, 0.9))
+	s.add_child(UiTheme.BattleBg.new())
+	_make_tab_bar(s, "store")
+	var root := VBoxContainer.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.offset_left = 24
+	root.offset_top = 58
+	root.offset_right = -24
+	root.offset_bottom = -16
+	root.add_theme_constant_override("separation", 12)
+	s.add_child(root)
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 14)
+	root.add_child(head)
+	head.add_child(UiTheme.make_label("军需商店", 30, UiTheme.TXT))
+	head.add_child(UiTheme.make_label("ARMY STORE · 军需物资供应部", 14, UiTheme.PRIMARY))
+	var center := VBoxContainer.new()
+	center.alignment = BoxContainer.ALIGNMENT_CENTER
+	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	center.add_theme_constant_override("separation", 12)
+	root.add_child(center)
+	center.add_child(UiTheme.make_label("敬 请 期 待", 42, UiTheme.PRIMARY))
+	var sub := UiTheme.make_label("COMING SOON · 军需物资正在调配", 14, UiTheme.TXT_DIM)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	center.add_child(sub)
+	var grid := GridContainer.new()
+	grid.columns = 3
+	grid.add_theme_constant_override("h_separation", 14)
+	grid.add_theme_constant_override("v_separation", 14)
+	grid.custom_minimum_size = Vector2(900, 200)
+	grid.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	center.add_child(grid)
+	for i in 6:
+		var ph := PanelContainer.new()
+		ph.custom_minimum_size = Vector2(280, 80)
+		ph.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.04, 0.06, 0.08, 0.85), Color(0.2, 0.26, 0.32, 0.4), 1, 2, 10))
+		var phl := UiTheme.make_label("商品位 " + str(i + 1), 13, UiTheme.TXT_DIM)
+		phl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		ph.add_child(phl)
+		grid.add_child(ph)
+	var foot := UiTheme.make_label("更多军需物资即将上架 · 关注前线通告", 12, UiTheme.TXT_DIM)
+	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	center.add_child(foot)
 

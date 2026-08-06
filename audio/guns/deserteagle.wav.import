@@ -2,13 +2,13 @@
 
 importer="wav"
 type="AudioStreamWAV"
-uid="uid://blu0oipvq53jp"
-path="res://.godot/imported/wind_loop.wav-5adc7468cb71d4f667ec70305849aab9.sample"
+uid="uid://bw4ttrbkinfmj"
+path="res://.godot/imported/deserteagle.wav-07fbbba2d5a660f01a64a97458e9a6f0.sample"
 
 [deps]
 
-source_file="res://audio/wind_loop.wav"
-dest_files=["res://.godot/imported/wind_loop.wav-5adc7468cb71d4f667ec70305849aab9.sample"]
+source_file="res://audio/guns/deserteagle.wav"
+dest_files=["res://.godot/imported/deserteagle.wav-07fbbba2d5a660f01a64a97458e9a6f0.sample"]
 
 [params]
 

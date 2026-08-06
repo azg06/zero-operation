@@ -377,7 +377,7 @@ var _fade_rect: ColorRect             # 全屏黑(章末转场/重试淡入;独�
 var _fade_tw: Tween
 var _zone_prev := false               # 目标区域进入/离开轻提示去抖(上一帧状态)
 var _top_bar: HBoxContainer           # 顶部票数/旗帜/计时条(战役模式隐藏)
-var _campaign_connected := false      # 战役 signal 懒连接标记(campaign 由 main 后创建)
+var _campaign_src: Node = null       # 战役 signal 已连接实例(campaign 实例切换时断开旧/重连新)
 
 var _banner_t := 0.0
 var _hint_t := 0.0
@@ -894,16 +894,8 @@ func _build() -> void:
 
 
 func _make_vignette_tex() -> Texture2D:
-	var img := Image.create(256, 256, false, Image.FORMAT_RGBA8)
-	img.fill(Color(0, 0, 0, 0))
-	for y in 256:
-		for x in 256:
-			var dx := (x - 127.5) / 127.5
-			var dy := (y - 127.5) / 127.5
-			var d := sqrt(dx * dx + dy * dy)
-			if d > 0.55:
-				img.set_pixel(x, y, Color(1, 1, 1, clampf((d - 0.55) / 0.45, 0, 1)))
-	return ImageTexture.create_from_image(img)
+	# 与 effects.gd 共用实现(静态生成器),保持原白色蒙版 + modulate 染色的行为
+	return Effects.make_vignette_tex(Color(1, 1, 1), 0.55, 1.0, true, 1.0)
 
 
 ## ============ 界面切换 ============
@@ -1241,9 +1233,13 @@ func _update_interact_prompt(camp_mode: bool, in_cutscene: bool) -> void:
 func update_hud(dt: float) -> void:
 	var p = G.player
 	_hud_t += dt
-	# 战役 signal 懒连接(campaign 由 main 在 HUD 之后创建,首帧补齐)
-	if not _campaign_connected and G.campaign != null:
-		_campaign_connected = true
+	# 战役 signal 懒连接(campaign 由 main 在 HUD 之后创建,首帧补齐);
+	# 实例变化(切换/重建 Campaign)时先断开旧实例再重连,防信号挂到废弃实例上
+	if G.campaign != null and G.campaign != _campaign_src:
+		if _campaign_src != null and is_instance_valid(_campaign_src):
+			_campaign_src.dialogue_requested.disconnect(show_campaign_dialogue)
+			_campaign_src.cutscene_card_requested.disconnect(show_campaign_card)
+		_campaign_src = G.campaign
 		G.campaign.dialogue_requested.connect(show_campaign_dialogue)
 		G.campaign.cutscene_card_requested.connect(show_campaign_card)
 		# 懒连接补齐:若已在战斗中(开场被跳过),补发当前目标点名卡
@@ -1401,16 +1397,17 @@ func update_hud(dt: float) -> void:
 			_last_ammo = ammo_now
 			_pop_label(_ammo_mag)
 		_set_text(_ammo_mag, "——" if gun.reloading else str(ammo_now))
-		_ammo_mag.add_theme_color_override("font_color", Color(1, 0.45, 0.3) if ammo_now <= gun.def.mag * 0.25 else Color(1, 1, 1))
+		# [MODS 兼容] 弹匣余量/低弹警示以 gun.mag_cap 为基准(已应用扩容/快拔改装件;gun.def.mag 仅为未改装基础值)
+		_ammo_mag.add_theme_color_override("font_color", Color(1, 0.45, 0.3) if ammo_now <= gun.mag_cap * 0.25 else Color(1, 1, 1))
 		_set_text(_ammo_reserve, str(gun.reserve))
 		# 弹匣余量条:换弹时黄色脉动,低弹红色
-		_ammo_fill.anchor_right = clampf(float(ammo_now) / float(maxi(1, gun.def.mag)), 0, 1)
+		_ammo_fill.anchor_right = clampf(float(ammo_now) / float(maxi(1, gun.mag_cap)), 0, 1)
 		if gun.reloading:
 			_ammo_fill.modulate.a = 0.45 + 0.35 * (0.5 + 0.5 * sin(_hud_t * 13.0))
 			_ammo_fill.color = Color(1.0, 0.82, 0.3)
 		else:
 			_ammo_fill.modulate.a = 1.0
-			_ammo_fill.color = Color(1.0, 0.4, 0.3) if ammo_now <= gun.def.mag * 0.25 else Color(0.75, 0.8, 0.85)
+			_ammo_fill.color = Color(1.0, 0.4, 0.3) if ammo_now <= gun.mag_cap * 0.25 else Color(0.75, 0.8, 0.85)
 		_set_text(_fire_mode, "火箭推进" if gun.def.projectile else ("全自动" if gun.def.auto else ("泵动/半自动" if gun.def.pellets > 1 else "半自动")))
 		_set_text(_nade_count, "G ×" + str(p.grenades) + "  X 反雷 ×" + str(p.at_grenades) + "  V 地雷 ×" + str(p.at_mines))
 		var cls = WeaponsData.C()[p.class_id]
@@ -1427,9 +1424,10 @@ func update_hud(dt: float) -> void:
 			# 驾驶中隐藏步战准星(载具 HUD 提供坦克风格主准星)
 			ch_op = 0.0
 			spread_px = 0.0
-		elif not gun.def.scope or gun.ads_amount < 0.7:
+		# [MODS 兼容] 4倍镜改装(scope_ads)与狙击镜同机制:满开镜隐藏准星
+		elif (not gun.def.scope and not gun.scope_ads) or gun.ads_amount < 0.7:
 			spread_px = clampf(gun.current_spread() / (G.camera.fov * PI / 180.0) * get_viewport().get_visible_rect().size.y, 2, 90)
-			ch_op = 0.25 if (gun.ads_amount > 0.6 and not gun.def.scope) else 1.0
+			ch_op = 0.25 if (gun.ads_amount > 0.6 and not gun.def.scope and not gun.scope_ads) else 1.0
 		else:
 			spread_px = 2.0
 			ch_op = 0.0
@@ -1439,8 +1437,9 @@ func update_hud(dt: float) -> void:
 			_crosshair.spread_px = spread_px
 			_crosshair.ch_opacity = ch_op
 			_crosshair.queue_redraw()
-		# 狙击镜:全屏放大 + 镜模型遮罩(镜内放大效果)
-		_scope.visible = gun.def.scope and gun.ads_amount > 0.7
+		# 旧方案恢复:开镜 = 主相机 FOV 全屏放大 + 2D 镜罩(ScopeOverlay:圆形黑罩+金属环+细十字分划+密位点)
+		# 4x 改装移除后仅狙击(def.scope)触发;scope_ads 保留兼容(当前恒为 false)
+		_scope.visible = (gun.def.scope or gun.scope_ads) and gun.ads_amount > 0.7
 		if _scope.visible:
 			_scope.queue_redraw()
 		# 占领进度(战役模式隐藏:旗帜不参与胜负)

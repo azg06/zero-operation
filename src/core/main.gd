@@ -251,19 +251,32 @@ func _ready() -> void:
 	var ua := OS.get_cmdline_user_args()
 	if ua.has("--screenshot"):
 		var sidx := ua.find("--screenshot")
-		_shot_frame = int(ua[sidx + 1])
-		_shot_path = ua[sidx + 2]
+		if ua.size() > sidx + 2:
+			_shot_frame = int(ua[sidx + 1])
+			_shot_path = ua[sidx + 2]
+		else:
+			print("[SHOT] 用法: --screenshot <帧号> <输出路径>(参数缺失,已忽略)")
 	if ua.has("--test-play"):
 		var idx := ua.find("--test-play")
 		var mode: String = ua[idx + 1] if ua.size() > idx + 1 else "conquest"
-		G.sel_maps[mode] = ua[idx + 2] if ua.size() > idx + 2 else "random"
-		_menus.hide_all()
-		G.game.start_match(mode)
-		if not ua.has("--no-deploy"):
-			G.game.deploy("assault", { "primary": "m4", "secondary": "m1911", "shotgun": "m1014" })
-			print("[TEST] 已部署,开始模拟游玩 state=", G.state)
+		# 模式名校验:非法模式(如把地图名误当模式参数)时打印用法说明并忽略 --test-play,不中止
+		if mode != "conquest" and mode != "breakthrough" and mode != "campaign":
+			print("[TEST] 警告:未知游玩模式 \"", mode, "\"(可用: conquest / breakthrough / campaign),已忽略 --test-play")
 		else:
-			print("[TEST] 部署界面 state=", G.state)
+			# 地图名校验:不存在(含把 --quit-after 等后续参数误当地图名)时打印错误并回退随机,
+			# 绝不带无效 id 进入世界构建(防中途中止与悬空 Flag 引用)
+			if ua.size() > idx + 2 and not MapsData.M().has(ua[idx + 2]):
+				print("[TEST] 警告:未知地图名 \"", ua[idx + 2], "\"(可用: ", MapsData.M().keys(), "),回退随机地图")
+				G.sel_maps[mode] = "random"
+			else:
+				G.sel_maps[mode] = ua[idx + 2] if ua.size() > idx + 2 else "random"
+			_menus.hide_all()
+			G.game.start_match(mode)
+			if not ua.has("--no-deploy"):
+				G.game.deploy("assault", { "primary": "m4", "secondary": "m1911", "shotgun": "m1014" })
+				print("[TEST] 已部署,开始模拟游玩 state=", G.state)
+			else:
+				print("[TEST] 部署界面 state=", G.state)
 	# 换枪测试:--test-gun <id>
 	if ua.has("--test-gun"):
 		var gidx := ua.find("--test-gun")
@@ -285,6 +298,73 @@ func _ready() -> void:
 			G.player.gun_index = 0
 			G.player.gun().equip()
 		print("[TEST] 已切换武器: ", gid)
+	# ADS 截图诊断:--test-ads-capture [--test-optics <reddot|holo|none>](配合 --test-play)
+	# QA 用途:满 ADS 定帧截取 视角模型 SubViewport + 全屏画面,检查镜罩/枪身隐藏/FOV 放大
+	# 置于 --test-gun 之后:同时传 --test-gun 时,截图作用于切换后的枪(如狙击验证)
+	if ua.has("--test-ads-capture"):
+		await get_tree().create_timer(1.0).timeout
+		if G.player.guns.is_empty():
+			print("[ADS-CAP] 玩家无武器(需配合 --test-play 部署),已跳过")
+		else:
+			var gid: String = G.player.guns[0].id
+			var opt_cfg := { "reddot": "opt_reddot", "holo": "opt_holo" }
+			var opt_arg := "none"
+			if ua.has("--test-optics"):
+				var oidx := ua.find("--test-optics")
+				if ua.size() > oidx + 1 and opt_cfg.has(ua[oidx + 1]):
+					opt_arg = ua[oidx + 1]
+				else:
+					print("[ADS-CAP] 无效 --test-optics 参数(可用: reddot / holo / none),回退 none")
+			# 临时改装:备份现档 → 写入临时 optic → 重建枪实例(经 load_cfg 完整走改装管线,
+			# 镜模型与 zoom_fov 均由枪实例读档后一并应用,最稳妥;截图后恢复原档)
+			var cfg_path := "user://mods_%s.cfg" % gid
+			var had_cfg: bool = FileAccess.file_exists(cfg_path)
+			var orig_cfg: Dictionary = WeaponModsData.load_cfg(gid)
+			if opt_arg != "none":
+				var tmp_cfg: Dictionary = orig_cfg.duplicate()
+				tmp_cfg["optic"] = opt_cfg[opt_arg]
+				WeaponModsData.save_cfg(gid, tmp_cfg)
+				var old_gun = G.player.gun()
+				G.vm_camera.remove_child(old_gun.group)
+				old_gun.group.queue_free()
+				var ng := Gun.new(gid, G.player)
+				G.player.guns[0] = ng
+				G.vm_camera.add_child(ng.group)
+				ng.equip()
+			G.player.spawn_protect = 60  # 诊断期间免被打死(枪被收起则截图无意义)
+			# player.gd 每帧用 Input.is_action_pressed 重算 ads_held,必须走真实输入管线(同 --test-ads)
+			Input.action_press("ads")
+			var g2 = G.player.gun()
+			g2.ads_amount = 1.0          # 强制满 ADS(跳过插值,立即进入开镜态)
+			await get_tree().create_timer(0.8).timeout  # 等 FOV 阻尼收敛 + 镜罩显现
+			g2 = G.player.gun()
+			# 诊断数值:目镜装点 y / 视角模型满 ADS 位 z(枪相对 vm_camera)/ 数据 ads_z
+			print("[ADS-CAP] optic_y=%.4f cam_z=%.4f ads_z=%.4f" % [
+				g2.def.sight_y, g2.group.position.z, g2.def.ads_z])
+			print("[ADS-CAP] gun=%s optic=%s scope=%s/%s zoom_fov=%.1f fov=%.1f ads=%.3f base_fov=%.1f" % [
+				gid, opt_arg, g2.def.scope, g2.scope_ads, g2.def.zoom_fov, G.camera.fov, g2.ads_amount,
+				G.settings.fov + G.player.sprint_amount * 6 + (4 if G.player.tac_sprint > 0 else 0) + 7.0 * clampf(G.player.slide_t / 0.7, 0.0, 1.0)])
+			# 曝光诊断:主世界/主相机的自动曝光状态与曝光参数
+			var wa: CameraAttributes = G.world_env.camera_attributes if G.world_env != null else null
+			var ma: CameraAttributes = G.camera.attributes if G.camera != null else null
+			var ae := func(a) -> String:
+				return "none" if a == null else ("on" if a.auto_exposure_enabled else "off")
+			var em := func(a) -> String:
+				return "-" if a == null else "%.2f" % a.exposure_multiplier
+			print("[ADS-CAP] world_te=%.3f world_ae=%s world_em=%s | cam_ae=%s cam_em=%s" % [
+				G.world_env.environment.tonemap_exposure if G.world_env != null and G.world_env.environment != null else -1.0,
+				ae.call(wa), em.call(wa), ae.call(ma), em.call(ma)])
+			if DisplayServer.get_name() != "headless":
+				var cap_path := "user://ads_%s.png" % opt_arg
+				G.vm_viewport.get_texture().get_image().save_png(cap_path)
+				print("[ADS-CAP] saved ", cap_path)
+				var cap_full := "user://ads_%s_full.png" % opt_arg
+				get_viewport().get_texture().get_image().save_png(cap_full)
+				print("[ADS-CAP] saved ", cap_full)
+			# 恢复原档(原本无档则删除临时文件,不留残留)
+			WeaponModsData.save_cfg(gid, orig_cfg)
+			if not had_cfg and FileAccess.file_exists(cfg_path):
+				DirAccess.remove_absolute(ProjectSettings.globalize_path(cfg_path))
 	# 按换弹进度截屏:--reload-shot <换弹秒数> <输出路径>(自动触发换弹)
 	if ua.has("--reload-shot"):
 		var rsidx := ua.find("--reload-shot")
@@ -657,11 +737,17 @@ func _ready() -> void:
 					maxuv.x = maxf(maxuv.x, uv.x)
 					maxuv.y = maxf(maxuv.y, uv.y)
 				var mat := c.material_override as StandardMaterial3D
-				print("[GC] UV范围: ", minuv, " → ", maxuv, " | 贴图: ", mat.albedo_texture, " | 反照色: ", mat.albedo_color)
-				if mat.albedo_texture != null:
-					mat.albedo_texture.get_image().save_png("C:\\Users\\gza\\AppData\\Local\\Temp\\opencode\\dbg_runtime_groundtex.png")
+				# material_override 可为空(地面网格走自身材质):此时仅报 UV,跳过贴图读取防 Nil 报错
+				print("[GC] UV范围: ", minuv, " → ", maxuv,
+					" | 贴图: ", mat.albedo_texture if mat != null else "(无 override 材质)",
+					" | 反照色: ", mat.albedo_color if mat != null else "N/A")
+				if mat != null and mat.albedo_texture != null:
+					var p := "user://dbg_runtime_groundtex.png"
+					mat.albedo_texture.get_image().save_png(p)
+					print("[GC] 地面贴图已保存: ", p)
 
 
+## ============ 主界面背景:特勤处备战屋(3D 战争房间 + 四兵种陈列台) ============
 ## ============ 主界面背景:特勤处备战屋(3D 战争房间 + 四兵种陈列台) ============
 func _setup_menu_scene() -> void:
 	# 清理旧编队(历史遗留,防残留)

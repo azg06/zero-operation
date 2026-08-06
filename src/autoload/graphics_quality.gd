@@ -84,7 +84,7 @@ func apply_preset(lv: int) -> void:
 		env.ssil_enabled = p["ssil"]
 		env.ssr_enabled = p["ssr"]
 		if p["ssr"]:
-			env.ssr_max_steps = 48 if lv == Level.ULTRA else 32
+			env.ssr_max_steps = 32
 			env.ssr_fade_out = 2.0
 		env.glow_enabled = p["glow"]
 		if p["glow"]:

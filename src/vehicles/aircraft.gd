@@ -46,7 +46,18 @@ var prev_yaw := 0.0              # 上一帧机头角(滚转率估计)
 var stall_t := 0.0               # 失速计时
 var landing := false             # 重伤返航降落
 var landed := false              # 已落地待修
-var _eng: AudioStreamPlayer3D = null   # 引擎/呼啸 3D 循环音(距离衰减,随转速/空速联动)
+var _eng_a: AudioStreamPlayer3D = null      # 引擎档位 player A/B(交叉淡化交替)
+var _eng_b: AudioStreamPlayer3D = null
+var _eng_streams: Array[AudioStreamWAV] = []  # 档位采样(heli: v1/v2;jet: v0/v2)
+var _eng_gear := 0                          # 当前档位
+var _eng_fade_in_t := 0.0                   # 新档淡入剩余时长(>0 时音量由计时器爬升)
+var _eng_tween: Tween = null                # 旧档淡出 tween(0.15s → -60dB 后停)
+var _eng_vol := 0.0                         # 稳态目标音量平滑值(jet 0↔0.44 渐变)
+# === 坠毁残骸燃烧(坠地即销毁 → 坠毁点生成 8s 燃烧现场:火焰+烟+光) ===
+var _burn_t := 0.0                          # 燃烧剩余时间
+var _burn_light: OmniLight3D = null
+var _burn_timer := 0.0                      # 粒子发射间隔计时
+var _crash_burn_pos := Vector3.ZERO         # 坠毁点
 
 
 func _init(p_team: String, p_type: String) -> void:
@@ -67,22 +78,94 @@ func _init(p_team: String, p_type: String) -> void:
 	_spawn()
 
 
-## 引擎/呼啸 3D 循环音:heli=engine_loop(旋翼),jet=engine_loop 变调 1.35-1.75× 模拟喷气呼啸
-## (滋滋声消除:jet 原用 wind_loop.wav 纯噪声采样作引擎,循环端点/量化噪声被感知为持续"嘶嘶",统一换干净发动机采样)
+## 引擎/呼啸 3D 循环音:按机型加载专属档位采样(heli=heli_engine_v1/v2 低速/高速旋翼,
+## jet=fighter_engine_v0/v2 待命/俯冲),A/B 双 player 交叉淡化切换,3D 距离衰减
 func _setup_engine_sound() -> void:
-	_eng = AudioStreamPlayer3D.new()
-	_eng.bus = AudioSys.BUS_SFX
-	_eng.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
-	_eng.unit_size = 20.0
-	_eng.max_distance = 420.0
-	var s: AudioStreamWAV = load("res://audio/engine_loop.wav")
-	s.loop_mode = AudioStreamWAV.LOOP_FORWARD
-	s.loop_begin = 0
-	s.loop_end = int(s.get_length() * s.mix_rate)
-	_eng.stream = s
-	_eng.volume_db = linear_to_db(0.001)
-	_eng.position = pos
-	add_child(_eng)
+	var base := "heli" if type == "heli" else "fighter"
+	var names := ["engine_v1", "engine_v2"] if type == "heli" else ["engine_v0", "engine_v2"]
+	for i in 2:
+		var p := AudioStreamPlayer3D.new()
+		p.bus = AudioSys.BUS_SFX
+		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		p.unit_size = 20.0
+		p.max_distance = 420.0
+		p.position = pos
+		add_child(p)
+		if i == 0:
+			_eng_a = p
+		else:
+			_eng_b = p
+		var s: AudioStreamWAV = load("res://audio/engines/%s_%s.wav" % [base, names[i]])
+		s.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		s.loop_begin = 0
+		s.loop_end = int(s.get_length() * s.mix_rate)
+		_eng_streams.append(s)
+	_eng_a.stream = _eng_streams[0]
+	_eng_a.volume_db = linear_to_db(0.002)
+	_eng_gear = 0
+
+
+func _eng_player() -> AudioStreamPlayer3D:
+	return _eng_a if _eng_gear == 0 else _eng_b
+
+
+## 档位交叉淡化:旧 player 0.15s 淡出至 -60dB 后停(防换流爆音),新档采样载入
+## 另一 player 以 0.004 起步播放,淡入音量由 _eng_update_sound 计时器爬升(0.25s)
+func _eng_set_gear(gear: int) -> void:
+	if gear == _eng_gear or gear >= _eng_streams.size():
+		return
+	var old := _eng_player()
+	_eng_gear = gear
+	if _eng_tween != null:
+		_eng_tween.kill()
+	_eng_tween = old.create_tween()
+	_eng_tween.tween_property(old, "volume_db", -60.0, 0.15)
+	_eng_tween.tween_callback(old.stop)
+	var newp := _eng_player()
+	newp.stop()
+	newp.stream = _eng_streams[gear]
+	newp.pitch_scale = 1.0
+	newp.volume_db = linear_to_db(0.004)
+	newp.position = pos
+	newp.play()
+	_eng_fade_in_t = 0.25
+
+
+## 引擎音随速联动:档位按 speed_ratio 切换(2 档 → ≤0.45 档0 否则档1);
+## 新采样真实,音高仅微调 0.92-1.12(jet 不再靠变调模拟呼啸);
+## 淡入期音量由计时器控制,稳态音量平滑跟踪 vol_target(jet 待命淡至 0)
+func _eng_update_sound(speed_ratio: float, vol_target: float, dt: float) -> void:
+	if _eng_a == null:
+		return
+	_eng_a.position = pos
+	_eng_b.position = pos
+	var n := _eng_streams.size()
+	var gear := 0
+	if n == 2:
+		gear = 1 if speed_ratio > 0.45 else 0
+	elif n >= 3:
+		gear = 2 if speed_ratio > 0.65 else (1 if speed_ratio > 0.3 else 0)
+	if gear != _eng_gear:
+		_eng_set_gear(gear)
+	var p := _eng_player()
+	p.pitch_scale = lerpf(0.92, 1.12, speed_ratio)
+	_eng_vol = lerpf(_eng_vol, vol_target, minf(1.0, dt * 6.0))
+	if _eng_fade_in_t > 0:
+		_eng_fade_in_t -= dt
+		if _eng_fade_in_t > 0:
+			p.volume_db = linear_to_db(maxf(lerpf(0.004, _eng_vol, 1.0 - _eng_fade_in_t / 0.25), 0.0))
+			return
+	# 稳态:音量平滑跟踪;目标≈0 时淡出至静音阈值后才停,防止静音下反复播放/停止
+	if _eng_vol <= 0.004:
+		p.volume_db = linear_to_db(maxf(_eng_vol, 0.0))
+		if p.playing and p.volume_db <= linear_to_db(0.008):
+			p.stop()
+	elif not p.playing:
+		# 从静音恢复:先给基础音量再播放,避免从 -inf 慢慢爬升
+		p.volume_db = linear_to_db(maxf(_eng_vol, 0.02))
+		p.play()
+	else:
+		p.volume_db = linear_to_db(maxf(_eng_vol, 0.0))
 
 
 func alive() -> bool:
@@ -90,6 +173,7 @@ func alive() -> bool:
 
 
 func _spawn() -> void:
+	_stop_crash_burn()
 	var B: float = G.bounds if G.bounds > 0 else 150.0
 	if type == "heli":
 		# 从己方基地上空出发
@@ -180,8 +264,65 @@ func damage(amount: float, attacker) -> void:
 		var k_team = team
 		if attacker != null:
 			k_name = "你" if Game.is_player(attacker) else (attacker.get("name") if attacker.get("name") != null else "战场")
-			k_team = attacker.get("team")
+			# 攻击者阵营兼容获取:Bot/Player/飞行员字典的 team 为键值,Vehicle 的 team 是方法(vehicle.gd:115),
+			# 直接 get("team") 对 Vehicle 返回 null → 击杀播报阵营色错误,需 get 失败后 call 兜底
+			var atk_team = attacker.get("team")
+			if atk_team == null and attacker is Object and attacker.has_method("team"):
+				atk_team = attacker.call("team")
+			k_team = atk_team if atk_team != null else k_team
 		G.hud.add_killfeed(k_name, k_team, craft_name, team, "防空火力", false, Game.is_player(attacker))
+
+
+## 坠毁点燃烧启动:8s 火焰 + 烟 + 橙色灯光(纯视觉,残骸无实体)
+func _start_crash_burn(p: Vector3) -> void:
+	_crash_burn_pos = p
+	_burn_t = 8.0
+	_burn_timer = 0.0
+	if _burn_light == null:
+		_burn_light = OmniLight3D.new()
+		_burn_light.light_color = Color.html("#ff7a20")
+		_burn_light.omni_range = 9.0
+		_burn_light.light_energy = 1.1
+		_burn_light.shadow_enabled = false
+		add_child(_burn_light)
+	print("[BURN] 坠毁残骸燃烧开始 type=", type)
+
+
+func _stop_crash_burn() -> void:
+	_burn_t = 0.0
+	_burn_timer = 0.0
+	if _burn_light != null:
+		_burn_light.queue_free()
+		_burn_light = null
+
+
+## 坠毁燃烧更新:坠毁点随机喷火 + 少量烟(间隔 0.14-0.2s),灯光 sin 闪烁衰减
+func _update_crash_burn(dt: float) -> void:
+	if _burn_light != null:
+		_burn_light.position = _crash_burn_pos + Vector3(0, 2.2, 0)
+	_burn_timer -= dt
+	if _burn_timer <= 0 and _burn_t > 0:
+		_burn_timer = Utils.rand(0.14, 0.2)
+		var q: float = G.effects.fx_scale
+		for k in 3:
+			var p := _crash_burn_pos + Vector3(Utils.rand(-1.5, 1.5), Utils.rand(0.2, 1.0), Utils.rand(-1.5, 1.5))
+			if randf() < q:
+				G.effects.fire_spawn(p.x, p.y, p.z,
+					Utils.rand(-0.5, 0.5), Utils.rand(0.6, 1.4), Utils.rand(-0.5, 0.5),
+					Utils.rand(0.35, 0.6), Utils.rand(0.5, 0.8), Utils.rand(0.8, 1.4))
+			if randf() < 0.5:
+				G.effects.smoke_spawn(p.x, p.y, p.z,
+					Utils.rand(-0.4, 0.4), Utils.rand(1.2, 2.5), Utils.rand(-0.4, 0.4),
+					Utils.rand(0.6, 1.2), 0.2, 0.18, 0.16, -0.2, Utils.rand(0.9, 1.5))
+	if _burn_light != null:
+		if _burn_t > 0:
+			var k := clampf(_burn_t / 8.0, 0.2, 1.0)
+			_burn_light.light_energy = 1.1 * k * (0.6 + 0.4 * sin(G.time * 26.0 + _crash_burn_pos.x * 3.1))
+		else:
+			_burn_light.light_energy = maxf(0.0, _burn_light.light_energy - dt * 3.0)
+			if _burn_light.light_energy <= 0.0:
+				_burn_light.queue_free()
+				_burn_light = null
 
 
 func _shoot_at(p_target, dt: float, w: Dictionary, rate_mul := 1.0) -> void:
@@ -209,7 +350,7 @@ func _shoot_at(p_target, dt: float, w: Dictionary, rate_mul := 1.0) -> void:
 	wdef.rng = w["rng"]
 	wdef.tracer = w["tracer"]
 	G.game.fire_hitscan(pilot, wdef, pos, dir, pos)
-	AudioSys.shoot("rifle", pos, false)
+	AudioSys.veh_weapon(type, pos)
 
 
 func _fire_rockets(target_pos: Vector3, n := 2) -> void:
@@ -220,7 +361,7 @@ func _fire_rockets(target_pos: Vector3, n := 2) -> void:
 			target_pos.z + Utils.rand(-6, 6) - pos.z).normalized()
 		var rdef := { "damage": 85.0, "splash": 6.5, "speed": 60.0, "cn": "航空火箭弹", "name": "航空火箭弹", "tracer": Color.html("#ffe0a0") }
 		G.effects.spawn_rocket(pilot, rdef, pos + Vector3(0, -1, 0), dir)
-	AudioSys.rpg_fire(pos)
+	AudioSys.veh_weapon(type, pos)
 
 
 ## 进入盘旋攻击:绕目标环形盘旋(半径 60-90m,角速度 0.25-0.5 rad/s)
@@ -251,9 +392,10 @@ func update_aircraft(dt: float) -> void:
 	# 飞行员坐标同步(字典为值类型,需手动同步)
 	pilot["pos"] = pos
 	if dead:
-		# 坠毁:引擎停转
-		if _eng != null and _eng.playing:
-			_eng.stop()
+		# 坠毁:引擎停转(A/B 双 player 全停)
+		if _eng_a != null:
+			_eng_a.stop()
+			_eng_b.stop()
 		# 坠毁
 		if crashing:
 			vel.y -= 18 * dt
@@ -272,8 +414,12 @@ func update_aircraft(dt: float) -> void:
 				crashing = false
 				mesh.visible = false
 				G.game.explode(Vector3(pos.x, gy + 0.5, pos.z), 9, 130, pilot)
+				_start_crash_burn(Vector3(pos.x, gy + 0.5, pos.z))
 		else:
 			respawn_t -= dt
+			if _burn_t > 0 or _burn_light != null:
+				_burn_t = maxf(0.0, _burn_t - dt)
+				_update_crash_burn(dt)
 			if respawn_t <= 0:
 				_spawn()
 		return
@@ -500,15 +646,10 @@ func update_aircraft(dt: float) -> void:
 	# 机头转向:yaw 阻尼缓转(非瞬转),转弯自然倾斜
 	var turn_rate := 1.8 if not injured else 1.4
 	yaw += clampf(yaw_err, -turn_rate * dt, turn_rate * dt)
-	# 引擎音随转速/空速联动(远近衰减由 AudioStreamPlayer3D 自动处理)
-	if _eng != null:
-		_eng.position = pos
-		if not _eng.playing:
-			_eng.play()
+	# 引擎音随档位/空速联动(远近衰减由 AudioStreamPlayer3D 自动处理;26=盘旋最大空速)
+	if _eng_a != null:
 		var rot_k: float = clampf(airspeed / 14.0, 0.0, 1.0)
-		# 音量/音高钳制:pitch_scale ≥ 0.05、volume ≥ 0,防止极端值引发刺耳噪声
-		_eng.pitch_scale = maxf(lerpf(0.72, 1.35, rot_k) + sin(G.time * 11.0) * 0.02, 0.05)
-		_eng.volume_db = linear_to_db(maxf(lerpf(0.06, 0.32, rot_k), 0.0))
+		_eng_update_sound(clampf(airspeed / 26.0, 0.0, 1.0), lerpf(0.12, 0.64, rot_k), dt)
 	# 失速:空速过低 → 机头下垂抖动下坠,直到速度恢复
 	if airspeed < 5.5 and not landed:
 		stall_t += dt
@@ -554,23 +695,13 @@ func update_aircraft(dt: float) -> void:
 
 ## ==================== 战斗机:高空俯冲扫射 ====================
 func _update_jet(dt: float) -> void:
-	# 喷气呼啸:速度/俯冲越猛越尖越响;地图外待命时安静淡出
-	# 滋滋声消除:采样已从 wind_loop(纯噪声)换为 engine_loop(干净发动机声),
-	# 变调区间 1.35-1.75× 模拟喷气涡轮呼啸(经 clamp 防刺耳),音量上限 0.22
-	if _eng != null:
+	# 引擎档位随速切换:待命(strafe==null)时音量淡至 0,俯冲加速切入高速档
+	if _eng_a != null:
 		var spd_k: float = clampf(vel.length() / 80.0, 0.0, 1.0)
-		var target_v: float = 0.22 * spd_k if strafe != null else 0.0
-		var cur_v: float = db_to_linear(_eng.volume_db)
-		_eng.volume_db = linear_to_db(maxf(lerpf(cur_v, target_v, minf(1.0, dt * 6.0)), 0.0))
-		if target_v > 0.001:
-			if not _eng.playing:
-				# 从待命静音恢复:先给基础音量再播放,避免从 -inf 慢慢爬升
-				if _eng.volume_db < linear_to_db(0.01):
-					_eng.volume_db = linear_to_db(0.01)
-				_eng.play()
-			_eng.pitch_scale = clampf(lerpf(1.35, 1.75, spd_k), 0.05, 1.75)
-		elif _eng.playing and _eng.volume_db <= linear_to_db(0.002):
-			_eng.stop()  # 淡出至静音阈值后才真正停,防止静音下反复播放/停止
+		# 响度补偿:fighter_engine 素材峰值 0.23-0.29(-11~-13dB)偏低,jet 引擎音量 ×1.6
+		# (0.44→0.704,heli 素材 0.72-0.94 正常不动)
+		var target_v: float = 0.44 * 1.6 * spd_k if strafe != null else 0.0
+		_eng_update_sound(spd_k, target_v, dt)
 	var burner: MeshInstance3D = mesh.get_meta("burner")
 	if burner != null:
 		var bm := burner.material_override as StandardMaterial3D
@@ -600,8 +731,9 @@ func _update_jet(dt: float) -> void:
 	var cap2: float = clampf(hp / max_hp, 0.0, 1.0)
 	vel = Utils.safe_norm(vel, Vector3.FORWARD) * maxf(vel.length() * (0.45 + 0.55 * cap2), 1.0)
 	pos += vel * dt
-	if _eng != null:
-		_eng.position = pos  # 位置在移动结算后同步(1 帧 78m/s,前置会偏 1.3m)
+	if _eng_a != null:
+		_eng_a.position = pos  # 位置在移动结算后同步(1 帧 78m/s,前置会偏 1.3m)
+		_eng_b.position = pos
 	mesh.position = pos
 	mesh.rotation_order = EULER_ORDER_YXZ
 	mesh.rotation.y = yaw
@@ -630,6 +762,8 @@ func _update_jet(dt: float) -> void:
 
 
 func dispose() -> void:
-	if _eng != null:
-		_eng.stop()
+	if _eng_a != null:
+		_eng_a.stop()
+		_eng_b.stop()
+	_stop_crash_burn()
 	queue_free()

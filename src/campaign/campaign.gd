@@ -1511,6 +1511,7 @@ func _spawn_destructible(pos: Vector3) -> void:
 	g.position = Vector3(pos.x, G.ground_h.call(pos.x, pos.z) if G.ground_h.is_valid() else 0.0, pos.z)
 	var coll := AABB(Vector3(pos.x - 0.75, 0, pos.z - 0.75), Vector3(1.5, 1.5, 1.5))
 	G.colliders.append(coll)
+	Utils.rebuild_collider_grid()  # 爆破目标碰撞盒入射线加速网格(与 build_world/_spawn_blockers 一致)
 	G.world_root.add_child(g)
 	ds.group = g
 	ds.collider = coll

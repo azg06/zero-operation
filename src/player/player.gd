@@ -112,10 +112,10 @@ func give_class(p_class_id: String, p_loadout) -> void:
 	grenades = 2
 	at_grenades = 2
 	at_mines = 1
-	# 重建第三人称载具乘员模型(兵种外观同步)
+	# 重建第三人称载具乘员模型(兵种外观同步;皮肤读档,give_class 覆盖部署/重生/换兵种全部路径)
 	if veh_body != null:
 		veh_body.queue_free()
-	veh_body = SoldierModel.build_soldier("us", loadout["primary"], class_id)
+	veh_body = SoldierModel.build_soldier("us", loadout["primary"], class_id, SkinCfg.get_skin(class_id))
 	veh_body.visible = false
 	G.main.add_child(veh_body)
 
@@ -345,7 +345,7 @@ func enter_vehicle(v) -> void:
 	_veh_tp_pitch = 0.0
 	for g in guns:
 		g.holster()
-	AudioSys.engine_start()
+	AudioSys.engine_start(v.type)
 	G.hud.hint("W/S 油门刹车 · A/D 转向 · C 第三人称 · E 下车")
 
 
@@ -728,7 +728,9 @@ func update_player(dt: float) -> void:
 	# 滑铲相机侧倾:快速压入,干净回正
 	_slide_roll = Utils.damp(_slide_roll, -0.1 if slide_t > 0 else 0.0, 16.0 if slide_t > 0 else 10.0, dt)
 	cam.rotation.z = sin(bob_y * 0.5) * 0.003 + recoil_yaw * 0.3 + _slide_roll
-	# FOV:冲刺 +,滑铲瞬时冲击(随滑铲进程衰减),机瞄/狙击全屏放大 -
+	# FOV:冲刺 +,滑铲瞬时冲击(随滑铲进程衰减),开镜全屏向 zoom_fov 缩小放大
+	# 所有武器统一:主相机 FOV 从 base_fov 向 def.zoom_fov 过渡(狙击 awm 12/m24 13/svd 14
+	# 全屏放大,2D 镜罩接管画面;普通武器 55 机瞄略缩),红点/全息改装近无放大(78)
 	var base_fov: float = G.settings.fov + sprint_amount * 6 + (4 if tac_sprint > 0 else 0) + 7.0 * clampf(slide_t / 0.7, 0.0, 1.0)
 	var target_fov := lerpf(base_fov, g.def.zoom_fov, g.ads_amount)
 	if absf(cam.fov - target_fov) > 0.05:

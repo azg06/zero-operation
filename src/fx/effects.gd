@@ -34,6 +34,7 @@ var _nvg_vg: TextureRect
 # ---- 粒子池(MultiMesh 公告牌) ----
 var _sparks_mm: MultiMesh
 var _smoke_mm: MultiMesh
+var _fire_mm: MultiMesh
 var _sparks_pos := PackedVector3Array()
 var _sparks_vel := PackedVector3Array()
 var _sparks_life := PackedFloat32Array()
@@ -52,6 +53,16 @@ var _smoke_size := PackedFloat32Array()
 var _smoke_head := 0
 var _sparks_alive := 0                # 活动粒子计数(空池跳过更新循环)
 var _smoke_alive := 0
+# ---- 火焰粒子池(残骸燃烧/坠毁火场) ----
+var _fire_pos := PackedVector3Array()
+var _fire_vel := PackedVector3Array()
+var _fire_life := PackedFloat32Array()
+var _fire_max_life := PackedFloat32Array()
+var _fire_col := PackedColorArray()
+var _fire_size := PackedFloat32Array()
+var _fire_power := PackedFloat32Array()  # 上升/扩散强度倍率
+var _fire_head := 0
+var _fire_alive := 0
 
 # ---- 曳光弹池 ----
 var _tracers: Array = []
@@ -156,14 +167,21 @@ static func _radial_tex(size: int, stops: Array) -> ImageTexture:
 	return ImageTexture.create_from_image(img)
 
 
-func _make_pool(additive: bool, quad_size: float, opacity: float) -> MultiMesh:
+## 公告牌粒子池;additive=加法混合(火花/火焰),quad_size=公告牌基础尺寸,
+## stops=径向贴图色标(空则白色),emission=发光材质(火焰 glow,池级共享缓存,粒子不 new 材质)
+func _make_pool(additive: bool, quad_size: float, opacity: float,
+		stops: Array = [], emission := false, emission_color := Color.WHITE, emission_energy := 1.0) -> MultiMesh:
 	var quad := QuadMesh.new()
 	quad.size = Vector2(quad_size, quad_size)
-	var dot := _radial_tex(32, [
-		[0.0, Color(1, 1, 1, 1)],
-		[0.5, Color(1, 1, 1, 0.6)],
-		[1.0, Color(1, 1, 1, 0)],
-	])
+	var dot: ImageTexture
+	if stops.is_empty():
+		dot = _radial_tex(32, [
+			[0.0, Color(1, 1, 1, 1)],
+			[0.5, Color(1, 1, 1, 0.6)],
+			[1.0, Color(1, 1, 1, 0)],
+		])
+	else:
+		dot = _radial_tex(32, stops)
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -173,6 +191,10 @@ func _make_pool(additive: bool, quad_size: float, opacity: float) -> MultiMesh:
 	mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
 	mat.billboard_keep_scale = true
 	mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	if emission:
+		mat.emission_enabled = true
+		mat.emission = emission_color
+		mat.emission_energy_multiplier = emission_energy
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
@@ -193,6 +215,12 @@ func _make_pool(additive: bool, quad_size: float, opacity: float) -> MultiMesh:
 func _build_particle_pools() -> void:
 	_sparks_mm = _make_pool(true, 0.09, 1.0)
 	_smoke_mm = _make_pool(false, 0.45, 0.5)
+	# 火焰池:加法混合 + 橙黄 emission 发光(燃烧残骸/坠毁火场)
+	_fire_mm = _make_pool(true, 0.4, 1.0, [
+		[0.0, Color(1.0, 0.9, 0.55, 1.0)],
+		[0.5, Color(1.0, 0.5, 0.15, 0.9)],
+		[1.0, Color(1.0, 0.3, 0.04, 0.0)],
+	], true, Color.html("#ff8a2a"), 2.5)
 	_sparks_pos.resize(MAXP); _sparks_vel.resize(MAXP)
 	_sparks_life.resize(MAXP); _sparks_max_life.resize(MAXP)
 	_sparks_col.resize(MAXP); _sparks_grav.resize(MAXP)
@@ -203,6 +231,12 @@ func _build_particle_pools() -> void:
 	_smoke_size.resize(MAXP)
 	_sparks_size.fill(1.0)
 	_smoke_size.fill(1.0)
+	_fire_pos.resize(MAXP); _fire_vel.resize(MAXP)
+	_fire_life.resize(MAXP); _fire_max_life.resize(MAXP)
+	_fire_col.resize(MAXP); _fire_size.resize(MAXP)
+	_fire_power.resize(MAXP)
+	_fire_size.fill(1.0)
+	_fire_power.fill(1.0)
 
 
 ## 全屏特效层:爆闪(暖白) + 死亡淡出(黑),CanvasLayer 自包含不依赖 HUD
@@ -256,8 +290,9 @@ func _build_screen_fx() -> void:
 	_nvg_layer.add_child(_nvg_vg)
 
 
-## 受伤红边径向渐变贴图:中心透明,边缘深红(0.42~1.1 平滑过渡)
-func _make_vignette_tex() -> ImageTexture:
+## 径向渐变贴图生成(受伤红边 / HUD 白色蒙版共用,像素级行为一致)
+## linear=true 线性渐变(hud 蒙版),否则 smoothstep(受伤红边);alpha 乘 alpha_scale
+static func make_vignette_tex(color: Color, edge0: float, edge1: float, linear := false, alpha_scale := 1.0) -> ImageTexture:
 	var size := 256
 	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
@@ -267,9 +302,14 @@ func _make_vignette_tex() -> ImageTexture:
 			var dx := (x - c + 0.5) / c
 			var dy := (y - c + 0.5) / c
 			var d: float = sqrt(dx * dx + dy * dy)
-			var a: float = smoothstep(0.42, 1.1, d)
-			img.set_pixel(x, y, Color(0.52, 0.008, 0.016, a * 0.92))
+			var a: float = clampf((d - edge0) / (edge1 - edge0), 0.0, 1.0) if linear else smoothstep(edge0, edge1, d)
+			img.set_pixel(x, y, Color(color.r, color.g, color.b, a * alpha_scale))
 	return ImageTexture.create_from_image(img)
+
+
+## 受伤红边径向渐变贴图:中心透明,边缘深红(0.42~1.1 平滑过渡)
+func _make_vignette_tex() -> ImageTexture:
+	return make_vignette_tex(Color(0.52, 0.008, 0.016), 0.42, 1.1, false, 0.92)
 
 
 ## 夜视仪暗角径向渐变贴图:中心透明,四周墨绿压暗(镜片暗角感)
@@ -482,6 +522,27 @@ func smoke_spawn(x: float, y: float, z: float, vx: float, vy: float, vz: float,
 	_smoke_col[i] = Color(r, g, b)
 	_smoke_grav[i] = grav
 	_smoke_size[i] = size
+
+
+## 火焰粒子:橙色发光火苗(加法混合 + emission glow),上升 + 水平扩散,
+## 寿命内缩放衰减(0.5→0.1) + 快速淡出;power=上升/扩散/亮度强度倍率
+## 材质为池级共享缓存(_make_pool 构建一次),粒子零分配
+func fire_spawn(x: float, y: float, z: float, vx: float, vy: float, vz: float,
+		life := 0.4, size := 0.5, power := 1.0) -> void:
+	if not _gate():
+		return
+	var i: int = _fire_head
+	_fire_head = (_fire_head + 1) % MAXP
+	if _fire_life[i] <= 0:
+		_fire_alive += 1
+	_fire_pos[i] = Vector3(x, y, z)
+	_fire_vel[i] = Vector3(vx, vy, vz)
+	_fire_life[i] = life
+	_fire_max_life[i] = life
+	var pw := clampf(power, 0.2, 2.0)
+	_fire_col[i] = Color(1.0, 0.68 + 0.2 * pw, 0.3, 1.0)
+	_fire_size[i] = size
+	_fire_power[i] = pw
 
 
 # ==================== 特效接口 ====================
@@ -1365,6 +1426,34 @@ func _update_particles(dt: float) -> void:
 			_smoke_mm.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3.ONE * (_smoke_size[i] * growth)), p))
 			var col := _smoke_col[i]
 			_smoke_mm.set_instance_color(i, Color(col.r, col.g, col.b, 0.5 * minf(1, f / 0.3)))
+	if _fire_alive > 0:
+		for i in MAXP:
+			if _fire_life[i] <= 0:
+				continue
+			_fire_life[i] -= dt
+			if _fire_life[i] <= 0:
+				_fire_alive -= 1
+				_fire_mm.set_instance_transform(i, zero)
+				continue
+			var fv := _fire_vel[i]
+			# 热浮升(轻缓上升) + 水平扩散阻尼
+			fv.y += 3.0 * _fire_power[i] * dt
+			fv.x *= 0.92
+			fv.z *= 0.92
+			_fire_vel[i] = fv
+			var fp := _fire_pos[i] + fv * dt
+			var fgy: float = _ground_h(fp.x, fp.z) + 0.02
+			if fp.y < fgy:
+				fp.y = fgy
+				fv.y = maxf(fv.y, 0.0)
+				_fire_vel[i] = fv
+			_fire_pos[i] = fp
+			var ft: float = _fire_life[i] / _fire_max_life[i]
+			# 缩放衰减 0.5→0.1 + 快速淡出
+			var fs: float = _fire_size[i] * lerpf(0.5, 0.1, 1.0 - ft)
+			_fire_mm.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3.ONE * fs), fp))
+			var fc := _fire_col[i]
+			_fire_mm.set_instance_color(i, Color(fc.r, fc.g, fc.b, clampf(ft * ft * 2.2, 0.0, 1.0)))
 
 
 func _update_tracers(dt: float) -> void:
@@ -1536,7 +1625,7 @@ func _update_rockets(dt: float) -> void:
 					to /= d_t
 					dir = Utils.safe_norm(dir.lerp(to, minf(1, 4.5 * dt)), to)
 		if r["target"] == null:
-			dir.y -= 0.35 * dt
+			dir.y -= 0.25 * dt  # 无制导直射弹道:重力 0.25(较原 0.35 弹道更平直,显著提升射程)
 			dir = Utils.safe_norm(dir, Vector3.UP)
 		var step_len: float = r["speed"] * dt
 		var hit = Utils.raycast_world(pos, dir, step_len + 0.2)

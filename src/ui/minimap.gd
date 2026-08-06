@@ -32,13 +32,17 @@ func _set_zoom(z: float) -> void:
 	queue_redraw()
 
 
-## 世界坐标(Vector2 x,z)→ 本地像素;以玩家为中心缩放(未存活时以地图中心)
+## 世界坐标(Vector2 x,z)→ 本地像素
+## 视窗钳制在地图边界内:1x 时窗口=整图,地图始终完整铺满框架且居中;
+## >1x 时以玩家为中心缩放,玩家贴边时窗口贴地图边界(地图不悬浮/不偏移)
 func _wm2(v: Vector2, ws: float, s: float) -> Vector2:
 	var half: float = ws / _zoom
-	var p = G.player
 	var c := Vector2(0, 0)
-	if p != null and p.alive:
-		c = Vector2(p.pos.x, p.pos.z)
+	if _zoom > 1.0 and G.player != null and G.player.alive:
+		c = Vector2(G.player.pos.x, G.player.pos.z)
+	var lo := Vector2(half - ws, half - ws)
+	var hi := Vector2(ws - half, ws - half)
+	c = c.clamp(lo, hi)
 	var sc: float = (s * _zoom) / (2 * ws)
 	return (v - (c - Vector2(half, half))) * sc
 
@@ -67,8 +71,6 @@ func _draw_map_base(s: float) -> void:
 	for i in range(1, 8):
 		draw_line(Vector2(i * step, 0), Vector2(i * step, s), GRID_COL, 1)
 		draw_line(Vector2(0, i * step), Vector2(s, i * step), GRID_COL, 1)
-	# 外框(军事细边框,与原面板 1px 描边一致,贴控件边缘绘制)
-	draw_rect(Rect2(0, 0, s, s), PANEL_BORDER, false, 1.0)
 	# 建筑(实体块 + 顶部高光,立体感)
 	for r in G.minimap_rects:
 		var rect := Rect2(_wm2(Vector2(r["x"] - r["w"] / 2, r["z"] - r["d"] / 2), ws, s), Vector2(r["w"] * sc, r["d"] * sc))
@@ -148,6 +150,17 @@ func _draw() -> void:
 		# 航向线(箭头前方 13px 淡线;与箭头前点旋转一致:ang=0→(0,-1)指上,yaw=90°→(-1,0)指左)
 		draw_line(cp, cp + Vector2(sin(ang), -cos(ang)) * 13.0, Color(1, 1, 1, 0.4), 1.0)
 	_draw_compass(s)
+	_draw_frame(s)
+
+
+## 外框:4 条 1px 实心条,精确贴合内容区外圈像素(第 0 行/列与第 s-1 行/列),四边严格对称。
+## 不用 draw_rect 的 1px 描边——它把线条画在矩形边界中线,左/上边落在控件外(压到游戏世界)、
+## 右/下边落在控件内,导致框架相对内容整体错位 1px。最后绘制保证边框不被边缘内容盖住。
+func _draw_frame(s: float) -> void:
+	draw_rect(Rect2(0, 0, s, 1), PANEL_BORDER)
+	draw_rect(Rect2(0, s - 1, s, 1), PANEL_BORDER)
+	draw_rect(Rect2(0, 0, 1, s), PANEL_BORDER)
+	draw_rect(Rect2(s - 1, 0, 1, s), PANEL_BORDER)
 
 
 ## 四向罗盘(北/东/南/西 + 刻度)+ 缩放按钮
