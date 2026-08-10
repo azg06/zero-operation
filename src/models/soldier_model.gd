@@ -179,23 +179,40 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 	if skin != "standard":
 		_apply_skin_decor(upper, class_id, skin, pal)
 
-	# 持枪臂组(rig)
+	# 持枪臂组(rig):肩 → 上臂 → 肘 → 前臂/手(肘关节可动,持枪姿态灵活)
 	var rig := Node3D.new()
 	rig.position = Vector3(0, 0.35, 0)
-	var arm_l := _box(0.11, 0.11, 0.42, uniform)
-	arm_l.position = Vector3(-0.18, -0.02, -0.24)
-	arm_l.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	rig.add_child(arm_l)
-	var arm_r := _box(0.11, 0.11, 0.42, uniform)
-	arm_r.position = Vector3(0.18, -0.02, -0.24)
-	arm_r.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	rig.add_child(arm_r)
+	var mk_arm := func(x: float, nm: String) -> Dictionary:
+		var arm := Node3D.new()
+		arm.name = nm
+		arm.position = Vector3(x, -0.02, -0.18)
+		var up := _box(0.1, 0.1, 0.24, uniform)
+		up.position = Vector3(0, 0, -0.12)
+		up.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		arm.add_child(up)
+		var elbow := Node3D.new()
+		elbow.position = Vector3(0, 0, -0.24)
+		var fore := _box(0.09, 0.09, 0.2, uniform)
+		fore.position = Vector3(0, 0, -0.1)
+		fore.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		elbow.add_child(fore)
+		var hand := _box(0.07, 0.07, 0.07, skin_mat)
+		hand.position = Vector3(0, 0, -0.2)
+		hand.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		elbow.add_child(hand)
+		arm.add_child(elbow)
+		rig.add_child(arm)
+		return { "arm": arm, "elbow": elbow }
+	var arm_l: Dictionary = mk_arm.call(-0.2, "arm_l")
+	var arm_r: Dictionary = mk_arm.call(0.2, "arm_r")
 	var gun := WeaponModels.build(weapon_id, false)
 	gun.scale = Vector3.ONE * 1.15
-	gun.position = Vector3(0.1, 0, -0.45)
+	gun.position = Vector3(0.1, 0.02, -0.45)
 	rig.add_child(gun)
 	upper.add_child(rig)
 	g.set_meta("rig", rig)
+	g.set_meta("arm_l_elbow", arm_l["elbow"])
+	g.set_meta("arm_r_elbow", arm_r["elbow"])
 	g.set_meta("upper", upper)
 	return g
 
@@ -241,10 +258,11 @@ static func _cylx(rt: float, rb: float, h: float, mat: Material) -> MeshInstance
 
 
 ## 玩家第一人称下半身(低头可见 + 投影)
-## skin: 皮肤 id(与 build_soldier 共用 SKINS 表;本身体无头/盔,采用 assault 兵种配色,
-##        standard 与旧版完全一致);未知皮肤 id 回退 standard
-## 返回 Node3D,meta: leg_l{thigh,knee}, leg_r
-static func build_player_body(skin := "standard") -> Node3D:
+## skin: 皮肤 id(与 build_soldier 共用 SKINS 表);本身体无渲染头(避免遮挡第一人称相机),
+##       但带 SHADOWS_ONLY 头/盔与当前武器投影(地面影子完整:有头、手持当前武器)
+## weapon_id: 当前主武器(影子中手持的枪;空则回退通用长条投影)
+## 返回 Node3D,meta: leg_l{thigh,knee}, leg_r, upper
+static func build_player_body(skin := "standard", weapon_id := "") -> Node3D:
 	var g := Node3D.new()
 	g.name = "PlayerBody"
 	var pal: Dictionary = SKINS.get("assault", SKINS["assault"]).get(skin, SKINS["assault"]["standard"])
@@ -252,6 +270,8 @@ static func build_player_body(skin := "standard") -> Node3D:
 	var vest := _mat(Color.html(pal["vest"]), 0.9)
 	var boot := _mat(Color.html("#2a2622"), 0.9)
 	var accent := _mat(Color.html("#00ff88"), 0.9, true)
+	var skin_mat := _mat(Color.html("#c8a080"), 0.8)
+	var helmet := _mat(Color.html(pal["helmet"]), 0.85)
 
 	var mk_leg := func(x: float) -> Dictionary:
 		var leg := Node3D.new()
@@ -275,7 +295,7 @@ static func build_player_body(skin := "standard") -> Node3D:
 	g.set_meta("leg_l_knee", leg_l["knee"])
 	g.set_meta("leg_r", leg_r["thigh"])
 	g.set_meta("leg_r_knee", leg_r["knee"])
-	# 上半身组(髋部枢轴;不建头/头盔,避免遮挡第一人称相机)
+	# 上半身组(髋部枢轴)
 	var upper := Node3D.new()
 	upper.position = Vector3(0, 0.95, 0)
 	g.add_child(upper)
@@ -284,18 +304,32 @@ static func build_player_body(skin := "standard") -> Node3D:
 	_add(upper, _box(0.43, 0.05, 0.29, accent), 0, 0.33, 0)       # 识别条
 	# 双肩/上臂
 	var sho_l := _box(0.13, 0.36, 0.15, uniform)
+	sho_l.name = "sho_l"
 	sho_l.position = Vector3(-0.27, 0.22, 0)
 	sho_l.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	upper.add_child(sho_l)
 	var sho_r := _box(0.13, 0.36, 0.15, uniform)
+	sho_r.name = "sho_r"
 	sho_r.position = Vector3(0.27, 0.22, 0)
 	sho_r.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	upper.add_child(sho_r)
-	# 持枪投影代理(只投影不渲染:地面可见持枪姿态的影子)
-	var gun_proxy := _box(0.055, 0.09, 0.5, uniform)
-	gun_proxy.position = Vector3(0.16, 0.28, -0.35)
-	gun_proxy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
-	upper.add_child(gun_proxy)
+	# 影子头部(只投影不渲染:地面影子带完整头部)
+	var head_s := _box(0.2, 0.24, 0.2, skin_mat)
+	head_s.position = Vector3(0, 0.57, 0)
+	head_s.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+	upper.add_child(head_s)
+	var helmet_s := _box(0.24, 0.12, 0.24, helmet)
+	helmet_s.position = Vector3(0, 0.7, 0)
+	helmet_s.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+	upper.add_child(helmet_s)
+	# 持枪投影:真实武器模型(只投影不渲染:地面影子手持当前枪)
+	var gun_node: Node3D = WeaponModels.build(weapon_id, false) if not weapon_id.is_empty() else null
+	if gun_node != null:
+		gun_node.name = "BodyGun"
+		gun_node.scale = Vector3.ONE * 1.15
+		gun_node.position = Vector3(0.16, 0.28, -0.35)
+		_set_shadow_only_recursive(gun_node)
+		upper.add_child(gun_node)
 	# 前伸小臂投影代理
 	var arm_proxy := _box(0.1, 0.1, 0.38, uniform)
 	arm_proxy.position = Vector3(-0.2, 0.2, -0.28)
@@ -303,6 +337,13 @@ static func build_player_body(skin := "standard") -> Node3D:
 	upper.add_child(arm_proxy)
 	g.set_meta("upper", upper)
 	return g
+
+
+static func _set_shadow_only_recursive(node: Node3D) -> void:
+	if node is MeshInstance3D:
+		(node as MeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+	for ch in node.get_children():
+		_set_shadow_only_recursive(ch)
 
 
 ## 血条(画布贴图 Sprite3D,对应 makeHealthBar)
@@ -329,3 +370,46 @@ static func update_health_bar(hb: Dictionary, health: float, team: String) -> vo
 		img.fill_rect(Rect2i(1, 1, w, 8), col)
 	(hb["tex"] as ImageTexture).update(img)
 	(hb["sprite"] as Sprite3D).visible = true
+
+
+## ---- BR 头顶阵营标记(视觉敌我识别:敌方红菱形 / 队友绿菱形) ----
+## 纹理静态缓存:全 bot 共享 red/green 两张 64×64 菱形贴图(暗描边 + 实心),
+## 每 bot 仅 1 个 Sprite3D(billboard + no_depth_test),挂 mesh 下头顶(高 0.28m)。
+static var _mk_tex: Dictionary = {}
+
+
+static func _mk_diamond_tex(col: Color) -> ImageTexture:
+	var S := 64
+	var img := Image.create(S, S, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var c := S * 0.5
+	var half := S * 0.44
+	for y in S:
+		for x in S:
+			var d := absf(x - c) + absf(y - c)
+			if d <= half:
+				var bc := Color(col.r * 0.32, col.g * 0.32, col.b * 0.32, 1.0)
+				img.set_pixel(x, y, bc if d > half - 3.0 else col)
+	return ImageTexture.create_from_image(img)
+
+
+## 敌/友标记纹理("red" / "green",各创建一次后共享)
+static func team_marker_texture(color: String) -> ImageTexture:
+	if _mk_tex.has(color):
+		return _mk_tex[color]
+	var col := Color(1.0, 0.15, 0.12) if color == "red" else Color(0.25, 1.0, 0.5)
+	var tex := _mk_diamond_tex(col)
+	_mk_tex[color] = tex
+	return tex
+
+
+## BR 头顶阵营标记(默认隐藏;bot.gd 按小队分类设置纹理/可见性)
+static func make_team_marker() -> Sprite3D:
+	var s := Sprite3D.new()
+	s.pixel_size = 0.28 / 64.0
+	s.no_depth_test = true
+	s.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	s.position.y = 2.22
+	s.visible = false
+	s.alpha_cut = SpriteBase3D.ALPHA_CUT_DISABLED
+	return s

@@ -5,6 +5,9 @@ const S := 2048
 
 
 static func _photo(name: String) -> Image:
+	# [FIX 8/9] 不加载 4K HD 贴图:get_image() 需把大纹理从 VRAM 读回,
+	# 在导出版(exe,贴图被重压缩)上触发驱动级访问冲突(0xC0000005);
+	# CPU 合成路径固定用旧贴图,HD 4K 贴图仅走 GPU 端材质路径(_std_tex/layers)
 	var t: Texture2D = load("res://textures/" + name + "_diff.jpg")
 	var img := t.get_image()
 	if img.get_format() != Image.FORMAT_RGBA8:
@@ -105,6 +108,52 @@ static func make_ground(theme: String, size: float, road: float) -> ImageTexture
 			ImgDraw.thick_line(img, w2t.call(f[0]) + cos(a0) * rr, w2t.call(f[1]) + sin(a0) * rr,
 				w2t.call(f[0]) + cos(a1) * rr, w2t.call(f[1]) + sin(a1) * rr, 4, ring_col)
 	battle_scars(img, S, ga)
+	return ImgDraw.to_texture(img)
+
+
+## BR 山谷地面(草地基色 + 聚落土路 + 村庄广场 + 南北向河道;地图像素底)
+static func make_br_ground(T) -> ImageTexture:
+	var size: float = T.size
+	var img := Image.create(S, S, false, Image.FORMAT_RGBA8)
+	img.fill(_html("#4e603c"))
+	# 沙地照片平铺作底(无草地照片),叠加草绿基色
+	var photo := _photo("sand_01")
+	ImgDraw.tile_draw(img, photo, 14)
+	ImgDraw.overlay(img, Color(_html("#4e603c"), 0.82))
+	var w2t := func(x: float) -> float: return (x + size / 2.0) / size * S
+	# 聚落间土路(先画,河道带后覆盖形成两处渡口)
+	var roads: Array = T.extra.get("roads", [])
+	var road_col := Color(0.47, 0.38, 0.24, 0.55)
+	var rut_col := Color(0.33, 0.26, 0.15, 0.4)
+	for seg in roads:
+		var x0: float = seg[0]
+		var z0: float = seg[1]
+		var x1: float = seg[2]
+		var z1: float = seg[3]
+		ImgDraw.thick_line(img, w2t.call(x0), w2t.call(z0), w2t.call(x1), w2t.call(z1), 30, road_col)
+		ImgDraw.thick_line(img, w2t.call(x0), w2t.call(z0), w2t.call(x1), w2t.call(z1), 6, rut_col)
+	# 村庄广场
+	var plaza_col := Color(0.51, 0.42, 0.28, 0.5)
+	for v in (T.extra.get("villages", []) as Array):
+		ImgDraw.alpha_circle(img, w2t.call(v["x"]), w2t.call(v["z"]), 34.0 / size * S, plaza_col)
+	# 河道(垂直带,x = T.river 向两侧渐变)
+	var stops := [
+		[0.0, Color(0.18, 0.31, 0.26, 0.35)],
+		[0.5, Color(0.13, 0.27, 0.31, 0.95)],
+		[1.0, Color(0.18, 0.31, 0.26, 0.35)],
+	]
+	var band := 26.0 / size * S
+	var x0r: float = w2t.call(T.river) - band * 0.5
+	var strips := 24
+	for k in strips:
+		var t := float(k) / strips
+		var col: Color
+		if t < 0.5:
+			col = (stops[0][1] as Color).lerp(stops[1][1], t * 2)
+		else:
+			col = (stops[1][1] as Color).lerp(stops[2][1], (t - 0.5) * 2)
+		ImgDraw.alpha_rect(img, x0r + band * t, 0, band / strips + 1, S, col)
+	battle_scars(img, S, 0.8)
 	return ImgDraw.to_texture(img)
 
 
@@ -240,6 +289,8 @@ static func _macro_noise() -> ImageTexture:
 
 
 ## 各主题的地面细节层配置(a 岩层 / b 沙-雪-泥 / c 混凝土-沥青)
+## hs = 高度场→着色器高度比例(height_scale):起伏越大越放大,避免高峰全裸岩。
+## snow 雪山坡地(最高 ~8m)放大到 10 → 山脊仍保雪层;bt_jungle 丘陵(3-5m)放大到 5 → 丘顶保沙色。
 static func _layer_cfg(theme: String) -> Dictionary:
 	var cfgs := {
 		"city": { "a": "rock_04", "b": "concrete_floor_02", "c": "rough_concrete",
@@ -249,10 +300,10 @@ static func _layer_cfg(theme: String) -> Dictionary:
 			"wa": 0.9, "wb": 0.55, "wc": 0.12, "uv": 0.13,
 			"ta": Color(0.99, 0.95, 0.88), "tb": Color(1.03, 0.98, 0.88), "tc": Color(0.96, 0.95, 0.93) },
 		"snow": { "a": "rock_04", "b": "snow_02", "c": "rough_concrete",
-			"wa": 0.8, "wb": 0.55, "wc": 0.3, "uv": 0.15,
+			"wa": 0.8, "wb": 0.55, "wc": 0.3, "uv": 0.15, "hs": 10.0,
 			"ta": Color(0.874, 0.883, 0.902), "tb": Color(0.975, 0.975, 0.994), "tc": Color(0.846, 0.856, 0.883) },
 		"bt_jungle": { "a": "rock_04", "b": "sand_01", "c": "asphalt_02",
-			"wa": 0.7, "wb": 0.6, "wc": 0.2, "uv": 0.16,
+			"wa": 0.7, "wb": 0.6, "wc": 0.2, "uv": 0.16, "hs": 5.0,
 			"ta": Color(0.96, 0.94, 0.88), "tb": Color(1.0, 0.94, 0.78), "tc": Color(0.85, 0.86, 0.88) },
 		"bt_harbor": { "a": "rock_04", "b": "sand_01", "c": "asphalt_02",
 			"wa": 0.5, "wb": 0.55, "wc": 0.6, "uv": 0.16,
@@ -260,6 +311,9 @@ static func _layer_cfg(theme: String) -> Dictionary:
 		"bt_peak": { "a": "rock_04", "b": "snow_02", "c": "rough_concrete",
 			"wa": 0.9, "wb": 0.55, "wc": 0.45, "uv": 0.14,
 			"ta": Color(0.93, 0.94, 0.96), "tb": Color(1.07, 1.07, 1.09), "tc": Color(0.88, 0.89, 0.92) },
+		"br_valley": { "a": "rock_04", "b": "sand_01", "c": "rough_concrete",
+			"wa": 0.5, "wb": 0.55, "wc": 0.15, "uv": 0.1,
+			"ta": Color(0.92, 0.92, 0.88), "tb": Color(0.98, 0.94, 0.8), "tc": Color(0.88, 0.89, 0.91) },
 	}
 	return cfgs.get(theme, cfgs["city"])
 
@@ -322,16 +376,22 @@ void fragment() {
 
 ## 生成地面多层混合材质(替代单一 StandardMaterial)
 static func make_ground_material(theme: String, T) -> ShaderMaterial:
-	var map_tex: ImageTexture = make_bt_ground(T) if T.mode == "breakthrough" else make_ground(theme, T.size, T.road)
+	var map_tex: ImageTexture
+	if T.mode == "breakthrough":
+		map_tex = make_bt_ground(T)
+	elif T.mode == "br":
+		map_tex = make_br_ground(T)
+	else:
+		map_tex = make_ground(theme, T.size, T.road)
 	var cfg := _layer_cfg(theme)
 	var sh := Shader.new()
 	sh.code = _ground_shader_code
 	var mat := ShaderMaterial.new()
 	mat.shader = sh
 	mat.set_shader_parameter("map_tex", map_tex)
-	mat.set_shader_parameter("layer_a", load("res://textures/" + cfg.a + "_diff.jpg"))
-	mat.set_shader_parameter("layer_b", load("res://textures/" + cfg.b + "_diff.jpg"))
-	mat.set_shader_parameter("layer_c", load("res://textures/" + cfg.c + "_diff.jpg"))
+	mat.set_shader_parameter("layer_a", WorldBuilder._load_tex(cfg.a, "diff"))
+	mat.set_shader_parameter("layer_b", WorldBuilder._load_tex(cfg.b, "diff"))
+	mat.set_shader_parameter("layer_c", WorldBuilder._load_tex(cfg.c, "diff"))
 	mat.set_shader_parameter("noise_tex", _macro_noise())
 	mat.set_shader_parameter("uv_scale", cfg.uv)
 	mat.set_shader_parameter("tint_a", cfg.ta)
@@ -341,7 +401,7 @@ static func make_ground_material(theme: String, T) -> ShaderMaterial:
 	mat.set_shader_parameter("weight_b", cfg.wb)
 	mat.set_shader_parameter("weight_c", cfg.wc)
 	mat.set_shader_parameter("macro_amp", 0.13)
-	mat.set_shader_parameter("height_scale", 4.0)
+	mat.set_shader_parameter("height_scale", cfg.get("hs", 4.0))
 	mat.set_shader_parameter("micro_detail", 0.3)
 	return mat
 

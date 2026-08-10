@@ -524,6 +524,414 @@ static func _build(id: String, g: Node3D) -> void:
 			g.add_child(box(0.01, 0.018, 0.01, 0, 0.061, -0.11, "dark"))      # 前准星(补齐缺失瞄具)
 			g.add_child(box(0.005, 0.02, 0.014, -0.0075, 0.059, 0.045, "dark"))  # 左照门(双耳缺口)
 			g.add_child(box(0.005, 0.02, 0.014, 0.0075, 0.059, 0.045, "dark"))   # 右照门
+		# ==================== [8/10 武器扩充] 10 把新枪模型 ====================
+		"g36c":
+			# G36C 卡宾枪:短机匣 + 顶部细导轨(ADS 不挡视野,原实心提把已移除) + 短枪管 + 聚合物折叠托
+			g.add_child(box(0.052, 0.075, 0.3, 0, 0.015, -0.04))
+			g.add_child(box(0.048, 0.026, 0.4, 0, 0.062, -0.12, "dark"))
+			g.add_child(box(0.014, 0.012, 0.22, 0, 0.088, -0.12, "poly"))   # 顶部细导轨(提把位置)
+			_rail(g, 0.08, -0.24, -0.36)
+			g.add_child(cyl(0.011, 0.013, 0.2, 0, 0.024, -0.56))
+			g.add_child(cyl(0.016, 0.018, 0.04, 0, 0.024, -0.66, "dark"))
+			g.add_child(_grip(0.04, 0.085, 0.17, 0, -0.005, 0.16, "poly", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "poly", 0.38))
+			_trigger(g, -0.04, 0.01)
+			var mag_g := box(0.036, 0.12, 0.06, 0, -0.1, -0.08, "dark")
+			mag_g.rotation.x = 0.12
+			g.add_child(mag_g); g.set_meta("mag", mag_g)
+			_bolt(g, 0.028, 0.045, 0.0)
+			_irons(g, 0.1, -0.5, 0.06, 0.06)
+		"ak74":
+			# AK-74M:机匣 + 橙木护木 + 74 风格微弯弹匣 + 倾斜消焰器
+			g.add_child(box(0.054, 0.075, 0.34, 0, 0.015, -0.05))
+			g.add_child(box(0.05, 0.024, 0.3, 0, 0.058, -0.07, "dark"))
+			g.add_child(cyl(0.023, 0.028, 0.26, 0, 0.02, -0.34, "wood"))
+			g.add_child(cyl(0.012, 0.014, 0.3, 0, 0.028, -0.6))
+			var fs2 := cyl(0.014, 0.018, 0.08, 0, 0.028, -0.78, "dark")
+			fs2.rotation.x = 0.06
+			g.add_child(fs2)
+			g.add_child(_grip(0.044, 0.1, 0.2, 0, -0.01, 0.18, "wood", 0.16))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.045, "wood", 0.42))
+			_trigger(g, -0.04, 0.02)
+			_curved_mag(g, 0.036)
+			_bolt(g, 0.032, 0.035, -0.02)
+			_irons(g, 0.104, -0.52, 0.05, 0.06)
+		"famas":
+			# FAMAS 无托:长机匣 + 顶部细导轨(ADS 不挡视野,原实心提把已移除) + 前握把 + 无托弹匣
+			g.add_child(box(0.05, 0.085, 0.5, 0, 0.02, 0.0))
+			g.add_child(box(0.046, 0.028, 0.46, 0, 0.068, 0.0, "dark"))
+			g.add_child(box(0.014, 0.012, 0.26, 0, 0.094, -0.1, "poly"))   # 顶部细导轨(提把位置)
+			g.add_child(cyl(0.011, 0.013, 0.2, 0, 0.024, -0.55))
+			var fg3 := box(0.024, 0.07, 0.03, 0, -0.075, -0.2, "poly")
+			fg3.rotation.x = 0.25
+			g.add_child(fg3)
+			g.add_child(_grip(0.032, 0.095, 0.05, 0, -0.08, 0.1, "poly", 0.3))
+			_trigger(g, -0.04, 0.04)
+			var mag_f := box(0.036, 0.12, 0.055, 0, -0.1, -0.02, "dark")
+			g.add_child(mag_f); g.set_meta("mag", mag_f)
+			_bolt(g, 0.02, 0.03, 0.08)
+			_irons(g, 0.1, -0.46, 0.05, 0.05)
+		"vector":
+			# KRISS Vector:机匣 + 顶部轨道 + 粗短管 + 折叠托
+			g.add_child(box(0.05, 0.085, 0.32, 0, 0.018, -0.05, "poly"))
+			g.add_child(box(0.046, 0.028, 0.4, 0, 0.066, -0.14, "dark"))
+			_rail(g, 0.086, -0.2, -0.36)
+			g.add_child(cyl(0.015, 0.017, 0.14, 0, 0.024, -0.5))
+			g.add_child(cyl(0.02, 0.022, 0.04, 0, 0.024, -0.57, "dark"))
+			g.add_child(_grip(0.04, 0.08, 0.16, 0, -0.005, 0.14, "poly", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "poly", 0.38))
+			_trigger(g, -0.04, 0.01)
+			var mag_v := box(0.034, 0.14, 0.05, 0, -0.12, -0.06, "dark")
+			mag_v.rotation.x = 0.18
+			g.add_child(mag_v); g.set_meta("mag", mag_v)
+			_bolt(g, 0.028, 0.04, 0.0)
+			_irons(g, 0.088, -0.46, 0.05, 0.05)
+		"pp19":
+			# PP-19 野牛:圆筒弹鼓(横置特征) + 长管
+			g.add_child(box(0.05, 0.07, 0.26, 0, 0.012, -0.03))
+			g.add_child(box(0.046, 0.024, 0.26, 0, 0.058, -0.05, "dark"))
+			var drum := cyl(0.045, 0.045, 0.09, 0, -0.06, -0.08, "dark", "x")
+			g.add_child(drum); g.set_meta("mag", drum)      # 弹鼓作为弹匣节点
+			g.add_child(cyl(0.011, 0.013, 0.3, 0, 0.024, -0.48))
+			g.add_child(_grip(0.038, 0.09, 0.18, 0, -0.005, 0.15, "poly", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "poly", 0.38))
+			_trigger(g, -0.04, 0.0)
+			_bolt(g, 0.028, 0.04, -0.02)
+			_irons(g, 0.095, -0.42, 0.05, 0.05)
+		"mg42":
+			# MG42:方形机匣 + 细长枪管 + 侧挂弹链箱 + 两脚架
+			g.add_child(box(0.05, 0.09, 0.4, 0, 0.018, 0.02))
+			g.add_child(box(0.04, 0.03, 0.5, 0, 0.062, -0.12, "dark"))
+			g.add_child(cyl(0.011, 0.012, 0.4, 0, 0.024, -0.5))
+			g.add_child(cyl(0.014, 0.016, 0.06, 0, 0.024, -0.7, "dark"))
+			var belt := box(0.05, 0.09, 0.14, 0, -0.045, 0.06, "dark")
+			g.add_child(belt)
+			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.01, 0.2, "wood", 0.14))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.05, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			# 两脚架(收折)
+			for leg_s in [-1.0, 1.0]:
+				var leg := cyl(0.006, 0.006, 0.16, leg_s * 0.03, -0.09, -0.35, "dark", "z")
+				leg.rotation.z = leg_s * 0.3
+				g.add_child(leg)
+			_bolt(g, 0.03, 0.045, 0.02)
+			_irons(g, 0.13, -0.55, 0.05, 0.05)
+		"m60":
+			# M60:粗枪管 + 盒机匣 + 提把 + 弹链箱
+			g.add_child(box(0.052, 0.085, 0.34, 0, 0.018, -0.04))
+			g.add_child(cyl(0.016, 0.018, 0.42, 0, 0.028, -0.52))
+			g.add_child(cyl(0.02, 0.022, 0.06, 0, 0.028, -0.73, "dark"))
+			g.add_child(box(0.03, 0.035, 0.14, 0, 0.09, -0.18, "poly"))     # 提把
+			var belt2 := box(0.05, 0.1, 0.13, 0, -0.04, 0.04, "dark")
+			g.add_child(belt2)
+			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.01, 0.18, "wood", 0.14))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			_bolt(g, 0.03, 0.045, 0.0)
+			_irons(g, 0.125, -0.52, 0.05, 0.05)
+		"m110":
+			# M110 DMR:长管 + 导轨 + 光学目镜 + 固定托
+			g.add_child(box(0.05, 0.08, 0.34, 0, 0.018, -0.06, "tan"))
+			g.add_child(box(0.046, 0.026, 0.48, 0, 0.064, -0.2, "dark"))
+			_rail(g, 0.084, -0.26, -0.44)
+			g.add_child(cyl(0.011, 0.013, 0.28, 0, 0.024, -0.68))
+			g.add_child(cyl(0.016, 0.019, 0.05, 0, 0.024, -0.8, "dark"))
+			var scope_d := cyl(0.017, 0.017, 0.22, 0, 0.092, -0.2, "dark", "z")
+			g.add_child(scope_d)
+			g.add_child(_grip(0.04, 0.09, 0.2, 0, -0.005, 0.18, "tan", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.088, 0.04, "dark", 0.36))
+			_trigger(g, -0.042, 0.01)
+			var mag_d := box(0.036, 0.1, 0.06, 0, -0.095, -0.1, "tan")
+			mag_d.rotation.x = 0.1
+			g.add_child(mag_d); g.set_meta("mag", mag_d)
+			_bolt(g, 0.028, 0.045, -0.02)
+			_irons(g, 0.11, -0.55, 0.05, 0.05)
+		"m40":
+			# M40A3:栓动 + 细长管 + 木托 + 镜
+			g.add_child(cyl(0.011, 0.013, 0.34, 0, 0.028, -0.58))
+			g.add_child(box(0.048, 0.07, 0.3, 0, 0.015, -0.1, "wood"))
+			g.add_child(box(0.04, 0.04, 0.18, 0, 0.05, -0.16, "wood"))
+			var scope_m := cyl(0.018, 0.018, 0.26, 0, 0.09, -0.14, "dark", "z")
+			g.add_child(scope_m)
+			g.add_child(_grip(0.04, 0.085, 0.2, 0, -0.005, 0.16, "wood", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			var mag_m := box(0.028, 0.05, 0.05, 0, -0.06, -0.08, "dark")
+			g.add_child(mag_m); g.set_meta("mag", mag_m)
+			_bolt(g, 0.028, 0.045, 0.04)
+			_irons(g, 0.113, -0.5, 0.05, 0.05)
+		"g3":
+			# G3 战斗步枪:机匣 + 粗管 + 木托 + 20 发直弹匣
+			g.add_child(box(0.052, 0.08, 0.36, 0, 0.018, -0.06))
+			g.add_child(box(0.048, 0.026, 0.4, 0, 0.064, -0.14, "dark"))
+			g.add_child(cyl(0.013, 0.015, 0.26, 0, 0.024, -0.58))
+			g.add_child(cyl(0.017, 0.02, 0.05, 0, 0.024, -0.7, "dark"))
+			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.01, 0.18, "wood", 0.12))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			var mag_g3 := box(0.038, 0.12, 0.06, 0, -0.105, -0.08, "dark")
+			mag_g3.rotation.x = 0.1
+			g.add_child(mag_g3); g.set_meta("mag", mag_g3)
+			_bolt(g, 0.03, 0.04, 0.0)
+			_irons(g, 0.112, -0.54, 0.05, 0.06)
+		# ==================== [8/10 武器扩充 v2] 17 把新枪模型(顶部零件低矮,ADS 不挡视野) ====================
+		"mpx":
+			# SIG MPX:短 AR 机匣 + 顶部细轨 + 短管 + 折叠托
+			g.add_child(box(0.05, 0.075, 0.3, 0, 0.015, -0.05))
+			g.add_child(box(0.046, 0.024, 0.34, 0, 0.058, -0.13, "dark"))
+			g.add_child(box(0.014, 0.01, 0.18, 0, 0.078, -0.14, "poly"))
+			g.add_child(cyl(0.011, 0.013, 0.2, 0, 0.024, -0.56))
+			g.add_child(cyl(0.016, 0.018, 0.04, 0, 0.024, -0.66, "dark"))
+			g.add_child(_grip(0.04, 0.085, 0.17, 0, -0.005, 0.16, "poly", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "poly", 0.38))
+			_trigger(g, -0.04, 0.01)
+			var mag_x := box(0.034, 0.13, 0.055, 0, -0.11, -0.09, "dark")
+			mag_x.rotation.x = 0.12
+			g.add_child(mag_x); g.set_meta("mag", mag_x)
+			_bolt(g, 0.028, 0.045, 0.0)
+			_irons(g, 0.09, -0.52, 0.05, 0.05)
+		"mp7":
+			# HK MP7:紧凑机匣 + 顶部细轨 + 折叠握把 + 长直弹匣
+			g.add_child(box(0.042, 0.07, 0.3, 0, 0.014, -0.04))
+			g.add_child(box(0.04, 0.022, 0.32, 0, 0.054, -0.12, "dark"))
+			g.add_child(box(0.012, 0.01, 0.16, 0, 0.07, -0.13, "poly"))
+			g.add_child(cyl(0.009, 0.011, 0.18, 0, 0.022, -0.5))
+			g.add_child(_grip(0.034, 0.08, 0.14, 0, -0.005, 0.14, "poly", 0.1))
+			g.add_child(_grip(0.028, 0.09, 0.04, 0, -0.075, 0.03, "poly", 0.38))
+			_trigger(g, -0.035, 0.01)
+			var mag_p7 := box(0.03, 0.12, 0.045, 0, -0.105, -0.1, "dark")
+			g.add_child(mag_p7); g.set_meta("mag", mag_p7)
+			_bolt(g, 0.024, 0.04, 0.0)
+			_irons(g, 0.085, -0.48, 0.045, 0.05)
+		"pp2000":
+			# PP-2000:方形机匣 + 顶部细轨 + 大容量弹匣
+			g.add_child(box(0.046, 0.08, 0.34, 0, 0.016, -0.04))
+			g.add_child(box(0.042, 0.024, 0.36, 0, 0.06, -0.12, "dark"))
+			g.add_child(box(0.013, 0.01, 0.18, 0, 0.078, -0.13, "poly"))
+			g.add_child(cyl(0.011, 0.013, 0.2, 0, 0.024, -0.54))
+			g.add_child(_grip(0.036, 0.085, 0.16, 0, -0.005, 0.15, "poly", 0.1))
+			g.add_child(_grip(0.03, 0.095, 0.042, 0, -0.08, 0.035, "poly", 0.38))
+			_trigger(g, -0.038, 0.02)
+			var mag_p2 := box(0.032, 0.17, 0.05, 0, -0.14, -0.08, "dark")
+			g.add_child(mag_p2); g.set_meta("mag", mag_p2)
+			_bolt(g, 0.026, 0.04, 0.0)
+			_irons(g, 0.09, -0.5, 0.05, 0.05)
+		"mk48":
+			# MK48:7.62 轻机枪,方机匣 + 粗管 + 弹链箱
+			g.add_child(box(0.052, 0.09, 0.38, 0, 0.018, -0.04))
+			g.add_child(box(0.046, 0.03, 0.46, 0, 0.062, -0.16, "dark"))
+			g.add_child(cyl(0.014, 0.016, 0.44, 0, 0.026, -0.56))
+			g.add_child(cyl(0.018, 0.02, 0.06, 0, 0.026, -0.78, "dark"))
+			var belt_k := box(0.05, 0.1, 0.14, 0, -0.045, 0.05, "dark")
+			g.add_child(belt_k)
+			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.01, 0.2, "wood", 0.14))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.05, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			_bolt(g, 0.03, 0.045, 0.02)
+			_irons(g, 0.13, -0.58, 0.05, 0.05)
+		"negev":
+			# 内格夫:长机匣 + 粗管散热 + 两脚架
+			g.add_child(box(0.052, 0.09, 0.44, 0, 0.018, -0.06))
+			g.add_child(cyl(0.012, 0.014, 0.5, 0, 0.026, -0.58))
+			g.add_child(cyl(0.016, 0.018, 0.06, 0, 0.026, -0.83, "dark"))
+			var belt_n := box(0.05, 0.095, 0.16, 0, -0.04, 0.06, "dark")
+			g.add_child(belt_n)
+			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.01, 0.22, "poly", 0.14))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.05, "poly", 0.4))
+			_trigger(g, -0.04, 0.02)
+			for leg_s in [-1.0, 1.0]:
+				var leg := cyl(0.006, 0.006, 0.16, leg_s * 0.03, -0.09, -0.4, "dark", "z")
+				leg.rotation.z = leg_s * 0.3
+				g.add_child(leg)
+			_bolt(g, 0.03, 0.045, 0.02)
+			_irons(g, 0.125, -0.6, 0.05, 0.05)
+		"mg3":
+			# MG3:MG42 风格方机匣 + 细长管 + 侧挂弹链
+			g.add_child(box(0.05, 0.09, 0.4, 0, 0.018, 0.02))
+			g.add_child(box(0.04, 0.03, 0.5, 0, 0.062, -0.12, "dark"))
+			g.add_child(cyl(0.011, 0.012, 0.4, 0, 0.024, -0.5))
+			g.add_child(cyl(0.014, 0.016, 0.06, 0, 0.024, -0.7, "dark"))
+			var belt_3 := box(0.05, 0.09, 0.14, 0, -0.045, 0.06, "dark")
+			g.add_child(belt_3)
+			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.01, 0.2, "wood", 0.14))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.05, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			_bolt(g, 0.03, 0.045, 0.02)
+			_irons(g, 0.13, -0.55, 0.05, 0.05)
+		"m82a1":
+			# 巴雷特 M82A1:反器材大粗管 + 方机匣 + 大镜
+			g.add_child(cyl(0.016, 0.018, 0.62, 0, 0.03, -0.7))
+			g.add_child(cyl(0.02, 0.022, 0.08, 0, 0.03, -1.0, "dark"))
+			g.add_child(box(0.06, 0.1, 0.42, 0, 0.02, -0.06))
+			g.add_child(box(0.05, 0.035, 0.36, 0, 0.078, -0.14, "dark"))
+			var scope_b := cyl(0.022, 0.022, 0.3, 0, 0.095, -0.12, "dark", "z")
+			g.add_child(scope_b)
+			g.add_child(_grip(0.048, 0.11, 0.24, 0, -0.01, 0.2, "dark", 0.14))
+			g.add_child(_grip(0.038, 0.11, 0.05, 0, -0.09, 0.04, "dark", 0.4))
+			_trigger(g, -0.046, 0.02)
+			var mag_b := box(0.04, 0.1, 0.07, 0, -0.09, -0.16, "dark")
+			g.add_child(mag_b); g.set_meta("mag", mag_b)
+			_bolt(g, 0.032, 0.05, 0.02)
+			_irons(g, 0.135, -0.62, 0.06, 0.06)
+		"l115":
+			# L115A3:栓动 + 细长管 + 绿色托 + 镜
+			g.add_child(cyl(0.011, 0.013, 0.44, 0, 0.028, -0.64))
+			g.add_child(cyl(0.015, 0.017, 0.05, 0, 0.028, -0.86, "dark"))
+			g.add_child(box(0.048, 0.07, 0.32, 0, 0.015, -0.1, "dark"))
+			g.add_child(box(0.04, 0.045, 0.2, 0, 0.052, -0.18, "dark"))
+			var scope_l := cyl(0.019, 0.019, 0.3, 0, 0.092, -0.15, "dark", "z")
+			g.add_child(scope_l)
+			g.add_child(_grip(0.04, 0.085, 0.2, 0, -0.005, 0.16, "dark", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "dark", 0.4))
+			_trigger(g, -0.04, 0.02)
+			var mag_l := box(0.028, 0.05, 0.05, 0, -0.06, -0.08, "dark")
+			g.add_child(mag_l); g.set_meta("mag", mag_l)
+			_bolt(g, 0.028, 0.045, 0.04)
+			_irons(g, 0.115, -0.56, 0.05, 0.05)
+		"sv98":
+			# SV-98:栓动 + 木托 + 细管 + 镜
+			g.add_child(cyl(0.011, 0.013, 0.42, 0, 0.028, -0.6))
+			g.add_child(cyl(0.015, 0.017, 0.05, 0, 0.028, -0.8, "dark"))
+			g.add_child(box(0.05, 0.075, 0.3, 0, 0.015, -0.08, "wood"))
+			g.add_child(box(0.04, 0.05, 0.2, 0, 0.055, -0.16, "wood"))
+			var scope_s := cyl(0.018, 0.018, 0.28, 0, 0.09, -0.13, "dark", "z")
+			g.add_child(scope_s)
+			g.add_child(_grip(0.042, 0.09, 0.2, 0, -0.005, 0.16, "wood", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			var mag_s := box(0.03, 0.055, 0.05, 0, -0.065, -0.09, "dark")
+			g.add_child(mag_s); g.set_meta("mag", mag_s)
+			_bolt(g, 0.028, 0.045, 0.04)
+			_irons(g, 0.11, -0.52, 0.05, 0.05)
+		"m2010":
+			# M2010 ESR:栓动 + 细管 + 镜
+			g.add_child(cyl(0.011, 0.013, 0.46, 0, 0.028, -0.66))
+			g.add_child(cyl(0.015, 0.017, 0.05, 0, 0.028, -0.88, "dark"))
+			g.add_child(box(0.048, 0.072, 0.3, 0, 0.015, -0.1, "dark"))
+			g.add_child(box(0.04, 0.042, 0.2, 0, 0.05, -0.18, "dark"))
+			var scope_2 := cyl(0.019, 0.019, 0.3, 0, 0.09, -0.15, "dark", "z")
+			g.add_child(scope_2)
+			g.add_child(_grip(0.04, 0.085, 0.2, 0, -0.005, 0.16, "dark", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "dark", 0.4))
+			_trigger(g, -0.04, 0.02)
+			var mag_2 := box(0.028, 0.05, 0.05, 0, -0.06, -0.08, "dark")
+			g.add_child(mag_2); g.set_meta("mag", mag_2)
+			_bolt(g, 0.028, 0.045, 0.04)
+			_irons(g, 0.113, -0.58, 0.05, 0.05)
+		"sks":
+			# SKS:木托 + 固定弹仓 + 短管 + 瞄准镜
+			g.add_child(cyl(0.011, 0.013, 0.24, 0, 0.026, -0.52))
+			g.add_child(cyl(0.015, 0.017, 0.05, 0, 0.026, -0.64, "dark"))
+			g.add_child(box(0.05, 0.08, 0.34, 0, 0.016, -0.04, "wood"))
+			g.add_child(box(0.044, 0.026, 0.3, 0, 0.06, -0.1, "dark"))
+			var scope_k := cyl(0.016, 0.016, 0.18, 0, 0.09, -0.16, "dark", "z")
+			g.add_child(scope_k)
+			g.add_child(_grip(0.042, 0.095, 0.2, 0, -0.008, 0.18, "wood", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.045, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			var mag_k := box(0.03, 0.06, 0.05, 0, -0.07, -0.06, "dark")
+			g.add_child(mag_k); g.set_meta("mag", mag_k)
+			_bolt(g, 0.028, 0.04, 0.0)
+			_irons(g, 0.105, -0.5, 0.05, 0.05)
+		"m1a":
+			# M1A:木托 + 长管 + 20 发弹匣 + 瞄准镜
+			g.add_child(cyl(0.012, 0.014, 0.36, 0, 0.026, -0.6))
+			g.add_child(cyl(0.016, 0.018, 0.05, 0, 0.026, -0.74, "dark"))
+			g.add_child(box(0.05, 0.082, 0.34, 0, 0.016, -0.06, "wood"))
+			g.add_child(box(0.046, 0.028, 0.3, 0, 0.064, -0.12, "dark"))
+			var scope_a := cyl(0.017, 0.017, 0.2, 0, 0.09, -0.16, "dark", "z")
+			g.add_child(scope_a)
+			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.008, 0.18, "wood", 0.12))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			var mag_a := box(0.038, 0.12, 0.06, 0, -0.105, -0.09, "dark")
+			mag_a.rotation.x = 0.08
+			g.add_child(mag_a); g.set_meta("mag", mag_a)
+			_bolt(g, 0.03, 0.04, 0.0)
+			_irons(g, 0.112, -0.56, 0.05, 0.06)
+		"g28":
+			# HK G28:AR 风格 + 顶部细轨 + 镜
+			g.add_child(box(0.05, 0.078, 0.32, 0, 0.016, -0.06))
+			g.add_child(box(0.046, 0.026, 0.4, 0, 0.062, -0.16, "dark"))
+			g.add_child(box(0.014, 0.01, 0.22, 0, 0.08, -0.16, "poly"))
+			g.add_child(cyl(0.012, 0.014, 0.26, 0, 0.024, -0.62))
+			g.add_child(cyl(0.016, 0.018, 0.05, 0, 0.024, -0.74, "dark"))
+			var scope_g := cyl(0.018, 0.018, 0.24, 0, 0.092, -0.16, "dark", "z")
+			g.add_child(scope_g)
+			g.add_child(_grip(0.04, 0.09, 0.2, 0, -0.005, 0.18, "poly", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.088, 0.04, "dark", 0.36))
+			_trigger(g, -0.042, 0.01)
+			var mag_8 := box(0.036, 0.1, 0.06, 0, -0.095, -0.1, "tan")
+			mag_8.rotation.x = 0.1
+			g.add_child(mag_8); g.set_meta("mag", mag_8)
+			_bolt(g, 0.028, 0.045, -0.02)
+			_irons(g, 0.11, -0.55, 0.05, 0.05)
+		"mk14":
+			# MK14 EBR:导轨护木 + 镜
+			g.add_child(box(0.05, 0.08, 0.34, 0, 0.018, -0.06))
+			g.add_child(box(0.046, 0.028, 0.46, 0, 0.064, -0.2, "dark"))
+			_rail(g, 0.084, -0.26, -0.44)
+			g.add_child(cyl(0.012, 0.014, 0.28, 0, 0.024, -0.68))
+			g.add_child(cyl(0.016, 0.018, 0.05, 0, 0.024, -0.8, "dark"))
+			var scope_m14 := cyl(0.018, 0.018, 0.24, 0, 0.092, -0.18, "dark", "z")
+			g.add_child(scope_m14)
+			g.add_child(_grip(0.04, 0.09, 0.2, 0, -0.005, 0.18, "tan", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.088, 0.04, "dark", 0.36))
+			_trigger(g, -0.042, 0.01)
+			var mag_14 := box(0.038, 0.12, 0.06, 0, -0.105, -0.09, "tan")
+			mag_14.rotation.x = 0.08
+			g.add_child(mag_14); g.set_meta("mag", mag_14)
+			_bolt(g, 0.03, 0.045, -0.02)
+			_irons(g, 0.11, -0.55, 0.05, 0.05)
+		"m14":
+			# M14:木托 + 长管 + 瞄准镜
+			g.add_child(cyl(0.012, 0.014, 0.38, 0, 0.026, -0.62))
+			g.add_child(cyl(0.016, 0.018, 0.05, 0, 0.026, -0.76, "dark"))
+			g.add_child(box(0.05, 0.082, 0.34, 0, 0.016, -0.06, "wood"))
+			g.add_child(box(0.046, 0.028, 0.32, 0, 0.064, -0.12, "dark"))
+			var scope_14 := cyl(0.017, 0.017, 0.2, 0, 0.09, -0.16, "dark", "z")
+			g.add_child(scope_14)
+			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.008, 0.18, "wood", 0.12))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			var mag_14b := box(0.038, 0.12, 0.06, 0, -0.105, -0.09, "dark")
+			mag_14b.rotation.x = 0.08
+			g.add_child(mag_14b); g.set_meta("mag", mag_14b)
+			_bolt(g, 0.03, 0.04, 0.0)
+			_irons(g, 0.112, -0.56, 0.05, 0.06)
+		"ar10":
+			# AR-10:AR 风格 + 细轨 + 20 发弹匣
+			g.add_child(box(0.05, 0.078, 0.32, 0, 0.016, -0.06))
+			g.add_child(box(0.046, 0.026, 0.38, 0, 0.062, -0.16, "dark"))
+			g.add_child(box(0.014, 0.01, 0.22, 0, 0.08, -0.16, "poly"))
+			var scope_10 := cyl(0.017, 0.017, 0.2, 0, 0.09, -0.16, "dark", "z")
+			g.add_child(scope_10)
+			g.add_child(cyl(0.012, 0.014, 0.26, 0, 0.024, -0.6))
+			g.add_child(cyl(0.016, 0.018, 0.05, 0, 0.024, -0.72, "dark"))
+			g.add_child(_grip(0.04, 0.09, 0.2, 0, -0.005, 0.18, "poly", 0.1))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.088, 0.04, "dark", 0.36))
+			_trigger(g, -0.042, 0.01)
+			var mag_10 := box(0.036, 0.1, 0.06, 0, -0.095, -0.1, "dark")
+			mag_10.rotation.x = 0.1
+			g.add_child(mag_10); g.set_meta("mag", mag_10)
+			_bolt(g, 0.028, 0.045, -0.02)
+			_irons(g, 0.11, -0.54, 0.05, 0.05)
+		"fal":
+			# FN FAL:木托 + 细管 + 20 发弹匣 + 瞄准镜
+			g.add_child(cyl(0.012, 0.014, 0.34, 0, 0.026, -0.6))
+			g.add_child(cyl(0.016, 0.018, 0.05, 0, 0.026, -0.74, "dark"))
+			g.add_child(box(0.05, 0.08, 0.34, 0, 0.016, -0.06, "wood"))
+			g.add_child(box(0.046, 0.026, 0.32, 0, 0.062, -0.12, "dark"))
+			var scope_f := cyl(0.017, 0.017, 0.2, 0, 0.09, -0.16, "dark", "z")
+			g.add_child(scope_f)
+			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.008, 0.18, "wood", 0.12))
+			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.085, 0.04, "wood", 0.4))
+			_trigger(g, -0.04, 0.02)
+			var mag_f := box(0.038, 0.12, 0.06, 0, -0.105, -0.09, "dark")
+			mag_f.rotation.x = 0.08
+			g.add_child(mag_f); g.set_meta("mag", mag_f)
+			_bolt(g, 0.03, 0.04, 0.0)
+			_irons(g, 0.112, -0.56, 0.05, 0.06)
 
 
 ## 各武器的握持锚点(枪械局部空间,左手贴合护木底部)
@@ -549,6 +957,35 @@ const HAND_ANCHORS := {
 	"deagle": { "r": [0.012, -0.08, 0.06], "l": [-0.028, -0.088, 0.05] },
 	"m93r": { "r": [0.012, -0.075, 0.06], "l": [0, -0.06, -0.1] },
 	"spas12": { "r": [0.012, -0.1, 0.045], "l": [0, -0.062, -0.33] },
+	# [8/10 武器扩充] 新枪握持锚点
+	"g36c": { "r": [0.012, -0.1, 0.035], "l": [0, -0.038, -0.38] },
+	"ak74": { "r": [0.012, -0.1, 0.045], "l": [0, -0.032, -0.38] },
+	"famas": { "r": [0.012, -0.1, 0.015], "l": [0, -0.04, -0.22] },
+	"vector": { "r": [0.012, -0.095, 0.035], "l": [0, -0.05, -0.28] },
+	"pp19": { "r": [0.012, -0.09, 0.035], "l": [0, -0.055, -0.3] },
+	"mg42": { "r": [0.012, -0.11, 0.055], "l": [0, -0.045, -0.42] },
+	"m60": { "r": [0.012, -0.11, 0.045], "l": [0, -0.045, -0.45] },
+	"m110": { "r": [0.012, -0.1, 0.035], "l": [0, -0.035, -0.4] },
+	"m40": { "r": [0.012, -0.095, 0.065], "l": [0, -0.048, -0.3] },
+	"g3": { "r": [0.012, -0.1, 0.035], "l": [0, -0.04, -0.4] },
+	# [8/10 武器扩充 v2] 17 把新枪握持锚点
+	"mpx": { "r": [0.012, -0.095, 0.035], "l": [0, -0.038, -0.4] },
+	"mp7": { "r": [0.012, -0.09, 0.03], "l": [0, -0.035, -0.32] },
+	"pp2000": { "r": [0.012, -0.095, 0.035], "l": [0, -0.04, -0.34] },
+	"mk48": { "r": [0.012, -0.11, 0.055], "l": [0, -0.045, -0.46] },
+	"negev": { "r": [0.012, -0.11, 0.055], "l": [0, -0.045, -0.48] },
+	"mg3": { "r": [0.012, -0.11, 0.055], "l": [0, -0.045, -0.42] },
+	"m82a1": { "r": [0.012, -0.11, 0.065], "l": [0, -0.05, -0.5] },
+	"l115": { "r": [0.012, -0.095, 0.065], "l": [0, -0.048, -0.32] },
+	"sv98": { "r": [0.012, -0.095, 0.065], "l": [0, -0.045, -0.3] },
+	"m2010": { "r": [0.012, -0.095, 0.065], "l": [0, -0.048, -0.34] },
+	"sks": { "r": [0.012, -0.1, 0.045], "l": [0, -0.04, -0.3] },
+	"m1a": { "r": [0.012, -0.1, 0.045], "l": [0, -0.042, -0.38] },
+	"g28": { "r": [0.012, -0.1, 0.035], "l": [0, -0.035, -0.42] },
+	"mk14": { "r": [0.012, -0.1, 0.035], "l": [0, -0.035, -0.42] },
+	"m14": { "r": [0.012, -0.1, 0.045], "l": [0, -0.042, -0.4] },
+	"ar10": { "r": [0.012, -0.1, 0.035], "l": [0, -0.035, -0.4] },
+	"fal": { "r": [0.012, -0.1, 0.045], "l": [0, -0.042, -0.4] },
 }
 
 ## 枪口 z 位置表
@@ -557,6 +994,14 @@ const MUZZLE_Z := {
 	"m1911": -0.15, "rpg": -0.62, "scar": -0.82, "aug": -0.66, "ump": -0.46, "p90": -0.35,
 	"pkm": -0.94, "rpd": -0.88, "m24": -0.86, "svd": -0.84,
 	"g17": -0.15, "p226": -0.155, "deagle": -0.21, "m93r": -0.18, "spas12": -0.75,
+	# [8/10 武器扩充] 新枪枪口位置
+	"g36c": -0.7, "ak74": -0.82, "famas": -0.72, "vector": -0.6, "pp19": -0.6,
+	"mg42": -0.74, "m60": -0.76, "m110": -0.84, "m40": -0.74, "g3": -0.74,
+	# [8/10 武器扩充 v2] 17 把新枪枪口位置
+	"mpx": -0.7, "mp7": -0.52, "pp2000": -0.56, "mk48": -0.82, "negev": -0.86,
+	"mg3": -0.74, "m82a1": -1.04, "l115": -0.9, "sv98": -0.84, "m2010": -0.92,
+	"sks": -0.68, "m1a": -0.78, "g28": -0.78, "mk14": -0.84, "m14": -0.8,
+	"ar10": -0.76, "fal": -0.78,
 }
 
 ## ============ 枪械改装件(程序化挂载) ============
@@ -585,6 +1030,24 @@ const MOD_ANCHORS := {
 	"p226": { "muzzle": Vector3(0, 0.034, -0.165), "mag": Vector3(0, -0.13, 0.045), "grip": Vector3(0, -0.035, -0.05), "trigger": Vector3(0, -0.055, -0.005), "optic": Vector3(0, 0.062, -0.03) },
 	"deagle": { "muzzle": Vector3(0, 0.04, -0.25), "mag": Vector3(0, -0.145, 0.05), "grip": Vector3(0, -0.038, -0.06), "trigger": Vector3(0, -0.058, -0.005), "optic": Vector3(0, 0.07, -0.05) },
 	"m93r": { "muzzle": Vector3(0, 0.032, -0.18), "mag": Vector3(0, -0.145, 0.045), "grip": Vector3(0, -0.06, -0.1), "trigger": Vector3(0, -0.055, 0.005), "optic": Vector3(0, 0.06, -0.04) },
+	# [8/10 武器扩充 v2] 17 把新枪改装锚点
+	"mpx": { "muzzle": Vector3(0, 0.024, -0.7), "mag": Vector3(0, -0.12, -0.1), "grip": Vector3(0, -0.012, -0.4), "trigger": Vector3(0, -0.06, 0.005), "optic": Vector3(0, 0.086, -0.12) },
+	"mp7": { "muzzle": Vector3(0, 0.022, -0.5), "mag": Vector3(0, -0.11, -0.1), "grip": Vector3(0, -0.01, -0.32), "trigger": Vector3(0, -0.058, 0.005), "optic": Vector3(0, 0.08, -0.1) },
+	"pp2000": { "muzzle": Vector3(0, 0.024, -0.56), "mag": Vector3(0, -0.15, -0.08), "grip": Vector3(0, -0.01, -0.34), "trigger": Vector3(0, -0.06, 0.01), "optic": Vector3(0, 0.085, -0.1) },
+	"mk48": { "muzzle": Vector3(0, 0.026, -0.82), "grip": Vector3(0, -0.015, -0.48), "trigger": Vector3(0, -0.065, 0.015), "optic": Vector3(0, 0.1, -0.12) },
+	"negev": { "muzzle": Vector3(0, 0.026, -0.86), "grip": Vector3(0, -0.015, -0.5), "trigger": Vector3(0, -0.065, 0.015), "optic": Vector3(0, 0.098, -0.12) },
+	"mg3": { "muzzle": Vector3(0, 0.024, -0.74), "grip": Vector3(0, -0.015, -0.42), "trigger": Vector3(0, -0.065, 0.015), "optic": Vector3(0, 0.095, -0.12) },
+	"m82a1": { "muzzle": Vector3(0, 0.03, -1.04), "mag": Vector3(0, -0.1, -0.16), "grip": Vector3(0, -0.02, -0.5), "trigger": Vector3(0, -0.07, 0.02), "optic": Vector3(0, 0.1, -0.12) },
+	"l115": { "muzzle": Vector3(0, 0.028, -0.9), "grip": Vector3(0, -0.012, -0.5), "trigger": Vector3(0, -0.06, 0.025), "optic": Vector3(0, 0.09, -0.06) },
+	"sv98": { "muzzle": Vector3(0, 0.028, -0.84), "grip": Vector3(0, -0.012, -0.45), "trigger": Vector3(0, -0.06, 0.025), "optic": Vector3(0, 0.088, -0.06) },
+	"m2010": { "muzzle": Vector3(0, 0.028, -0.92), "grip": Vector3(0, -0.012, -0.5), "trigger": Vector3(0, -0.06, 0.025), "optic": Vector3(0, 0.09, -0.06) },
+	"sks": { "muzzle": Vector3(0, 0.026, -0.68), "mag": Vector3(0, -0.08, -0.06), "grip": Vector3(0, -0.012, -0.32), "trigger": Vector3(0, -0.06, 0.015), "optic": Vector3(0, 0.088, -0.08) },
+	"m1a": { "muzzle": Vector3(0, 0.026, -0.78), "mag": Vector3(0, -0.11, -0.1), "grip": Vector3(0, -0.012, -0.4), "trigger": Vector3(0, -0.06, 0.015), "optic": Vector3(0, 0.09, -0.1) },
+	"g28": { "muzzle": Vector3(0, 0.024, -0.78), "mag": Vector3(0, -0.1, -0.1), "grip": Vector3(0, -0.012, -0.42), "trigger": Vector3(0, -0.062, 0.005), "optic": Vector3(0, 0.088, -0.12) },
+	"mk14": { "muzzle": Vector3(0, 0.024, -0.84), "mag": Vector3(0, -0.11, -0.1), "grip": Vector3(0, -0.012, -0.42), "trigger": Vector3(0, -0.062, 0.005), "optic": Vector3(0, 0.088, -0.14) },
+	"m14": { "muzzle": Vector3(0, 0.026, -0.8), "mag": Vector3(0, -0.11, -0.1), "grip": Vector3(0, -0.012, -0.4), "trigger": Vector3(0, -0.06, 0.015), "optic": Vector3(0, 0.09, -0.1) },
+	"ar10": { "muzzle": Vector3(0, 0.024, -0.76), "mag": Vector3(0, -0.1, -0.1), "grip": Vector3(0, -0.012, -0.4), "trigger": Vector3(0, -0.06, 0.005), "optic": Vector3(0, 0.086, -0.12) },
+	"fal": { "muzzle": Vector3(0, 0.026, -0.78), "mag": Vector3(0, -0.11, -0.1), "grip": Vector3(0, -0.012, -0.4), "trigger": Vector3(0, -0.06, 0.015), "optic": Vector3(0, 0.088, -0.1) },
 }
 
 ## 底部常规弹匣武器(改装弹匣仅替换这类;顶置/侧挂/弹鼓/无弹匣枪型跳过)
@@ -743,22 +1206,22 @@ static func build_mod_optic(mod_id: String) -> Node3D:
 			o.add_child(box(0.008, 0.009, 0.008, 0, 0.027, 0.005, "dark"))     # 调节钮(高于轴线)
 			var rd := MeshInstance3D.new()
 			var rdm := TorusMesh.new()
-			rdm.inner_radius = 0.0065
-			rdm.outer_radius = 0.0075
+			rdm.inner_radius = 0.0036
+			rdm.outer_radius = 0.0044
 			rdm.ring_segments = 24
 			rdm.rings = 8
 			rd.mesh = rdm
 			rd.material_override = rm
 			rd.rotation.x = PI / 2.0
-			rd.position = Vector3(0, 0, -0.006)
+			rd.position = Vector3(0, 0, -0.03)
 			rd.name = "RetRing"
-			o.add_child(rd)                                                     # 红色分划环(镜内,无厚度,不挡视线)
+			o.add_child(rd)                                                     # 红色分划环(镜筒中前部,无厚度,不挡视线)
 			var rdot := MeshInstance3D.new()
 			var rdp := PlaneMesh.new()
-			rdp.size = Vector2(0.0022, 0.0022)
+			rdp.size = Vector2(0.0012, 0.0012)
 			rdot.mesh = rdp
 			rdot.material_override = rm
-			rdot.position = Vector3(0, 0, -0.006)
+			rdot.position = Vector3(0, 0, -0.03)
 			rdot.name = "RetDot"
 			o.add_child(rdot)                                                   # 分划中心点(轴线上)
 		"opt_holo":
@@ -872,6 +1335,49 @@ static func build_forearm() -> Node3D:
 	if not _mat.has("sleeve"):
 		_mat["sleeve"] = _std(Color.html("#4a5548"), 0.9, 0.0)
 	g.add_child(box(0.058, 0.058, 1.0, 0, 0, 0, "sleeve"))
+	return g
+
+
+## ============ 近战小刀(程序化:棱形刀身 + 黑柄,单手右握) ============
+## 原点位于护手处,刀尖朝 -Z;结构参考 build() 的 group 约定(meta: muzzle/right_hand/right_arm)
+static func build_knife() -> Node3D:
+	var g := Node3D.new()
+	g.name = "Weapon_knife"
+	# 刀身:中脊 + 上下斜刃面(菱形截面) + 锥形刀尖
+	g.add_child(box(0.02, 0.003, 0.3, 0, 0, -0.24, "chrome"))            # 中脊
+	var b1 := box(0.014, 0.007, 0.3, 0, 0.0045, -0.24, "chrome")
+	b1.rotation.z = 0.55                                                    # 上斜面
+	g.add_child(b1)
+	var b2 := box(0.014, 0.007, 0.3, 0, -0.0045, -0.24, "chrome")
+	b2.rotation.z = -0.55                                                   # 下斜面
+	g.add_child(b2)
+	g.add_child(cyl(0.008, 0.0, 0.07, 0, 0, -0.4, "chrome"))             # 刀尖锥(细端朝 -Z)
+	# 护手(横挡)
+	g.add_child(box(0.036, 0.026, 0.01, 0, 0, -0.05, "dark"))
+	# 刀柄(黑):柄体 + 防滑环 + 尾帽
+	g.add_child(box(0.022, 0.028, 0.14, 0, 0, 0.035, "poly"))
+	for i in 3:
+		g.add_child(box(0.024, 0.03, 0.008, 0, 0, 0.0 + i * 0.04, "dark"))
+	g.add_child(box(0.026, 0.034, 0.022, 0, 0, 0.115, "dark"))
+	# 刀口参考点(特效/调试对齐)
+	var muzzle := Node3D.new()
+	muzzle.name = "Muzzle"
+	muzzle.position = Vector3(0, 0, -0.45)
+	g.add_child(muzzle)
+	g.set_meta("muzzle", muzzle)
+	# 右手握持(单手握刀)
+	var right_hand := build_hand(false)
+	right_hand.scale = Vector3.ONE * 1.15
+	right_hand.position = Vector3(0.012, -0.022, 0.05)
+	right_hand.rotation = Vector3(-0.2, -0.15, -1.3)
+	g.add_child(right_hand)
+	g.set_meta("right_hand", right_hand)
+	var right_arm := build_forearm()
+	right_arm.rotation = Vector3(0.72, 0.32, 0)
+	g.add_child(right_arm)
+	g.set_meta("right_arm", right_arm)
+	# 视角模型不投影
+	set_shadow_recursive(g, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 	return g
 
 

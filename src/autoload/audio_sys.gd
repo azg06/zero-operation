@@ -8,6 +8,7 @@ const BUS_MUSIC := "Music"
 const BUS_SFX := "SFX"
 const BUS_AMBIENCE := "Ambience"
 const BUS_UI := "UI"
+const BUS_VOICE := "Voice"
 ## 脚步独立总线(挂低通滤波):step_concrete 等采样为高频噪声合成(过零率≈12kHz),
 ## 直通 SFX 总线时表现为"滋滋/嘶嘶"声,低通后保留脚步声主频、去掉噪声尾巴
 const BUS_STEPS := "Steps"
@@ -19,6 +20,15 @@ const GUN_SOUND_FILES := {
 	"p226": "p226", "p90": "p90", "mp5": "mp5", "pkm": "pkm", "rpd": "rpd",
 	"m249": "m249", "awm": "awm", "m24": "m24", "svd": "svd", "m1014": "m1014",
 	"spas12": "spas12", "m1911": "m1911",
+	# [8/10 武器扩充] 10 把新枪专属枪声(audiocpp 生成,已裁剪为单发)
+	"g36c": "g36c", "ak74": "ak74", "famas": "famas", "vector": "vector",
+	"pp19": "pp19", "mg42": "mg42", "m60": "m60", "m110": "m110",
+	"m40": "m40", "g3": "g3",
+	# [8/10 武器扩充 v2] 17 把新枪专属枪声(audiocpp 生成,单发变体筛选 + 裁剪 1s)
+	"mpx": "mpx", "mp7": "mp7", "pp2000": "pp2000", "mk48": "mk48",
+	"negev": "negev", "mg3": "mg3", "m82a1": "m82a1", "l115": "l115",
+	"sv98": "sv98", "m2010": "m2010", "sks": "sks", "m1a": "m1a",
+	"g28": "g28", "mk14": "mk14", "m14": "m14", "ar10": "ar10", "fal": "fal",
 }
 ## 响度补偿:源 wav 实测这 4 个枪声素材峰值过低(ump45=0.089/-21dB、aug_a3=0.114/-18.8dB、
 ## p90=0.114/-18.8dB、glock17=0.130/-17.7dB,其余 16 个 0.17-1.0 正常),运行时按文件名增益
@@ -64,6 +74,7 @@ var _rumble_t := 0.0
 var _distant_t := 0.0
 var _hb_t := 0.0
 var _sup_player: AudioStreamPlayer = null
+var _voice_player: AudioStreamPlayer = null
 
 
 func _ready() -> void:
@@ -78,6 +89,10 @@ func _ready() -> void:
 		ps.bus = BUS_STEPS
 		add_child(ps)
 		_step_players.append(ps)
+	# 对白人声专用播放器:独立总线,不参与枪声/爆炸共享池争夺
+	_voice_player = AudioStreamPlayer.new()
+	_voice_player.bus = BUS_VOICE
+	add_child(_voice_player)
 	for i in 40:
 		var p3 := AudioStreamPlayer3D.new()
 		p3.bus = BUS_SFX
@@ -97,11 +112,13 @@ func apply_volumes() -> void:
 	set_bus_volume(BUS_STEPS, G.audio_setting("sfx_vol", 1.0))
 	set_bus_volume(BUS_AMBIENCE, G.audio_setting("amb_vol", 1.0))
 	set_bus_volume(BUS_UI, G.audio_setting("ui_vol", 1.0))
+	# 对白人声跟随 SFX 音量滑块(人声需要清晰,不做低通)
+	set_bus_volume(BUS_VOICE, G.audio_setting("sfx_vol", 1.0))
 
 
 ## 创建分层总线(Master 之外的四条;环境总线挂低频滤波,远处炮火更闷)
 func _setup_buses() -> void:
-	for b in [BUS_MUSIC, BUS_SFX, BUS_AMBIENCE, BUS_UI, BUS_STEPS]:
+	for b in [BUS_MUSIC, BUS_SFX, BUS_AMBIENCE, BUS_UI, BUS_STEPS, BUS_VOICE]:
 		if AudioServer.get_bus_index(b) == -1:
 			AudioServer.add_bus()
 			AudioServer.set_bus_name(AudioServer.bus_count - 1, b)
@@ -126,10 +143,17 @@ func _ensure_lowpass(bus: String, cutoff: float) -> void:
 	AudioServer.add_bus_effect(idx, lp)
 
 
+## 音频加载:优先 .ogg(体积压缩),缺失时回退 .wav(循环音效仍为 wav);两者都缺返回 null
 func _snd(snd_name: String, sub := "") -> AudioStream:
 	var key := (sub + "/" if sub != "" else "") + snd_name
 	if not _cache.has(key):
-		_cache[key] = load("res://audio/" + (sub + "/" if sub != "" else "") + snd_name + ".wav")
+		var base := "res://audio/" + (sub + "/" if sub != "" else "") + snd_name
+		var p := ""
+		if ResourceLoader.exists(base + ".ogg"):
+			p = base + ".ogg"
+		elif ResourceLoader.exists(base + ".wav"):
+			p = base + ".wav"
+		_cache[key] = load(p) if p != "" else null
 	return _cache[key]
 
 
@@ -144,13 +168,33 @@ func set_bus_volume(bus: String, v: float) -> void:
 		AudioServer.set_bus_volume_db(idx, linear_to_db(maxf(v, 0.001)))
 
 
-func get_bus_volume(bus: String) -> float:
-	var idx := AudioServer.get_bus_index(bus)
-	return db_to_linear(AudioServer.get_bus_volume_db(idx)) if idx != -1 else 1.0
+## 对白人声:播放 audio/voice/<id>.wav(战役台词行ID)。
+## 独立 Voice 总线 + 专用播放器:不被枪声/爆炸共享池截断,新台词打断旧台词;
+## 文件缺失时静默跳过(不影响文字字幕)。返回音频时长(秒),未播放返回 0。
+func voice(id: String) -> float:
+	if id.is_empty():
+		return 0.0
+	var s: AudioStream = _snd(id, "voice")
+	if s == null:
+		return 0.0
+	_voice_player.stop()
+	_voice_player.stream = s
+	_voice_player.play()
+	return s.get_length()
 
 
-func unlock() -> void:
-	pass  # Godot 无需手势解锁
+## 对白音频时长(秒):仅查询不播放,供字幕/过场节奏同步;文件缺失返回 0
+func voice_duration(id: String) -> float:
+	if id.is_empty():
+		return 0.0
+	var s: AudioStream = _snd(id, "voice")
+	return s.get_length() if s != null else 0.0
+
+
+## 立即停止当前对白(过场跳过/切章/中止时调用,防台词残留到战斗或结算屏)
+func voice_stop() -> void:
+	if _voice_player != null:
+		_voice_player.stop()
 
 
 ## 播放 2D 音效(玩家自身 / UI),可指定总线;sub 指定 audio/ 下子目录
@@ -409,7 +453,8 @@ func _engine_set_gear(gear: int) -> void:
 	if _eng_tween != null:
 		_eng_tween.kill()
 	_eng_tween = old.create_tween()
-	_eng_tween.tween_property(old, "volume_db", -60.0, 0.15)
+	# 起点夹取:旧 player 音量可能已是 -inf(linear_to_db(0)),直接由此插值会得 NaN
+	_eng_tween.tween_property(old, "volume_db", -60.0, 0.15).from(maxf(old.volume_db, -60.0))
 	_eng_tween.tween_callback(old.stop)
 	var newp := _eng_players[_eng_active]
 	newp.stop()
@@ -442,9 +487,9 @@ func engine_update(speed: float, max_speed := 1.0) -> void:
 	if _eng_fade_in_t > 0:
 		_eng_fade_in_t -= get_process_delta_time()
 		if _eng_fade_in_t > 0:
-			p.volume_db = linear_to_db(maxf(lerpf(0.002, target_v, 1.0 - _eng_fade_in_t / 0.25), 0.0))
+			p.volume_db = linear_to_db(maxf(lerpf(0.002, target_v, 1.0 - _eng_fade_in_t / 0.25), 0.0001))
 			return
-	p.volume_db = linear_to_db(maxf(target_v, 0.0))
+	p.volume_db = linear_to_db(maxf(target_v, 0.0001))
 
 
 func engine_stop() -> void:

@@ -4,10 +4,6 @@ class_name Utils
 const TAU := PI * 2.0
 
 
-static func clampv(v: float, a: float, b: float) -> float:
-	return a if v < a else (b if v > b else v)
-
-
 static func lerpf(a: float, b: float, t: float) -> float:
 	return a + (b - a) * t
 
@@ -82,6 +78,43 @@ static var _grid_cell := 20.0
 static var _stamp := PackedInt32Array()
 static var _ray_id := 0
 static var _hit_result := { "dist": 0.0, "point": Vector3.ZERO, "normal": Vector3.ZERO }
+
+# ---- [BENCH] 热点计时(--bench-collide 启用,默认零开销) ----
+static var _bench := false
+static var _bench_linear := false  # [BENCH] 临时:强制线性路径(基线对比用)
+static var _bench_init := false
+static var _bench_mc_t := 0.0
+static var _bench_mc_n := 0
+static var _bench_veh_t := 0.0
+static var _bench_veh_n := 0
+static var _bench_fh_t := 0.0
+static var _bench_fh_n := 0
+
+
+static func bench_init() -> void:
+	if _bench_init:
+		return
+	_bench_init = true
+	var ua := OS.get_cmdline_user_args()
+	_bench = ua.has("--bench-collide")
+	_bench_linear = ua.has("--bench-linear")
+	if _bench:
+		Engine.max_fps = 0  # 基准:解除 144 帧封顶,测真实 CPU 帧时间
+		print("[BENCH] max_fps=0 已生效(当前 %d)" % Engine.max_fps)
+
+
+static func bench_report(tag: String) -> void:
+	if not _bench:
+		return
+	print("[BENCH] %s move_collide=%s vehicle_push=%s fire_hitscan=%s" % [
+		tag,
+		_bench_str(_bench_mc_t, _bench_mc_n),
+		_bench_str(_bench_veh_t, _bench_veh_n),
+		_bench_str(_bench_fh_t, _bench_fh_n)])
+
+
+static func _bench_str(t: float, n: int) -> String:
+	return "-" if n <= 0 else "%.1fusx%d" % [t / float(n), n]
 
 
 static func rebuild_collider_grid() -> void:
@@ -243,12 +276,19 @@ static func _seg_near_point(a: Vector3, b: Vector3, c: Vector3, r: float) -> boo
 
 ## 圆柱(玩家/AI) vs 静态碰撞体 推挤解算,pos 为脚底中心
 ## 注意:Vector3 为值类型,必须返回修正后的位置
+## [PERF] P0-1:网格化 —— 每 pass 按 pos 查 20m 空间网格取候选盒(半径+1.5m 边距
+## 最多触及 4 格,覆盖 pass 内推挤累计位移),索引升序处理保证与线性扫描顺序一致;
+## 网格未建时回退原线性路径,行为完全一致
 static func move_collide(pos: Vector3, radius: float, height: float) -> Vector3:
+	if not _bench_init:
+		bench_init()
+	var _bt0 := Time.get_ticks_usec() if _bench else 0
 	var colliders := G.colliders
 	var n := colliders.size()
 	for iter in 3:
+		var seq: Variant = range(n) if (_grid.is_empty() or _bench_linear) else colliders_near(pos, radius)
 		var pushed := false
-		for i in n:
+		for i in seq:
 			var b: AABB = colliders[i]
 			# 垂直重叠检查(允许跨上 0.55m 的矮台阶)
 			if pos.y + 0.55 >= b.end.y or pos.y + height <= b.position.y:
@@ -286,7 +326,57 @@ static func move_collide(pos: Vector3, radius: float, height: float) -> Vector3:
 	# 地图边界
 	pos.x = clampf(pos.x, -G.bounds, G.bounds)
 	pos.z = clampf(pos.z, -G.bounds, G.bounds)
+	if _bench:
+		_bench_mc_t += Time.get_ticks_usec() - _bt0
+		_bench_mc_n += 1
 	return pos
+
+
+## 空间网格邻域查询:返回 pos 半径 radius(+margin)范围内可能相交的碰撞体索引
+## (升序去重,与线性扫描处理顺序一致);网格未建返回 null → 调用方回退线性扫描
+## [PERF] P0-1/P0-2:move_collide / 载具 _push_out 共用
+static func colliders_near(pos: Vector3, radius: float, margin := 1.5) -> Variant:
+	if _grid.is_empty():
+		return null
+	var cell := _grid_cell
+	var r := radius + margin
+	_ray_id += 1
+	if _ray_id <= 0:
+		_ray_id = 1
+		_stamp.fill(0)
+	var rid := _ray_id
+	var out: Array = []
+	var c0x := int(floor((pos.x - r) / cell))
+	var c1x := int(floor((pos.x + r) / cell))
+	var c0z := int(floor((pos.z - r) / cell))
+	var c1z := int(floor((pos.z + r) / cell))
+	for cx in range(c0x, c1x + 1):
+		for cz in range(c0z, c1z + 1):
+			var lst: Variant = _grid.get(Vector2i(cx, cz))
+			if lst == null:
+				continue
+			for ci in lst:
+				if ci >= G.colliders.size() or ci >= _stamp.size() or _stamp[ci] == rid:
+					continue
+				_stamp[ci] = rid
+				out.append(ci)
+	out.sort()
+	return out
+
+
+## 射线 XZ 投影预过滤:返回点(x,z)到射线水平投影的距离²(含沿射线段约束,
+## 若命中段外返回 INF 表示必定不命中)。射线近乎垂直时无法水平过滤,返回 -1
+## (调用方不得剔除)。[PERF] P0-3:命中结算只对可能命中者做球探针
+static func ray_xz_miss(origin: Vector3, dir: Vector3, x: float, z: float, best: float) -> float:
+	var dxx := dir.x * dir.x + dir.z * dir.z
+	if dxx < 1e-9:
+		return -1.0
+	var tox := x - origin.x
+	var toz := z - origin.z
+	var along := tox * dir.x + toz * dir.z
+	if along < 0.0 or along > best * dxx:
+		return INF
+	return tox * tox + toz * toz - along * along / dxx
 
 
 ## 射线 vs 球体,返回距离或 -1
@@ -477,10 +567,14 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 		# 最近敌方角色(部位探针)
 		var probe: Dictionary = {}
 		var probe_max := best
+		# [PERF] P0-3:XZ 投影预过滤(与 game.gd fire_hitscan 同构,纯几何只剔必不中者)
+		var thr := 0.43 * 0.43  # 最大探针半径 0.42(胸)+FP 余量
 		for b in G.bots:
-			var pr := probe_actor(b, shooter, s_team, o, fdir, probe_max)
-			if not pr.is_empty() and (probe.is_empty() or pr["dist"] < probe["dist"]):
-				probe = pr
+			var pm := -1.0 if _bench_linear else ray_xz_miss(o, fdir, b.pos.x, b.pos.z, probe_max)
+			if pm < 0.0 or pm <= thr:
+				var pr := probe_actor(b, shooter, s_team, o, fdir, probe_max)
+				if not pr.is_empty() and (probe.is_empty() or pr["dist"] < probe["dist"]):
+					probe = pr
 		if G.player != null and s_team != G.player.team:
 			var prp := probe_actor(G.player, shooter, s_team, o, fdir, probe_max)
 			if not prp.is_empty() and (probe.is_empty() or prp["dist"] < probe["dist"]):
@@ -494,28 +588,38 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 				continue
 			if v.driver != null and s_team != null and v.driver.team == s_team:
 				continue
-			var dv := ray_sphere(o, fdir, Vector3(v.pos.x, v.pos.y + 1.2, v.pos.z), v.def["radius"] + 0.35, best)
-			if dv >= 0:
-				best = dv
-				hit_veh = v
+			var rv: float = v.def["radius"] + 0.35
+			var mv := -1.0 if _bench_linear else ray_xz_miss(o, fdir, v.pos.x, v.pos.z, best)
+			if mv < 0.0 or mv <= rv * rv:
+				var dv := ray_sphere(o, fdir, Vector3(v.pos.x, v.pos.y + 1.2, v.pos.z), rv, best)
+				if dv >= 0:
+					best = dv
+					hit_veh = v
 		var hit_air = null
 		for a in G.aircraft:
 			if a.dead:
 				continue
 			if s_team != null and a.team == s_team:
 				continue
-			var da := ray_sphere(o, fdir, a.pos, a.radius, best)
-			if da >= 0:
-				best = da
-				hit_air = a
+			var ma := -1.0 if _bench_linear else ray_xz_miss(o, fdir, a.pos.x, a.pos.z, best)
+			if ma < 0.0 or ma <= a.radius * a.radius:
+				var da := ray_sphere(o, fdir, a.pos, a.radius, best)
+				if da >= 0:
+					best = da
+					hit_air = a
 		var hit_ds = null
 		for ds in G.destructibles:
 			if ds.dead:
 				continue
-			var dd := ray_sphere(o, fdir, ds.pos, ds.radius, best)
-			if dd >= 0:
-				best = dd
-				hit_ds = ds
+			# 粗筛参考点用盒近面(中心投影 > 盒面 best 会被误杀——油箱打不坏回归)
+			var _cc2: Vector3 = ds.collider.get_center()
+			var md := -1.0 if _bench_linear else ray_xz_miss(o, fdir, _cc2.x - fdir.x * ds.collider.size.x * 0.5, _cc2.z - fdir.z * ds.collider.size.z * 0.5, best)
+			if md < 0.0 or md <= ds.radius * ds.radius:
+				# 真实碰撞盒判定(球面判定对球在盒内的目标会漏——战役油箱等)
+				var dd := ray_box(o, fdir, ds.collider, best)
+				if dd >= 0:
+					best = dd
+					hit_ds = ds
 		# ---- 结算 ----
 		if not probe.is_empty() and probe["dist"] <= best + 0.001:
 			var part: String = probe["part"]
