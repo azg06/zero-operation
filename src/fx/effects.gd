@@ -43,6 +43,7 @@ var _sparks_col := PackedColorArray()
 var _sparks_grav := PackedFloat32Array()
 var _sparks_size := PackedFloat32Array()
 var _sparks_head := 0
+var _sparks_scan_max := 0  # [PERF] P1-4:扫描高水位(最高存活槽+1;顶部死亡即收缩)
 var _smoke_pos := PackedVector3Array()
 var _smoke_vel := PackedVector3Array()
 var _smoke_life := PackedFloat32Array()
@@ -51,6 +52,7 @@ var _smoke_col := PackedColorArray()
 var _smoke_grav := PackedFloat32Array()
 var _smoke_size := PackedFloat32Array()
 var _smoke_head := 0
+var _smoke_scan_max := 0
 var _sparks_alive := 0                # 活动粒子计数(空池跳过更新循环)
 var _smoke_alive := 0
 # ---- 火焰粒子池(残骸燃烧/坠毁火场) ----
@@ -62,6 +64,7 @@ var _fire_col := PackedColorArray()
 var _fire_size := PackedFloat32Array()
 var _fire_power := PackedFloat32Array()  # 上升/扩散强度倍率
 var _fire_head := 0
+var _fire_scan_max := 0
 var _fire_alive := 0
 
 # ---- 曳光弹池 ----
@@ -496,6 +499,8 @@ func spark_spawn(x: float, y: float, z: float, vx: float, vy: float, vz: float,
 		return
 	var i: int = _sparks_head
 	_sparks_head = (_sparks_head + 1) % MAXP
+	if i >= _sparks_scan_max:
+		_sparks_scan_max = i + 1
 	if _sparks_life[i] <= 0:
 		_sparks_alive += 1
 	_sparks_pos[i] = Vector3(x, y, z)
@@ -513,6 +518,8 @@ func smoke_spawn(x: float, y: float, z: float, vx: float, vy: float, vz: float,
 		return
 	var i: int = _smoke_head
 	_smoke_head = (_smoke_head + 1) % MAXP
+	if i >= _smoke_scan_max:
+		_smoke_scan_max = i + 1
 	if _smoke_life[i] <= 0:
 		_smoke_alive += 1
 	_smoke_pos[i] = Vector3(x, y, z)
@@ -533,6 +540,8 @@ func fire_spawn(x: float, y: float, z: float, vx: float, vy: float, vz: float,
 		return
 	var i: int = _fire_head
 	_fire_head = (_fire_head + 1) % MAXP
+	if i >= _fire_scan_max:
+		_fire_scan_max = i + 1
 	if _fire_life[i] <= 0:
 		_fire_alive += 1
 	_fire_pos[i] = Vector3(x, y, z)
@@ -901,7 +910,7 @@ func spawn_mag(pos: Vector3) -> void:
 
 
 ## 手雷(程序化模型)
-func spawn_grenade(p_owner, pos: Vector3, dir: Vector3) -> void:
+func spawn_grenade(p_owner, pos: Vector3, dir: Vector3, speed := 16.0, rise := 3.5) -> void:
 	var holder := Node3D.new()
 	holder.position = pos
 	var nade_mesh := MeshInstance3D.new()
@@ -911,7 +920,7 @@ func spawn_grenade(p_owner, pos: Vector3, dir: Vector3) -> void:
 	add_child(holder)
 	_grenades.append({
 		"owner": p_owner, "mesh": holder, "pos": pos,
-		"vel": dir * 16 + Vector3(0, 3.5, 0),
+		"vel": dir * speed + Vector3(0, rise, 0),
 		"timer": 2.2, "bounced": false,
 	})
 
@@ -1254,8 +1263,8 @@ func update_effects(dt: float) -> void:
 	if _flash_alpha > 0:
 		_flash_alpha = maxf(0.0, _flash_alpha - dt * 3.6)
 		_flash_rect.modulate.a = _flash_alpha * _flash_alpha
-	# 死亡淡出:阵亡缓慢压黑(平滑步进曲线),重生快速退场
-	var target_fade := 0.62 if G.state == "dead" else 0.0
+	# 死亡淡出:阵亡适当压暗(0.35,战场仍可见),重生快速退场
+	var target_fade := 0.35 if G.state == "dead" else 0.0
 	if _was_dead != (G.state == "dead"):
 		_was_dead = G.state == "dead"
 		if G.state == "dead":
@@ -1264,9 +1273,7 @@ func update_effects(dt: float) -> void:
 	var fade_k := 0.9 if G.state == "dead" else 2.2
 	_fade_alpha = lerpf(_fade_alpha, target_fade, minf(1.0, dt * fade_k))
 	if _fade_alpha > 0.005:
-		# smoothstep 曲线:压黑先慢后快,末尾利落
-		var t01 := clampf(_fade_alpha / 0.62, 0.0, 1.0)
-		_fade_rect.modulate.a = t01 * t01 * (3.0 - 2.0 * t01) * 0.62
+		_fade_rect.modulate.a = clampf(_fade_alpha / 0.35, 0.0, 1.0) * 0.35
 	else:
 		_fade_rect.modulate.a = 0.0
 	# 受伤红边 vignette(受击脉冲 + 低血量常驻)
@@ -1373,8 +1380,12 @@ func _update_smoke(dt: float) -> void:
 func _update_particles(dt: float) -> void:
 	var zero := Transform3D(Basis.from_scale(Vector3.ZERO), Vector3(0, -100, 0))
 	# 活动计数为空则整池跳过(原 3000 次空循环)
+	# [PERF] P1-4:扫描上限=高水位 _sparks_scan_max(原固定扫 MAXP 全池)。
+	# 环形池在覆盖时保证 head 侧连续,但中间死亡会在存活集合留空槽,不能只扫活跃数;
+	# 改为"最高可能存活槽"水位:顶部死亡后逐帧收缩(均摊 O(1)),任何时点扫描槽
+	# 集是原全池扫描槽集的子集,语义完全一致,低活跃期显著少扫
 	if _sparks_alive > 0:
-		for i in MAXP:
+		for i in _sparks_scan_max:
 			if _sparks_life[i] <= 0:
 				continue
 			_sparks_life[i] -= dt
@@ -1399,8 +1410,10 @@ func _update_particles(dt: float) -> void:
 			_sparks_mm.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3.ONE * sz), p))
 			var c := _sparks_col[i]
 			_sparks_mm.set_instance_color(i, Color(c.r, c.g, c.b, clampf(sf * 2.5, 0.0, 1.0)))
+	while _sparks_scan_max > 0 and _sparks_life[_sparks_scan_max - 1] <= 0:
+		_sparks_scan_max -= 1
 	if _smoke_alive > 0:
-		for i in MAXP:
+		for i in _smoke_scan_max:
 			if _smoke_life[i] <= 0:
 				continue
 			_smoke_life[i] -= dt
@@ -1426,8 +1439,10 @@ func _update_particles(dt: float) -> void:
 			_smoke_mm.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3.ONE * (_smoke_size[i] * growth)), p))
 			var col := _smoke_col[i]
 			_smoke_mm.set_instance_color(i, Color(col.r, col.g, col.b, 0.5 * minf(1, f / 0.3)))
+	while _smoke_scan_max > 0 and _smoke_life[_smoke_scan_max - 1] <= 0:
+		_smoke_scan_max -= 1
 	if _fire_alive > 0:
-		for i in MAXP:
+		for i in _fire_scan_max:
 			if _fire_life[i] <= 0:
 				continue
 			_fire_life[i] -= dt
@@ -1454,6 +1469,8 @@ func _update_particles(dt: float) -> void:
 			_fire_mm.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3.ONE * fs), fp))
 			var fc := _fire_col[i]
 			_fire_mm.set_instance_color(i, Color(fc.r, fc.g, fc.b, clampf(ft * ft * 2.2, 0.0, 1.0)))
+	while _fire_scan_max > 0 and _fire_life[_fire_scan_max - 1] <= 0:
+		_fire_scan_max -= 1
 
 
 func _update_tracers(dt: float) -> void:

@@ -23,6 +23,9 @@ var player = null
 var bot_manager = null
 var touch = null
 var campaign = null                  # 战役控制器(Campaign 实例,main.gd 创建)
+var portal = null                    # 门户模式管理器(PortalManager,架构 Agent;BR 未就绪时由 GameMode_BR 兜底)
+var br = null                        # 大逃杀模式实例(GameMode_BR;PortalManager 实例化或 main.gd 兜底)
+var deployment = null                # 实时 3D 战场部署系统(BattleDeploymentManager,main.gd 创建)
 
 # ---- 战役模式 ----
 var campaign_pending_id := ""        # 待启动战役章节 id(章节选择屏设置,game.gd 战役分支读取)
@@ -48,6 +51,7 @@ var smoke_zones: Array = []          # 烟雾区 { pos, radius, life, emit_t }
 var lock_target = null               # 防空导弹锁定目标
 var squads: Array = []
 var player_squad = null
+var ai_tasks := {}               # squad_id → { kind, flag }(AI Director 每 4s 分配)
 
 # ---- 流程状态 ----
 var state := "menu"                  # menu | deploy | playing | dead | over
@@ -56,8 +60,6 @@ var time := 0.0
 var tickets := { "us": 400, "ru": 400 }
 var stats := { "kills": 0, "deaths": 0 }
 var streak := 0
-var streak_uav := false
-var streak_arty := false
 var mode := "conquest"               # conquest | breakthrough
 var sel_maps := { "conquest": "random", "breakthrough": "random" }
 var current_map := "city"
@@ -71,6 +73,13 @@ var settings := {
 	"scale": 1.0, "aniso": 8, "shadows": 4096,
 	"ssao": true, "fxaa": true, "particles": 1.0, "fog": 1.0,
 	"fx_scale": 1.0,
+	# ---- 3A 画质升级项(设置菜单可自由开关;ULTRA 预设默认全开) ----
+	"msaa": 2,          # MSAA 档位: 0=关 1=2x 2=4x 3=8x
+	"ssr": false,       # 屏幕空间反射(水面/金属反射细节)
+	"ssil": false,      # 屏幕空间间接光照(环境光反弹)
+	"glow": true,       # 泛光 Bloom
+	"cinema": true,     # 电影级后期(自定义着色器:微对比/颗粒/暗角/色差)
+	"auto_quality": true,  # [8/10] 动态质量:帧时间超标自动逐级降级,稳定后恢复(不覆盖手动设置)
 }
 var fog_base := [60.0, 400.0]
 var apply_graphics: Callable = Callable()
@@ -99,12 +108,13 @@ func _setup_input_map() -> void:
 		"sprint": [KEY_SHIFT], "jump": [KEY_SPACE],
 		"crouch": [KEY_CTRL, KEY_C], "prone": [KEY_Z],
 		"reload": [KEY_R], "interact": [KEY_E],
+		"fire_mode": [KEY_B],
 		"grenade": [KEY_G], "gadget": [KEY_F], "spot": [KEY_Q],
 		"at_grenade": [KEY_X], "at_mine": [KEY_V],
 		"weapon_1": [KEY_1], "weapon_2": [KEY_2], "weapon_3": [KEY_3],
-		"streak_uav": [KEY_4], "streak_arty": [KEY_5],
 		"scoreboard": [KEY_TAB], "pause": [KEY_ESCAPE],
 		"nightvision": [KEY_T],
+		"melee": [KEY_H],          # 近战小刀(长按呼出/收回)
 	}
 	for action in defs:
 		if not InputMap.has_action(action):

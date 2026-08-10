@@ -1,13 +1,35 @@
 class_name UiTheme
 ## UI 主题助手(BF2042 风格:黑底 + 青绿主色 + 橙红敌方 + 亮绿友方 + 科技网格)
 
-## ---- 配色规范 ----
+## ---- 配色规范(旧版,兼容) ----
 const PRIMARY := Color(0.0, 0.83, 1.0)      # #00D4FF 青绿主色
 const FRIENDLY := Color(0.0, 1.0, 0.53)     # #00FF88 友军/小队亮绿
 const ENEMY := Color(1.0, 0.33, 0.0)        # #FF5500 敌方橙红
 const WARN := Color(1.0, 0.85, 0.2)         # 争夺/警告黄
 const TXT := Color(0.85, 0.92, 0.96)
 const TXT_DIM := Color(0.45, 0.55, 0.62)
+
+# ==================== 极简军事数字终端设计系统(战斗 HUD 主用) ====================
+# 设计语言:细边框 / 圆角矩形 / 半透明磨砂(20~40%)/ 青绿+白主色 / 敌方橙 / 警告红 / 占领蓝绿
+# 不使用厚重金属边框、不发光科幻面板、无高饱和色 —— UI 像漂浮的数字化信息层
+const H_CYAN := Color(0.16, 0.78, 0.86)          # 主青绿(柔和,信息主色)
+const H_CYAN_DIM := Color(0.16, 0.55, 0.62)      # 暗青绿(次级)
+const H_WHITE := Color(0.9, 0.94, 0.97)          # 主白(文字/图标)
+const H_GRAY := Color(0.55, 0.6, 0.66)           # 中性灰(未占领/未标记)
+const H_GRAY_DIM := Color(0.38, 0.42, 0.47)      # 暗灰(次要文字)
+const H_ORANGE := Color(1.0, 0.55, 0.22)         # 敌方橙(信息层2)
+const H_RED := Color(0.95, 0.34, 0.28)           # 警告红(信息层3)
+const H_TEAL := Color(0.05, 0.62, 0.6)           # 占领蓝绿(蓝绿色)
+const H_GREEN := Color(0.35, 0.8, 0.5)           # 友军绿(轻量)
+const H_PANEL := Color(0.03, 0.05, 0.07, 0.32)   # 磨砂面板底(32% 半透明)
+const H_PANEL_DEEP := Color(0.02, 0.03, 0.05, 0.55)  # 深磨砂(弹窗/横幅)
+const H_PANEL_MAP := Color(0.05, 0.06, 0.08, 0.72)   # 小地图深灰磨砂
+const H_BORDER := Color(0.65, 0.75, 0.8, 0.4)    # 细白边框
+const H_BORDER_SOFT := Color(0.65, 0.75, 0.8, 0.18)  # 极细弱白边(悬浮元素)
+
+## 磨砂悬浮面板:半透明底 + 细边框 + 圆角(信息层容器统一样式)
+static func hud_frost(alpha := 0.32, border := H_BORDER, border_w := 1, radius := 4, pad := 10) -> StyleBoxFlat:
+	return stylebox(Color(0.03, 0.05, 0.07, alpha), border, border_w, radius, pad)
 
 static var _font: Font = null
 static var _theme: Theme = null

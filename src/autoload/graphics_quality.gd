@@ -6,26 +6,29 @@ extends Node
 enum Level { LOW, MEDIUM, HIGH, ULTRA }
 
 ## 各级与游戏字段的映射(仅游戏支持的项)
+## [3A 画质升级 8/9] ULTRA=阴影 8192 + SSR + SSIL + MSAA 4x + 增强泛光;
+## SDFGI 已移除(8/10 用户反馈:开启后阴影过黑、对比度过高,永久关闭)
+## HIGH=SSR+MSAA 4x;LOW/MEDIUM 保持收敛。BR 保护档/GPU 保护档不受影响(自动降回收敛值防驱动崩溃)。
 const PRESETS := {
 	Level.LOW: {
 		"shadows": 1024, "ssao": false, "fxaa": true, "taa": false, "scale": 0.75, "aniso": 2,
-		"ssil": false, "ssr": false, "glow": false, "fog": 0.8, "particles": 0.4,
-		"fx_scale": 0.6,
+		"ssil": false, "ssr": false, "sdfgi": false, "glow": false, "msaa": 0, "cinema": false,
+		"fog": 0.8, "particles": 0.4, "fx_scale": 0.6, "vfog": 16,
 	},
 	Level.MEDIUM: {
 		"shadows": 2048, "ssao": true, "fxaa": true, "taa": false, "scale": 1.0, "aniso": 4,
-		"ssil": false, "ssr": false, "glow": true, "fog": 1.0, "particles": 0.7,
-		"fx_scale": 0.8,
+		"ssil": false, "ssr": false, "sdfgi": false, "glow": true, "msaa": 1, "cinema": true,
+		"fog": 1.0, "particles": 0.7, "fx_scale": 0.8, "vfog": 32,
 	},
 	Level.HIGH: {
 		"shadows": 4096, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 8,
-		"ssil": true, "ssr": false, "glow": true, "fog": 1.0, "particles": 1.0,
-		"fx_scale": 1.0,
+		"ssil": false, "ssr": true, "sdfgi": false, "glow": true, "msaa": 2, "cinema": true,
+		"fog": 1.0, "particles": 1.0, "fx_scale": 1.0, "vfog": 32,
 	},
 	Level.ULTRA: {
-		"shadows": 8192, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 16,
-		"ssil": true, "ssr": true, "glow": true, "fog": 1.1, "particles": 1.0,
-		"fx_scale": 1.0,
+		"shadows": 8192, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 8,
+		"ssil": false, "ssr": true, "sdfgi": false, "glow": true, "msaa": 2, "cinema": true,
+		"fog": 1.1, "particles": 1.0, "fx_scale": 1.0, "vfog": 32,
 	},
 }
 
@@ -68,8 +71,12 @@ func _level_name(lv: int) -> String:
 ## 应用预设:同步 G.settings(主画质项) + 安全后处理直写 env
 func apply_preset(lv: int) -> void:
 	current_level = lv
-	var p: Dictionary = PRESETS[lv]
-	# 1) 同步到游戏设置(阴影/SSAO/FXAA/缩放/各向异性/雾/粒子)
+	_apply_dict(PRESETS[lv], lv, _level_name(lv))
+
+
+## 预设字典落地(lv 用于档位相关的强度分级:SSAO 质量/glow 强度/SSIL 强度)
+func _apply_dict(p: Dictionary, lv: int, label: String) -> void:
+	# 1) 同步到游戏设置(阴影/SSAO/FXAA/缩放/各向异性/雾/粒子 + 3A 升级项)
 	G.settings.shadows = p["shadows"]
 	G.settings.ssao = p["ssao"]
 	G.settings.fxaa = p["fxaa"]
@@ -78,21 +85,30 @@ func apply_preset(lv: int) -> void:
 	G.settings.fog = p["fog"]
 	G.settings.particles = p["particles"]
 	G.settings.fx_scale = p["fx_scale"]
+	G.settings.msaa = p.get("msaa", 0)
+	G.settings.ssr = p.get("ssr", false)
+	G.settings.ssil = p.get("ssil", false)
+	G.settings.glow = p.get("glow", false)
+	G.settings.cinema = p.get("cinema", false)
 	# 2) 安全后处理(SSIL/SSR/glow/adjustment,游戏未用到的项)
 	if G.world_env != null and G.world_env.environment != null:
 		var env := G.world_env.environment
 		env.ssil_enabled = p["ssil"]
 		env.ssr_enabled = p["ssr"]
 		if p["ssr"]:
-			env.ssr_max_steps = 32
+			env.ssr_max_steps = 40
 			env.ssr_fade_out = 2.0
+			env.ssr_depth_tolerance = 0.25
+		# [8/10] SDFGI 全局光照已移除:开启后阴影过黑、对比度过高(用户反馈),永久关闭
+		env.sdfgi_enabled = false
 		env.glow_enabled = p["glow"]
 		if p["glow"]:
-			# Bloom 强度随档位:中档收敛,高档通透,超高档更过曝(战地式辉光)
+			# Bloom 强度随档位:ULTRA 略强,其余档收敛(8/10 修复雪地过曝:0.6/0.9/0.45→0.42/0.72/0.32)
 			if lv == Level.ULTRA:
 				env.glow_intensity = 0.42
 				env.glow_strength = 0.72
 				env.glow_bloom = 0.32
+				env.glow_hdr_threshold = 1.0
 			else:
 				env.glow_intensity = 0.35
 				env.glow_strength = 0.7
@@ -116,29 +132,135 @@ func apply_preset(lv: int) -> void:
 		# SSIL 强度:超高档更柔和自然
 		if p["ssil"]:
 			env.ssil_intensity = 1.4 if lv == Level.ULTRA else 1.1
+		# 体积雾分辨率随预设统一应用(project.godot 默认 32;BR 保护档 32 同值)
+		if p.has("vfog"):
+			RenderingServer.environment_set_volumetric_fog_volume_size(int(p["vfog"]), 64)
 		env.adjustment_enabled = true
 		env.adjustment_brightness = 1.0
 		env.adjustment_contrast = 1.06
 		env.adjustment_saturation = 1.04
-	# 3) 各向异性过滤 + MSAA(视口级)
+	# 3) 各向异性过滤 + MSAA(视口级;退出时根视口可能已销毁,跳过写)
 	var vp := get_viewport()
-	vp.anisotropic_filtering_level = p["aniso"]
-	# 3b) 抗锯齿策略:高档用 TAA,低档用自定义 FXAA 层(与 main.apply_graphics 保持一致)
-	vp.use_taa = p["taa"]
+	if vp != null:
+		vp.anisotropic_filtering_level = p["aniso"]
+		vp.msaa_3d = int(p.get("msaa", 0))
+		# 3b) 抗锯齿策略:高档用 TAA,低档用自定义 FXAA 层(与 main.apply_graphics 保持一致)
+		vp.use_taa = p["taa"]
 	# 4) 收尾:走游戏自己的画质应用(阴影图集/雾距/粒子质量)
 	if G.apply_graphics.is_valid():
 		G.apply_graphics.call()
-	print("[GraphicsQuality] 已应用预设: ", _level_name(lv))
+	print("[GraphicsQuality] 已应用预设: ", label)
 
 
-## 换图后重挂(环境被 world_builder 重建,重新应用安全后处理)
+## ---- [PERF] BR 大地图优化档(100 bot + 800m):基于 HIGH 档,阴影 2048、SSIL 关、SSR 关 ----
+## 画质影响:阴影软阴影分辨率 4096→2048(远距阴影细节略降)、SSIL/SSR 关闭(间接光晕/反射消失);
+## 保留 SSAO/TAA/Bloom/全分辨率/粒子,核心观感(光照/体积雾/植被/材质)不变。
+## 历史:8/5-8/7 四次 AppHangB1(同 bucket 1573442377187319525,驱动层 dxgi/D3D12Core 栈),
+## BR 100 bot+重部署直升机+毒圈+800m 大地图为最高渲染负载模式 → 阴影图集 4096→2048
+## (图集显存减半、阴影 pass 填充率降约 4 倍),体积雾 48→32(BR 对局内动态收敛,见下)。
+const BR_PRESET := {
+	"shadows": 2048, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 8,
+	"ssil": false, "ssr": false, "sdfgi": false, "glow": true, "msaa": 2, "cinema": true,
+	"fog": 1.0, "particles": 1.0, "fx_scale": 1.0, "vfog": 32,
+}
+
+## ---- [PERF] GPU 保护档(全模式自适应):main 主循环检测帧时间尖峰(单帧 >250ms
+## 或 2s 均值 >100ms,驱动级卡死前兆)或持续低帧(fps<42×4s)时立即套用,消除 GPU 峰值;
+## 5s 稳定后由 main 尝试恢复原档(仍卡则保持)。全模式生效(征服/突破/TDM/战役/BR)。
+const PROTECT_PRESET := {
+	"shadows": 2048, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 8,
+	"ssil": false, "ssr": false, "sdfgi": false, "glow": true, "msaa": 2, "cinema": true,
+	"fog": 1.0, "particles": 0.7, "fx_scale": 1.0, "vfog": 32,
+}
+
+var _br_active := false
+var _vfog_orig := 32  # 与 project.godot environment/volumetric_fog/volume_size 一致(8/7 全局收敛 48→32)
+var _protect_active := false
+
+## BR 对局开局应用(由 GameMode_BR.start 调用;幂等)
+func apply_br_preset() -> void:
+	if _br_active:
+		return
+	_br_active = true
+	_apply_br_preset_impl()
+
+
+func _apply_br_preset_impl() -> void:
+	_apply_dict(BR_PRESET, Level.HIGH, "BR 优化档(100 bot)")
+	# 体积雾分辨率收敛(BR 对局内):体积雾 3D 纹理填充率随体积立方尺寸涨,
+	# 800m 大地图 + 毒圈厚雾为全模式最大雾体负载;对局收尾恢复原值
+	# (全局 RenderingServer 接口 environment_set_volumetric_fog_volume_size(size, depth);
+	#  原值取 project.godot environment/volumetric_fog/volume_size=32, 深度默认 64)
+	if G.world_env != null and G.world_env.environment != null:
+		RenderingServer.environment_set_volumetric_fog_volume_size(int(BR_PRESET["vfog"]), 64)
+	print("[PERF] graphics BR 优化档生效: shadows=2048 vfog=%d ssil=OFF ssr=OFF(对局结束恢复)" % BR_PRESET["vfog"])
+
+
+## 进入 GPU 保护档(main 主循环帧时间尖峰/持续低帧触发;幂等)
+func enter_protect() -> void:
+	if _protect_active:
+		return
+	_protect_active = true
+	if _br_active:
+		# BR 优化档已覆盖大部分项(2048/SSIL off/SSR off/vfog 32),仅叠加粒子收敛
+		G.settings.particles = minf(G.settings.particles, PROTECT_PRESET["particles"])
+		if G.apply_graphics.is_valid():
+			G.apply_graphics.call()
+	else:
+		_apply_dict(PROTECT_PRESET, Level.MEDIUM, "GPU 保护档(尖峰)")
+	print("[PERF] graphics GPU 保护档生效: shadows=2048 vfog=32 ssil=OFF ssr=OFF particles=0.7")
+
+
+## 退出 GPU 保护档(main 主循环检测 5s 无尖峰后调用;幂等)
+func exit_protect() -> void:
+	if not _protect_active:
+		return
+	_protect_active = false
+	if _br_active:
+		_apply_br_preset_impl()
+	else:
+		apply_preset(current_level)
+	print("[PERF] graphics 退出 GPU 保护档,已恢复 ", _level_name(current_level))
+
+
+func protect_active() -> bool:
+	return _protect_active
+
+
+## BR 对局收尾恢复(由 GameMode_BR._finish / NOTIFICATION_PREDELETE 调用;幂等)
+func restore_preset() -> void:
+	if not _br_active:
+		return
+	_br_active = false
+	_protect_active = false  # 对局收尾同时重置保护状态,恢复原档(下次尖峰再触发)
+	if G.world_env != null and G.world_env.environment != null:
+		RenderingServer.environment_set_volumetric_fog_volume_size(_vfog_orig, 64)
+	apply_preset(current_level)
+	print("[PERF] graphics 退出 BR: 已恢复预设 ", _level_name(current_level))
+
+
+## 换图后重挂(环境被 world_builder 重建,重新应用安全后处理;保护档期间保持保护档)
 func reapply() -> void:
+	if _protect_active:
+		if _br_active:
+			_apply_br_preset_impl()
+		else:
+			_apply_dict(PROTECT_PRESET, Level.MEDIUM, "GPU 保护档(换图重挂)")
+		return
 	apply_preset(current_level)
 
 
 func save_config(path := "user://graphics.cfg") -> void:
+	# 画质档位 + 全部画质细项(设置菜单自由开关后重启保留)
+	_custom_settings = true
 	var c := ConfigFile.new()
 	c.set_value("graphics", "level", current_level)
+	var keys := ["shadows", "ssao", "fxaa", "scale", "aniso", "fog", "particles", "fx_scale",
+		"msaa", "ssr", "ssil", "glow", "cinema", "auto_quality"]
+	var s := {}
+	for k in keys:
+		s[k] = G.settings.get(k, 0)
+	c.set_value("graphics", "settings", s)
 	c.save(path)
 
 
@@ -146,3 +268,52 @@ func load_config(path := "user://graphics.cfg") -> void:
 	var c := ConfigFile.new()
 	if c.load(path) == OK:
 		current_level = int(c.get_value("graphics", "level", current_level))
+		var s = c.get_value("graphics", "settings", {})
+		if s is Dictionary and not (s as Dictionary).is_empty():
+			_custom_settings = true
+			for k in s:
+				G.settings[k] = s[k]
+
+
+func has_custom_settings() -> bool:
+	return _custom_settings
+
+
+var _custom_settings := false
+
+
+## 仅应用档位强度分级(SSAO 质量 / Glow 强度 / SSIL 强度),不覆盖用户手动开关;
+## 启动时若存档含细项设置则用它,保证"设置里自由开关"重启后保留
+func apply_level_strengths() -> void:
+	var lv := current_level
+	if G.world_env != null and G.world_env.environment != null:
+		var env := G.world_env.environment
+		if G.settings.get("ssao", false):
+			env.ssao_enabled = true
+			if lv >= Level.HIGH:
+				env.ssao_intensity = 1.7
+				env.ssao_radius = 1.5
+				env.ssao_detail = 1.2
+				env.ssao_horizon = 0.1
+				env.ssao_sharpness = 0.98
+			else:
+				env.ssao_intensity = 1.3
+				env.ssao_radius = 1.0
+				env.ssao_detail = 0.6
+				env.ssao_horizon = 0.08
+				env.ssao_sharpness = 0.98
+		if G.settings.get("glow", false):
+			if lv == Level.ULTRA:
+				env.glow_intensity = 0.42
+				env.glow_strength = 0.72
+				env.glow_bloom = 0.32
+				env.glow_hdr_threshold = 1.0
+			else:
+				env.glow_intensity = 0.35
+				env.glow_strength = 0.7
+				env.glow_bloom = 0.28
+				env.glow_hdr_threshold = 1.05
+		if G.settings.get("ssil", false):
+			env.ssil_intensity = 1.4 if lv == Level.ULTRA else 1.1
+	if G.apply_graphics.is_valid():
+		G.apply_graphics.call()

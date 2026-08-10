@@ -36,34 +36,41 @@ static func TYPES() -> Dictionary:
 		aa_w.penetration = 1
 		_types = {
 			"jeep": { "hp": 900.0, "max_speed": 17.0, "max_rev": -6.5, "accel": 10.5, "brake": 15.0, "turn": 1.7,
-				"radius": 1.6, "seat": Vector3(-0.45, 1.62, 0.45), "vehicle_name": "侦察吉普", "weapon": null, "sus": 1.0 },
+				"radius": 1.6, "seat": Vector3(-0.45, 1.62, 0.45), "vehicle_name": "侦察吉普", "weapon": null, "sus": 1.0,
+				# [VEH-FIX] sus_ground 14→30 / sus_rate 6→8:BR 最大坡度 0.171 rad@17m/s 稳态滞后
+				# 2.9/14=0.21m→2.9/30=0.097m(y-gh 偏差实测 max 0.128m>0.1m;平地恒 0 无感知差异)
+				"sus_ground": 30.0, "sus_rate": 8.0 },
 			"apc": { "hp": 2200.0, "max_speed": 11.0, "max_rev": -4.5, "accel": 6.0, "brake": 10.0, "turn": 1.1,
-				"radius": 2.3, "seat": Vector3(0, 2.6, 0.6), "vehicle_name": "装甲步战车", "weapon": apc_w, "sus": 0.55 },
+				"radius": 2.3, "seat": Vector3(0, 2.6, 0.6), "vehicle_name": "装甲步战车", "weapon": apc_w, "sus": 0.55,
+				"sus_ground": 20.0, "sus_rate": 6.0 },
 			"aa": { "hp": 1500.0, "max_speed": 12.5, "max_rev": -5.0, "accel": 7.0, "brake": 11.0, "turn": 1.3,
-				"radius": 2.1, "seat": Vector3(0, 2.7, 1.2), "vehicle_name": "自行防空炮", "weapon": aa_w, "sus": 0.7 },
+				"radius": 2.1, "seat": Vector3(0, 2.7, 1.2), "vehicle_name": "自行防空炮", "weapon": aa_w, "sus": 0.7,
+				"sus_ground": 22.0, "sus_rate": 7.0 },
 			"tank": { "hp": 3600.0, "max_speed": 8.5, "max_rev": -3.5, "accel": 4.5, "brake": 8.0, "turn": 0.85,
-				"radius": 2.6, "seat": Vector3(0, 2.45, 0.3), "vehicle_name": "主战坦克", "weapon": null, "sus": 0.35 },
+				"radius": 2.6, "seat": Vector3(0, 2.45, 0.3), "vehicle_name": "主战坦克", "weapon": null, "sus": 0.35,
+				"sus_ground": 15.0, "sus_rate": 5.0 },
 		}
 	return _types
 
 
 var type := "jeep"
 var def: Dictionary
-var spawn_pos := Vector3.ZERO
-var spawn_yaw := 0.0
 var pos := Vector3.ZERO
 var yaw := 0.0
 var speed := 0.0
 var steer := 0.0
-var driver = null
+var driver = null                # 驾驶员(控制移动;只能驾驶,不能开炮)
+var gunner = null                # 炮手/乘员(控制炮塔与开火;炮塔载具为炮手,吉普为乘客)
 var hp := 900.0
 var dead := false
-var wreck_t := 0.0
 var turret_yaw := 0.0
 var turret_pitch := 0.0
 var cannon_t := 0.0
-var ai_input = null              # AI 驾驶输入(由 Bot 每帧填充)
+var cannon_ammo := 20   # [8/10] 坦克主炮弹药(打空自动 8s 补弹)
+var ai_input = null              # 驾驶员 AI 输入(由 Bot 每帧填充:fwd/steer)
+var gunner_ai_input = null       # 炮手 AI 输入(由 Bot 每帧填充:turret_yaw/turret_pitch/fire)
 var mesh: Node3D = null
+var camera_ctl: VehicleCameraController = null   # 视角统一控制器(座位/状态机/第三人称)
 # === 部位伤害(战地风格) ===
 var track_hp := 1.0              # 履带/轮胎:低于 0.35 减速 + 转向变差
 var engine_hp := 1.0             # 引擎:低于 0.35 动力下降
@@ -71,8 +78,12 @@ var part_regen_t := 0.0          # 停止受击后的恢复计时
 # === 悬挂 ===
 var sus_phase := 0.0
 var sus_amp := 0.0
+# === 贴地平滑(BR 起伏地形:阻尼 + 坡度速率限制;旧图平地恒 0 → 无感知差异) ===
+var _sus_y := 0.0           # 平滑贴地高度
+var _ground_ready := false  # 首帧直接贴合(防出生瞬间爬升)
+var _pitch_s := 0.0         # 平滑俯仰角(转向过渡不抖)
+var _roll_s := 0.0          # 平滑侧倾角
 var respawn_protect := 0.0         # 重生保护剩余时间:无敌 + 半透明闪烁,防原地 pop-in
-var _wreck_warned := false         # 残骸重生倒计时提示已播
 # === 渐进车损 + 残骸燃烧 ===
 var _damage_stage := 0             # 车损档位:0=完好 1=焦痕(<60%) 2=重度焦痕+冒烟(<30%)
 var _smoke_t := 0.0                # 重度车损冒烟间隔计时
@@ -91,8 +102,6 @@ var unstuck_disp := 0.0         # 脱困期间累计位移(恢复移动即提前
 func _init(x: float, z: float, p_yaw: float, p_type := "jeep") -> void:
 	type = p_type
 	def = TYPES()[p_type]
-	spawn_pos = Vector3(x, 0, z)
-	spawn_yaw = p_yaw
 	pos = Vector3(x, 0, z)
 	yaw = p_yaw
 	hp = def["hp"]
@@ -108,6 +117,8 @@ func _init(x: float, z: float, p_yaw: float, p_type := "jeep") -> void:
 	mesh.position = pos
 	mesh.rotation.y = yaw
 	add_child(mesh)
+	camera_ctl = VehicleCameraController.new(self)
+	add_child(camera_ctl)
 
 
 func is_tank() -> bool:
@@ -119,14 +130,21 @@ func has_turret() -> bool:
 
 
 func team():
-	return driver.team if driver != null else null
-
-
-func alive() -> bool:
-	return not dead
+	if driver != null:
+		return driver.team
+	if gunner != null:
+		return gunner.team
+	return null
 
 
 func seat_world() -> Vector3:
+	return pos + (def["seat"] as Vector3).rotated(Vector3.UP, yaw)
+
+
+## 乘客位世界坐标(吉普副驾 / 无人炮塔载具的炮手位兜底)
+func passenger_world() -> Vector3:
+	if type == "jeep":
+		return pos + Vector3(0.45, 0, 0.45).rotated(Vector3.UP, yaw) + Vector3(0, def["seat"].y, 0)
 	return pos + (def["seat"] as Vector3).rotated(Vector3.UP, yaw)
 
 
@@ -143,6 +161,13 @@ func muzzle_world() -> Array:
 func fire_cannon(shooter) -> void:
 	if cannon_t > 0 or dead:
 		return
+	# [8/10] 坦克炮弹弹药系统:20 发备弹,打空自动长装填
+	if cannon_ammo <= 0:
+		cannon_t = 8.0   # 空仓补弹(长装填)
+		if gunner == G.player or driver == G.player:
+			G.hud.hint("炮弹耗尽 — 正在补弹 8s")
+		return
+	cannon_ammo -= 1
 	cannon_t = 3.5
 	var md := muzzle_world()
 	var shell_def := { "damage": 230.0, "splash": 8.5, "speed": 75.0, "cn": "125mm 主炮", "name": "坦克主炮", "tracer": Color.html("#ffe0a0") }
@@ -247,7 +272,6 @@ func destroy(attacker) -> void:
 	if dead:
 		return
 	dead = true
-	wreck_t = 0
 	G.game.explode(pos + Vector3(0, 1, 0), 8, 110, attacker)
 	# 驾驶员阵亡
 	if driver != null:
@@ -261,6 +285,16 @@ func destroy(attacker) -> void:
 		else:
 			d.take_damage(9999.0, attacker, false, { "cn": "载具殉爆", "name": "殉爆" })
 			print("[CREW] 载具殉爆 type=%s driver=bot%d 乘员必死" % [type, d.id])
+	# 炮手/乘客阵亡
+	if gunner != null:
+		var g = gunner
+		gunner = null
+		gunner_ai_input = null
+		if g == G.player:
+			g.exit_vehicle(true)
+			g.damage(300, pos, attacker, { "cn": "载具殉爆", "name": "殉爆" })
+		else:
+			g.take_damage(9999.0, attacker, false, { "cn": "载具殉爆", "name": "殉爆" })
 	# 残骸外观
 	var wreck_mat := StandardMaterial3D.new()
 	wreck_mat.albedo_color = Color.html("#161412")
@@ -338,6 +372,10 @@ func _set_all_materials(node: Node, mat: Material) -> void:
 	for o in node.get_children():
 		if o is MeshInstance3D:
 			o.material_override = mat
+		# 内构(Interior/InteriorTurret)保留原材质:车内视角依赖内构可见,
+		# 车损焦痕只作用于外部装甲
+		if o.name == "Interior" or o.name == "InteriorTurret":
+			continue
 		_set_all_materials(o, mat)
 
 
@@ -347,44 +385,6 @@ func _apply_damage_material(color: Color, rough: float) -> void:
 	mat.albedo_color = color
 	mat.roughness = rough
 	_set_all_materials(mesh, mat)
-
-
-func respawn() -> void:
-	mesh.queue_free()
-	match type:
-		"jeep":
-			mesh = VehicleModels.build_jeep()
-		"tank":
-			mesh = VehicleModels.build_tank()
-		"apc":
-			mesh = VehicleModels.build_apc()
-		"aa":
-			mesh = VehicleModels.build_aa()
-	add_child(mesh)
-	pos = spawn_pos
-	yaw = spawn_yaw
-	hp = def["hp"]
-	dead = false
-	speed = 0
-	steer = 0
-	turret_yaw = 0
-	turret_pitch = 0
-	ai_input = null
-	track_hp = 1.0
-	engine_hp = 1.0
-	part_regen_t = 0
-	sus_amp = 0
-	respawn_protect = 2.0
-	_wreck_warned = false
-	_stop_burn()
-	_damage_stage = 0
-	_smoke_t = 0.0
-	stuck_t = 0.0
-	stuck_net = Vector2.ZERO
-	unstuck_t = 0.0
-	unstuck_turn_t = 0.0
-	unstuck_side = 0.0
-	unstuck_disp = 0.0
 
 
 ## ==================== 滑动移动与脱困 ====================
@@ -419,12 +419,17 @@ func _slide_move(from: Vector3, to: Vector3, radius: float) -> Vector3:
 
 ## 推挤解算(两遍,与 Utils.move_collide 语义一致):矮障碍(盒顶 ≤ 车底+0.55m)
 ## 可骑越;2.2m 视为车体高度
+## [PERF] P0-2:与 Utils.move_collide 共用空间网格邻域查询(候选盒升序,行为与线性一致)
 func _push_out(v: Vector3, radius: float) -> Vector3:
+	if not Utils._bench_init:
+		Utils.bench_init()
+	var _bt0 := Time.get_ticks_usec() if Utils._bench else 0
 	var p := v
 	var colliders := G.colliders
 	for _pass in 2:
+		var seq: Variant = range(colliders.size()) if (Utils._grid.is_empty() or Utils._bench_linear) else Utils.colliders_near(p, radius)
 		var pushed := false
-		for i in colliders.size():
+		for i in seq:
 			var b: AABB = colliders[i]
 			if p.y + 0.55 >= b.end.y or p.y + 2.2 <= b.position.y:
 				continue
@@ -457,6 +462,9 @@ func _push_out(v: Vector3, radius: float) -> Vector3:
 				pushed = true
 		if not pushed:
 			break
+	if Utils._bench:
+		Utils._bench_veh_t += Time.get_ticks_usec() - _bt0
+		Utils._bench_veh_n += 1
 	return p
 
 
@@ -476,16 +484,11 @@ func _begin_unstuck() -> void:
 
 func update_vehicle(dt: float) -> void:
 	if dead:
-		# 炸毁 10 秒后在出生点重新部署(末 2 秒提示,重生自带 2s 无敌保护)
-		wreck_t += dt
+		# 残骸燃烧:被炸毁的载具保持残骸、不可驾驶不可开火,绝不自动复活
+		# (车位载具由 _on_point_captured 在点位易主时重新部署新车)
 		if _burn_t > 0 or _burn_light != null:
 			_burn_t = maxf(0.0, _burn_t - dt)
 			_update_burn(dt)
-		if wreck_t > 8 and not _wreck_warned:
-			_wreck_warned = true
-			G.hud.hint("载具即将在出生点重新部署(重生保护 2s)")
-		if wreck_t > 10:
-			respawn()
 		return
 	# 重度车损:车顶周期冒烟(0.5s 一次,参考 aircraft 冒烟参数)
 	if _damage_stage >= 2:
@@ -506,7 +509,7 @@ func update_vehicle(dt: float) -> void:
 		if respawn_protect <= 0:
 			mesh.visible = true
 	# 幽灵驾驶防护:阵亡后不再接受玩家输入(防止死后到重部署前仍可驾驶)
-	var player_driving: bool = driver == G.player and driver.alive
+	var player_driving: bool = driver != null and driver == G.player and driver.alive
 	if player_driving:
 		var fwd := (1 if Input.is_action_pressed("move_forward") else 0) - (1 if Input.is_action_pressed("move_back") else 0)
 		var steer_in := (1 if Input.is_action_pressed("move_left") else 0) - (1 if Input.is_action_pressed("move_right") else 0)
@@ -519,20 +522,9 @@ func update_vehicle(dt: float) -> void:
 			speed = Utils.damp(speed, 0, 1.4, dt)
 		speed = clampf(speed, def["max_rev"], eff_max_speed())
 		steer = Utils.damp(steer, float(steer_in), 8, dt)
-		# 炮塔随鼠标(防空炮仰角提到 70° 以对空)
-		if has_turret():
-			var md: Vector2 = G.input_sys.consume_mouse()
-			var pitch_max := 1.22 if type == "aa" else 0.32
-			turret_yaw = clampf(turret_yaw - md.x * 0.002 * G.settings.sensitivity, -2.6, 2.6)
-			turret_pitch = clampf(turret_pitch - md.y * 0.0016 * G.settings.sensitivity, -0.14, pitch_max)
-			if Input.is_action_pressed("fire"):
-				if is_tank():
-					fire_cannon(driver)
-				else:
-					fire_auto(driver)
 		AudioSys.engine_update(speed, def["max_speed"])
 	elif driver != null and ai_input != null:
-		# ---- AI 驾驶 ----
+		# ---- AI 驾驶(驾驶员只驾驶,不开炮) ----
 		var ai: Dictionary = ai_input
 		if ai["fwd"] > 0.05:
 			speed += eff_accel() * (0.55 + 0.45 * (1.0 - absf(speed) / maxf(def["max_speed"], 0.1))) * ai["fwd"] * dt
@@ -542,18 +534,34 @@ func update_vehicle(dt: float) -> void:
 			speed = Utils.damp(speed, 0, 1.6, dt)
 		speed = clampf(speed, def["max_rev"], eff_max_speed() * 0.92)
 		steer = Utils.damp(steer, clampf(ai["steer"], -1, 1), 6, dt)
-		# 炮塔指向 AI 目标角
-		var ai_pitch_max := 1.22 if type == "aa" else 0.32
-		turret_yaw = Utils.damp(turret_yaw, clampf(ai.get("turret_yaw", 0.0), -2.6, 2.6), 4, dt)
-		turret_pitch = Utils.damp(turret_pitch, clampf(ai.get("turret_pitch", 0.0), -0.14, ai_pitch_max), 4, dt)
-		if ai["fire"]:
-			if is_tank():
-				fire_cannon(driver)
-			else:
-				fire_auto(driver)
 	else:
 		speed = Utils.damp(speed, 0, 2.5, dt)
 		steer = Utils.damp(steer, 0, 6, dt)
+	# ---- 炮手位:炮塔瞄准 + 开火(驾驶位不能开炮;只有坐在炮手位才能开火) ----
+	if has_turret():
+		var pitch_max := 1.22 if type == "aa" else 0.32
+		var player_gunning: bool = gunner != null and gunner == G.player and gunner.alive
+		if player_gunning:
+			# 玩家炮手:炮塔跟随观察角瞄准(指哪打哪),左键开火
+			var ctl = camera_ctl
+			if ctl != null and ctl.turret_chase():
+				turret_yaw = Utils.damp(turret_yaw, clampf(ctl.look_yaw, -2.6, 2.6), 12.0, dt)
+				turret_pitch = Utils.damp(turret_pitch, clampf(ctl.look_pitch, -0.14, pitch_max), 12.0, dt)
+			if Input.is_action_pressed("fire"):
+				if is_tank():
+					fire_cannon(gunner)
+				else:
+					fire_auto(gunner)
+		elif gunner != null and gunner_ai_input != null:
+			# AI 炮手:按目标角瞄准 + 开火
+			var gai: Dictionary = gunner_ai_input
+			turret_yaw = Utils.damp(turret_yaw, clampf(gai.get("turret_yaw", 0.0), -2.6, 2.6), 5.0, dt)
+			turret_pitch = Utils.damp(turret_pitch, clampf(gai.get("turret_pitch", 0.0), -0.14, pitch_max), 5.0, dt)
+			if gai.get("fire", false):
+				if is_tank():
+					fire_cannon(gunner)
+				else:
+					fire_auto(gunner)
 	# 踩油门判定(前进/倒车都算;AI 阈值避开到点后的 0.1 蠕动,防止原地误判)
 	var throttle_on := false
 	if player_driving:
@@ -657,33 +665,64 @@ func update_vehicle(dt: float) -> void:
 		if unstuck_disp > 0.6:
 			unstuck_t = 0.0
 
-	# 悬挂震动:地面起伏 + 车速 → 振幅(吉普颠簸、坦克沉稳)
+	# 悬挂震动:地面高频颠簸(短波长起伏) + 车速 → 振幅(吉普颠簸、坦克沉稳)
+	# [VEH-FIX] 颠簸度 = 2m 基距二阶差分与 6m 基距预测值的差值(高频分量):
+	# 对任意平滑正弦地形 d2(2m) ≈ d2(6m)·(2/6)² = d2(6m)/9 → 差值≈0 → 不再触发
+	# 持续人工颠簸(旧实现把局部坡度当颠簸度,起伏图 0.05 坡度即把 sus_amp 顶满
+	# 0.055,实测 5-8Hz 恒晃 97% 时间);短波长真颠簸(碎石/凸起/棱坎)差值显著 → 照常触发。
 	var rough := 0.0
 	if G.ground_h.is_valid():
 		var gh0: float = G.ground_h.call(pos.x, pos.z)
-		rough = absf(gh0 - G.ground_h.call(pos.x - sin(yaw) * 2, pos.z - cos(yaw) * 2))
-		rough += absf(gh0 - G.ground_h.call(pos.x + cos(yaw) * 2, pos.z - sin(yaw) * 2))
-		rough *= 0.5
+		var d2_2 := 0.0
+		var d2_6 := 0.0
+		for ax in 2:
+			var px: float = sin(yaw) if ax == 0 else cos(yaw)
+			var pz: float = cos(yaw) if ax == 0 else -sin(yaw)
+			var h2p: float = G.ground_h.call(pos.x - px * 2, pos.z - pz * 2)
+			var h2n: float = G.ground_h.call(pos.x + px * 2, pos.z + pz * 2)
+			var h6p: float = G.ground_h.call(pos.x - px * 6, pos.z - pz * 6)
+			var h6n: float = G.ground_h.call(pos.x + px * 6, pos.z + pz * 6)
+			d2_2 += absf(h2p + h2n - 2.0 * gh0)
+			d2_6 += absf(h6p + h6n - 2.0 * gh0)
+		rough = 0.5 * maxf(0.0, d2_2 - d2_6 / 9.0)
 		# 死区:剔除数值噪声级起伏(平地 ground_h 恒 0 → rough 恒 0,无任何人为颠簸)
-		if rough < 0.01:
+		if rough < 0.005:
 			rough = 0.0
 	var sus_k: float = def.get("sus", 0.6)
-	sus_amp = Utils.damp(sus_amp, clampf(absf(speed) * rough * 2.0 * sus_k, 0, 0.055), 8, dt)
+	# [VEH-FIX] 振幅上限 0.055→0.03:旧上限在河岸 16-20m 平滑过渡边缘也会顶满,
+	# 造成 6Hz 俯仰振荡单帧 0.07 rad 的瞬时甩动;新上限保留真颠簸(碎石/棱坎)触感,
+	# 但幅度减半(±0.072 rad≈4.1°)——平地恒 0 不受影响
+	sus_amp = Utils.damp(sus_amp, clampf(absf(speed) * rough * 2.0 * sus_k, 0, 0.03), 8, dt)
 	if sus_amp < 0.0008:
 		sus_amp = 0.0  # 指数平滑渐近不收敛到 0,残余微幅直接归零
 	sus_phase += dt * (3.5 + absf(speed) * 1.6)
 
-	# 地形贴合
+	# 地形贴合(BR 起伏:阻尼贴地 + 坡度速率限制;旧图平地 target 恒 0 → 行为不变)
 	if G.ground_h.is_valid():
-		pos.y = G.ground_h.call(pos.x, pos.z)
-		# 车体随地形倾斜 + 悬挂俯仰/侧倾叠加
+		var gh_t: float = G.ground_h.call(pos.x, pos.z)
+		# 车体随地形倾斜采样(前后/左右 ±2m)
 		var h_f: float = G.ground_h.call(pos.x - sin(yaw) * 2, pos.z - cos(yaw) * 2)
 		var h_b: float = G.ground_h.call(pos.x + sin(yaw) * 2, pos.z + cos(yaw) * 2)
 		var h_l: float = G.ground_h.call(pos.x + cos(yaw) * 2, pos.z - sin(yaw) * 2)
 		var h_r: float = G.ground_h.call(pos.x - cos(yaw) * 2, pos.z + sin(yaw) * 2)
+		if not _ground_ready:
+			_sus_y = gh_t
+			_pitch_s = atan2(h_f - h_b, 4)
+			_roll_s = atan2(h_l - h_r, 4)
+			_ground_ready = true
+		# 低通平滑:帧率无关阻尼,k 按载具类型(坦克沉稳/吉普跟手)
+		var sus_ground_k: float = def.get("sus_ground", 8.0)
+		var step := Utils.damp(_sus_y, gh_t, sus_ground_k, dt) - _sus_y
+		# 坡度变化率限制:每帧最大 y 变化(m/s × dt),防地形跳变/高速弹跳
+		step = clampf(step, -def.get("sus_rate", 4.5) * dt, def.get("sus_rate", 4.5) * dt)
+		_sus_y += step
+		pos.y = _sus_y
+		# 俯仰/侧倾角低通平滑(转向过渡不抖)+ 悬挂俯仰/侧倾叠加
+		_pitch_s = Utils.damp(_pitch_s, atan2(h_f - h_b, 4), sus_ground_k * 1.3, dt)
+		_roll_s = Utils.damp(_roll_s, atan2(h_l - h_r, 4), sus_ground_k * 1.3, dt)
 		mesh.rotation_order = EULER_ORDER_YXZ
-		mesh.rotation.x = atan2(h_f - h_b, 4) + sin(sus_phase * 1.23) * sus_amp * 2.4
-		mesh.rotation.z = atan2(h_l - h_r, 4) + sin(sus_phase * 0.83 + 1.7) * sus_amp * 2.4
+		mesh.rotation.x = _pitch_s + sin(sus_phase * 1.23) * sus_amp * 2.4
+		mesh.rotation.z = _roll_s + sin(sus_phase * 0.83 + 1.7) * sus_amp * 2.4
 
 	# 同步模型
 	mesh.position = pos

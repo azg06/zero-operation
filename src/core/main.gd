@@ -1,4 +1,4 @@
-extends Node3D
+﻿extends Node3D
 ## 主装配与主循环(对应 main.js)
 
 ## ---- 输入系统(对应 input.js) ----
@@ -34,6 +34,12 @@ var _vm_camera: Camera3D
 var _vm_sun: DirectionalLight3D
 var _vm_e: Environment
 var _fxaa_rect: ColorRect
+var _cine_rect: ColorRect      # 电影级后期(自定义着色器:微对比/泛光/颗粒/暗角/色差)
+# ---- [8/10] 动态质量系统:帧时间超标自动逐级降级(SSR→MSAA→阴影→后期→泛光),稳定后恢复 ----
+var _dq_level := 0
+var _dq_t := 0.0
+var _dq_n := 0
+var _dq_stable_t := 0.0
 var _effects: Effects
 var _hud: HUD
 var _menus: Menus
@@ -54,7 +60,35 @@ var _dbg_pose := false
 var _memwatch := false
 var _memwatch_t := 0.0
 var _memwatch_n := 0
-var _menu_squad: Array = []
+# ---- QA 性能基准:--perf-test(每秒采样 FPS/帧时间/内存) ----
+var _perf_on := false
+var _perf_t := 0.0
+var _perf_min := 0.0
+var _perf_max := 0.0
+# ---- [8/10] 完整性能基准:--bench <帧数>(采集帧时间/1%Low/CPU/GPU/DrawCalls/Objects/内存,到帧写报告) ----
+var _bench_on := false
+var _bench_target := 0
+var _bench_n := 0
+var _bench_fts := PackedFloat64Array()      # 帧时间 ms
+var _bench_proc := PackedFloat64Array()     # process 时间 ms
+var _bench_phys := PackedFloat64Array()     # physics 时间 ms
+var _bench_dc := PackedInt32Array()         # draw calls
+var _bench_prims := PackedInt64Array()      # primitives
+var _bench_objs := PackedInt32Array()       # 渲染对象数
+var _bench_nodes := PackedInt32Array()      # 场景节点数
+var _bench_mem := PackedFloat64Array()      # 静态内存 MB
+var _bench_label := ""                      # 场景标签(文件名用)
+# ---- QA 帧时间尖峰压测:--perf-stress <帧数>(GUI 实机采样:帧时间 p95/尖峰计数;到帧自动退出) ----
+var _ps_stress_on := false
+var _ps_stress_target := 0
+var _ps_stress_n := 0
+var _ps_times := PackedFloat64Array()
+var _ps_gt250 := 0
+var _ps_gt100 := 0
+# ---- GPU 保护档自适应 v2:帧时间尖峰检测(防驱动级挂起) ----
+var _ps_win_t := 0.0
+var _ps_win_n := 0
+var _ps_enter_t := -1e9
 var _sun_occ_t := 0.0
 var _sun_blocked := false
 var _flashlight: SpotLight3D
@@ -166,6 +200,33 @@ func _ready() -> void:
 	fxaa_mat.shader = load("res://src/fx/fxaa.gdshader")
 	_fxaa_rect.material = fxaa_mat
 	fxaa_layer.add_child(_fxaa_rect)
+	# ---- PCSS 阴影软化(自写后处理:屏幕空间 PCF 边缘软化,层 3.5,在 FXAA 之下) ----
+	var pcss_layer := CanvasLayer.new()
+	pcss_layer.layer = 3.5
+	add_child(pcss_layer)
+	var pcss_rect := ColorRect.new()
+	pcss_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	pcss_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var pcss_mat := ShaderMaterial.new()
+	pcss_mat.shader = load("res://src/fx/pcss_soft.gdshader")
+	pcss_rect.material = pcss_mat
+	pcss_layer.add_child(pcss_rect)
+	# 阴影基础质量:软模糊 + 高分辨率阴影图集(进一步降低锯齿/闪烁)
+	if G.sun != null:
+		G.sun.shadow_blur = 1.15
+		RenderingServer.directional_shadow_atlas_set_size(4096, true)
+	# ---- 电影级后期(自定义着色器;层 4.5:3D/FXAA 之上,HUD(5) 之下,设置可开关) ----
+	var cine_layer := CanvasLayer.new()
+	cine_layer.layer = 4.5
+	add_child(cine_layer)
+	_cine_rect = ColorRect.new()
+	_cine_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_cine_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var cine_mat := ShaderMaterial.new()
+	cine_mat.shader = load("res://src/fx/cinematic.gdshader")
+	_cine_rect.material = cine_mat
+	_cine_rect.visible = bool(G.settings.get("cinema", true))
+	cine_layer.add_child(_cine_rect)
 	_vm_camera = Camera3D.new()
 	_vm_camera.fov = 60
 	_vm_camera.near = 0.01
@@ -183,13 +244,24 @@ func _ready() -> void:
 	var bm := BotManager.new()
 	add_child(bm)
 	G.bot_manager = bm
+	var pm := PortalManager.new()
+	add_child(pm)
+	G.portal = pm
 	var pl := Player.new()
 	add_child(pl)
 	G.player = pl
+	# ---- 实时 3D 战场部署系统(死亡后高空观察部署;征服/突破启用) ----
+	var dep := BattleDeploymentManager.new()
+	add_child(dep)
+	G.deployment = dep
 	_hud = HUD.new()
 	add_child(_hud)
 	_menus = Menus.new()
 	add_child(_menus)
+	# 门户模式提示(模式控制器经 G.portal.hint 发出,接现有 HUD 提示条)
+	G.portal.portal_hint.connect(func(t: String):
+		if G.hud != null:
+			G.hud.hint(t))
 	# ---- 战役控制器(战争故事;campaign.gd 由数据子智能体实现,未就绪时跳过) ----
 	if ResourceLoader.exists("res://src/campaign/campaign.gd"):
 		var c = load("res://src/campaign/campaign.gd")
@@ -205,7 +277,24 @@ func _ready() -> void:
 		_go_fullscreen()
 		_menus.hide_all()
 		G.game.deploy(class_id, loadout)
+	# 实时 3D 部署:兵种/武器与 3D 战场同屏一体,「部 署」按钮 = 确认部署到悬停/基地
+	_menus.on_deploy3d = func(class_id: String, loadout):
+		_go_fullscreen()
+		if G.deployment != null and G.deployment.active:
+			G.deployment.confirm_deploy_ui()
+		elif G.deployment != null:
+			G.deployment.enter_match_deploy()
+		else:
+			G.game.deploy(class_id, loadout)
 	_menus.on_redeploy = func():
+		# 大逃杀:首次阵亡重部署机会(R 键/死亡屏按钮同一入口 → 乘小直升机重返战场)
+		if G.mode == "br" and G.br != null and G.br.has_method("try_redeploy_player") \
+				and G.br.try_redeploy_player():
+			return
+		# 实时 3D 战场部署(征服/突破):死亡后点击部署点/空格直接部署
+		if G.deployment != null and G.deployment.active:
+			G.deployment.confirm_redeploy()
+			return
 		_menus.hide_all()
 		G.game.redeploy()
 	_menus.on_resume = func():
@@ -215,6 +304,11 @@ func _ready() -> void:
 		G.paused = false
 		G.input_sys.lock()
 	_menus.on_quit = func():
+		# 门户对局退出到主菜单:先收尾模式(防御判空)。否则 active 残留 → 下次 start_mode
+		# 触发 portal_manager 防御 end_match({}) → TDM 空记分板判负 → 重进即显示"战败"
+		# aborted 标记:结算屏优先显示"已退出对局",不判胜负
+		if G.portal != null and G.portal.active != null:
+			G.portal.end_match({ "aborted": true })
 		_menus.hide_all()
 		G.state = "menu"
 		G.paused = false
@@ -242,7 +336,19 @@ func _ready() -> void:
 	WorldBuilder.build_world(G.world_root, "city")
 	_build_ready_room()  # 特勤处备战屋:主菜单背景 3D 战争房间(高空展厅,四兵种陈列)
 	GraphicsQuality.load_config()
-	GraphicsQuality.apply_preset(GraphicsQuality.current_level)  # 启动即应用硬件检测/存档画质预设(无条件)
+	# 启动画质:存档含细项设置(手动开关过)时保留用户开关,只套档位强度;否则完整套用预设
+	if GraphicsQuality.has_custom_settings():
+		GraphicsQuality.apply_level_strengths()
+	else:
+		GraphicsQuality.apply_preset(GraphicsQuality.current_level)  # 启动即应用硬件检测/存档画质预设(无条件)
+	# QA 性能基准:--preset <low|medium|high|ultra>(覆盖硬件检测/存档档位,不写回存档)
+	var ua0 := OS.get_cmdline_user_args()
+	var pidx := ua0.find("--preset")
+	if pidx >= 0 and ua0.size() > pidx + 1:
+		var lv: int = { "low": 0, "medium": 1, "high": 2, "ultra": 3 }.get(String(ua0[pidx + 1]).to_lower(), -1)
+		if lv >= 0:
+			GraphicsQuality.apply_preset(lv)
+			print("[PERF] --preset 覆盖画质档位: ", GraphicsQuality._level_name(lv))
 	_setup_menu_scene()  # 主界面背景:四兵种编队
 	get_tree().root.size_changed.connect(_on_resize)
 	if _validate:
@@ -260,19 +366,30 @@ func _ready() -> void:
 		var idx := ua.find("--test-play")
 		var mode: String = ua[idx + 1] if ua.size() > idx + 1 else "conquest"
 		# 模式名校验:非法模式(如把地图名误当模式参数)时打印用法说明并忽略 --test-play,不中止
-		if mode != "conquest" and mode != "breakthrough" and mode != "campaign":
-			print("[TEST] 警告:未知游玩模式 \"", mode, "\"(可用: conquest / breakthrough / campaign),已忽略 --test-play")
+		if mode != "conquest" and mode != "breakthrough" and mode != "campaign" and mode != "tdm" and mode != "br":
+			print("[TEST] 警告:未知游玩模式 \"", mode, "\"(可用: conquest / breakthrough / campaign / tdm / br),已忽略 --test-play")
 		else:
-			# 地图名校验:不存在(含把 --quit-after 等后续参数误当地图名)时打印错误并回退随机,
+			# 地图名解析:跳过以 -- 开头的 flag 参数(如 --test-rpg/--quit-after/--screenshot),
+			# 首个非 flag 参数若为合法地图 id 则采用,否则回退随机并提示。
 			# 绝不带无效 id 进入世界构建(防中途中止与悬空 Flag 引用)
-			if ua.size() > idx + 2 and not MapsData.M().has(ua[idx + 2]):
-				print("[TEST] 警告:未知地图名 \"", ua[idx + 2], "\"(可用: ", MapsData.M().keys(), "),回退随机地图")
-				G.sel_maps[mode] = "random"
-			else:
-				G.sel_maps[mode] = ua[idx + 2] if ua.size() > idx + 2 else "random"
+			var map_arg := "random"
+			var map_warn := ""
+			for i in range(idx + 2, ua.size()):
+				var a: String = ua[i]
+				if a.begins_with("--"):
+					continue
+				if MapsData.M().has(a):
+					map_arg = a
+				else:
+					map_warn = a
+				break
+			if not map_warn.is_empty():
+				print("[TEST] 警告:未知地图名 \"", map_warn, "\"(可用: ", MapsData.M().keys(), "),回退随机地图")
+			G.sel_maps[mode] = map_arg
 			_menus.hide_all()
 			G.game.start_match(mode)
-			if not ua.has("--no-deploy"):
+			# 防御:地图未就绪(如 br_valley 缺失)时开局中止(state 仍为 menu),跳过部署防空出生点崩溃
+			if not ua.has("--no-deploy") and G.state != "menu":
 				G.game.deploy("assault", { "primary": "m4", "secondary": "m1911", "shotgun": "m1014" })
 				print("[TEST] 已部署,开始模拟游玩 state=", G.state)
 			else:
@@ -298,6 +415,36 @@ func _ready() -> void:
 			G.player.gun_index = 0
 			G.player.gun().equip()
 		print("[TEST] 已切换武器: ", gid)
+	# [8/10] 车内视角诊断:--test-tank [gunner|driver] 自动进入最近坦克(验证内构/乘员位/炮镜)
+	if ua.has("--test-tank"):
+		var tt_crew: int = 1 if (ua.size() > ua.find("--test-tank") + 1 and ua[ua.find("--test-tank") + 1] == "gunner") else 0
+		await get_tree().create_timer(1.5).timeout
+		var best_v = null
+		var best_d := 1e9
+		for v in G.vehicles:
+			if v.dead or v.type != "tank" or v.driver != null:
+				continue
+			var d: float = v.pos.distance_to(G.player.pos)
+			if d < best_d:
+				best_d = d
+				best_v = v
+		if best_v != null:
+			G.player.enter_vehicle(best_v)
+			G.player._veh_tp = false
+			# 指定乘员位:gunner → 玩家坐到炮手位(驾驶位空出)
+			if tt_crew == 1:
+				best_v.driver = null
+				best_v.gunner = G.player
+				G.player._veh_crew = 1
+			# 控制变量:固定车位置与朝向(消除随机对截图验证的影响)
+			best_v.pos = Vector3(0, 0, 0)
+			best_v.yaw = PI
+			best_v.turret_yaw = 0.0
+			if tt_crew == 1:
+				Input.action_press("ads")  # 炮手位模拟按住炮镜(真实按键路径)
+			print("[TANK-TEST] 已进入坦克 crew=", tt_crew, " pos=", best_v.pos)
+		else:
+			print("[TANK-TEST] 未找到可用坦克")
 	# ADS 截图诊断:--test-ads-capture [--test-optics <reddot|holo|none>](配合 --test-play)
 	# QA 用途:满 ADS 定帧截取 视角模型 SubViewport + 全屏画面,检查镜罩/枪身隐藏/FOV 放大
 	# 置于 --test-gun 之后:同时传 --test-gun 时,截图作用于切换后的枪(如狙击验证)
@@ -341,8 +488,8 @@ func _ready() -> void:
 			# 诊断数值:目镜装点 y / 视角模型满 ADS 位 z(枪相对 vm_camera)/ 数据 ads_z
 			print("[ADS-CAP] optic_y=%.4f cam_z=%.4f ads_z=%.4f" % [
 				g2.def.sight_y, g2.group.position.z, g2.def.ads_z])
-			print("[ADS-CAP] gun=%s optic=%s scope=%s/%s zoom_fov=%.1f fov=%.1f ads=%.3f base_fov=%.1f" % [
-				gid, opt_arg, g2.def.scope, g2.scope_ads, g2.def.zoom_fov, G.camera.fov, g2.ads_amount,
+			print("[ADS-CAP] gun=%s optic=%s scope=%s zoom_fov=%.1f fov=%.1f ads=%.3f base_fov=%.1f" % [
+				gid, opt_arg, g2.def.scope, g2.def.zoom_fov, G.camera.fov, g2.ads_amount,
 				G.settings.fov + G.player.sprint_amount * 6 + (4 if G.player.tac_sprint > 0 else 0) + 7.0 * clampf(G.player.slide_t / 0.7, 0.0, 1.0)])
 			# 曝光诊断:主世界/主相机的自动曝光状态与曝光参数
 			var wa: CameraAttributes = G.world_env.camera_attributes if G.world_env != null else null
@@ -619,10 +766,17 @@ func _ready() -> void:
 		await get_tree().create_timer(2.0).timeout
 		var veh = null
 		for v in G.vehicles:
-			if v.type == vtype and v.driver == null and not v.dead:
+			if v.type == vtype and not v.dead and (v.driver == null or v.driver != G.player):
 				veh = v
 				break
 		if veh != null:
+			# bot 可能抢先登车(2s 窗口):踢下让玩家上(测试用)
+			if veh.driver != null and veh.driver != G.player:
+				veh.driver = null
+				veh.ai_input = null
+			if veh.gunner != null and veh.gunner != G.player:
+				veh.gunner = null
+				veh.gunner_ai_input = null
 			if ua.has("--veh-isolate"):
 				veh.pos = Vector3(150, 0, 150)  # 空旷角隔离观察
 			G.player.pos = veh.pos + Vector3(2, 0, 2)
@@ -631,8 +785,20 @@ func _ready() -> void:
 				G.player._veh_tp = true
 			if ua.has("--veh-down"):
 				veh.turret_pitch = -0.13
+				if veh.camera_ctl != null:
+					veh.camera_ctl.look_pitch = -0.13
 			if ua.has("--veh-up"):
 				veh.turret_pitch = 0.9 if vtype == "aa" else 0.3
+				# 同步观察角:炮手位/炮镜视角 = 炮塔瞄准方向
+				if veh.camera_ctl != null:
+					veh.camera_ctl.look_pitch = veh.turret_pitch
+			if ua.has("--veh-gunner"):
+				# 玩家坐到炮手位(驾驶位空出)
+				veh.driver = null
+				veh.gunner = G.player
+				G.player._veh_crew = 1
+			if ua.has("--veh-ads"):
+				Input.action_press("ads")  # 炮手位按住炮镜
 			print("[DRIVE] 进入载具 ", vtype, " tp=", G.player._veh_tp, " pitch=", veh.turret_pitch)
 		else:
 			print("[DRIVE] 找不到载具 ", vtype)
@@ -668,6 +834,14 @@ func _ready() -> void:
 		await tap.call("crouch")
 		Input.action_release("move_forward")
 		print("[INPUT] 奔跑按 C 后 slide_t =", G.player.slide_t, " (期望 > 0)")
+		# 载具 F 键切换乘员位验证(--test-drive 配合):驾驶员 → 炮手 → 驾驶
+		if G.player.vehicle != null:
+			var vv = G.player.vehicle
+			print("[INPUT] 载具初始 driver=", vv.driver == G.player, " gunner=", vv.gunner == G.player, " crew=", G.player._veh_crew)
+			await tap.call("gadget")
+			print("[INPUT] F 后 driver=", vv.driver == G.player, " gunner=", vv.gunner == G.player, " crew=", G.player._veh_crew)
+			await tap.call("gadget")
+			print("[INPUT] F 再按 driver=", vv.driver == G.player, " gunner=", vv.gunner == G.player, " crew=", G.player._veh_crew)
 	if ua.has("--test-end"):
 		await get_tree().create_timer(4.0).timeout
 		G.tickets["ru"] = 0
@@ -690,6 +864,28 @@ func _ready() -> void:
 	_dbg_prone = ua.has("--test-prone")
 	_dbg_slide = ua.has("--test-slide")
 	_memwatch = ua.has("--memwatch")
+	# QA 性能基准:--perf-test(关闭垂直同步测真实帧率 + 每秒打印 FPS/帧时间/内存)
+	_perf_on = ua.has("--perf-test")
+	if _perf_on:
+		G.settings["vsync"] = 0
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+		print("[PERF] --perf-test 开启:垂直同步关闭,每秒采样 FPS/帧时间/内存")
+	# QA 帧时间尖峰压测:--perf-stress <帧数>(对局内逐帧采样帧时间,退出时输出 p95/尖峰统计)
+	_ps_stress_on = ua.has("--perf-stress")
+	if _ps_stress_on:
+		var sidx2 := ua.find("--perf-stress")
+		_ps_stress_target = maxi(100, int(ua[sidx2 + 1])) if ua.size() > sidx2 + 1 else 1800
+		print("[STRESS] --perf-stress 开启:目标 %d 帧(对局内采样帧时间/尖峰,到帧自动退出)" % _ps_stress_target)
+	# [8/10] 完整性能基准:--bench <帧数> [标签](关垂直同步,对局内逐帧采集,到帧写 user://perf_bench_<标签>.json)
+	_bench_on = ua.has("--bench")
+	if _bench_on:
+		var bidx := ua.find("--bench")
+		_bench_target = maxi(120, int(ua[bidx + 1])) if ua.size() > bidx + 1 else 900
+		if ua.size() > bidx + 2:
+			_bench_label = String(ua[bidx + 2]).replace(" ", "_")
+		G.settings["vsync"] = 0
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+		print("[BENCH] --bench 开启:目标 %d 帧 标签=%s(垂直同步已关)" % [_bench_target, _bench_label])
 	if ua.has("--test-lookdown"):
 		_dbg_lookdown = true
 	if ua.has("--test-pose"):
@@ -750,11 +946,6 @@ func _ready() -> void:
 ## ============ 主界面背景:特勤处备战屋(3D 战争房间 + 四兵种陈列台) ============
 ## ============ 主界面背景:特勤处备战屋(3D 战争房间 + 四兵种陈列台) ============
 func _setup_menu_scene() -> void:
-	# 清理旧编队(历史遗留,防残留)
-	for m in _menu_squad:
-		if is_instance_valid(m):
-			m.queue_free()
-	_menu_squad.clear()
 	# 隐藏玩家视角模型/乘员/身体(主菜单不显示)
 	if G.player != null:
 		for gun in G.player.guns:
@@ -769,16 +960,6 @@ func _setup_menu_scene() -> void:
 		_camera.global_position = _room_cam_base
 		_camera.look_at(_room_cam_look, Vector3.UP)
 		_camera.fov = 50  # Godot 4 设置 fov 自动生效(玩家部署后由 update 逐帧恢复)
-
-
-## 兵种一句话简介(与部署界面卡片一致)
-func _class_role(cid: String) -> String:
-	return {
-		"assault": "破阵 / 烟雾 / C5 / 自疗",
-		"engineer": "反载具 / 维修 / RPG",
-		"support": "补给 / 医疗 / 烟雾",
-		"recon": "狙击 / 标记 / 信标",
-	}.get(cid, "")
 
 
 ## 特勤处备战屋:启动时构建一次(悬空独立展厅,避免与地图碰撞;换图不受影响)
@@ -1031,33 +1212,6 @@ func _build_ready_room() -> void:
 	room.add_child(room_sign)
 
 
-## 主菜单编队战斗姿势(站姿警戒/低姿/侧向警戒/跪姿据枪)
-func _pose_menu_soldier(sm: Node3D, cid: String) -> void:
-	var rig: Node3D = sm.get_meta("rig")
-	var upper: Node3D = sm.get_meta("upper")
-	var leg_l: Node3D = sm.get_meta("leg_l")
-	var leg_l_knee: Node3D = sm.get_meta("leg_l_knee")
-	var leg_r: Node3D = sm.get_meta("leg_r")
-	var leg_r_knee: Node3D = sm.get_meta("leg_r_knee")
-	match cid:
-		"assault":
-			rig.rotation.x = 0.12          # 站姿警戒持枪
-		"engineer":
-			rig.rotation.x = 0.3           # 低姿持枪待命
-			upper.rotation.y = -0.12
-		"support":
-			upper.rotation.y = 0.4         # 侧向警戒
-			rig.rotation.x = 0.16
-		"recon":
-			leg_l.rotation.x = 1.25        # 跪姿据枪(左膝立,右膝跪)
-			leg_l_knee.rotation.x = -1.25
-			leg_r.rotation.x = -0.5
-			leg_r_knee.rotation.x = -1.45
-			rig.rotation.x = -0.05
-			upper.rotation.x = 0.08
-			sm.position.y -= 0.34
-
-
 func _go_fullscreen() -> void:
 	if DisplayServer.window_get_mode() != DisplayServer.WINDOW_MODE_FULLSCREEN:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
@@ -1109,6 +1263,8 @@ func _pause() -> void:
 func apply_graphics() -> void:
 	var s: Dictionary = G.settings
 	var vp := get_viewport()
+	if vp == null:
+		return  # 退出收尾时根视口已销毁,跳过画质写(如 BR 恢复预设路径)
 	# 分辨率缩放 + 各向异性过滤(强制应用,避免预设覆盖)
 	if OS.has_feature("web"):
 		vp.scaling_3d_scale = s.scale  # Web 端使用动态缩放
@@ -1129,10 +1285,23 @@ func apply_graphics() -> void:
 			G.sun.shadow_normal_bias = 1.0
 	# TAA(WebGL 兼容模式下会产生条纹伪影,关闭)
 	if OS.has_feature("web") and G.world_env != null and G.world_env.environment != null:
-		G.world_env.environment.sdfgi_enabled = false
 		G.world_env.environment.ssil_enabled = false
 		G.world_env.environment.ssr_enabled = false
 		G.world_env.environment.glow_enabled = false
+	# 3A 画质项(桌面):MSAA / SSR / SSIL / Glow / 电影后期
+	# [8/10] SDFGI 已移除(阴影过黑、对比度过高),恒关闭
+	vp.msaa_3d = int(s.get("msaa", 0))
+	if not OS.has_feature("web") and G.world_env != null and G.world_env.environment != null:
+		var env: Environment = G.world_env.environment
+		env.sdfgi_enabled = false
+		# [PERF-AUDIT] --nossr / --no-ssil 临时禁用(仅性能审计用)
+		var _no_ssr: bool = OS.get_cmdline_user_args().has("--nossr")
+		var _no_ssil: bool = OS.get_cmdline_user_args().has("--nossil")
+		env.ssr_enabled = bool(s.get("ssr", false)) and not _no_ssr
+		env.ssil_enabled = bool(s.get("ssil", false)) and not _no_ssil
+		env.glow_enabled = bool(s.get("glow", true))
+	if _cine_rect != null:
+		_cine_rect.visible = bool(s.get("cinema", true))
 	# SSAO / FXAA
 	if G.world_env != null and G.world_env.environment != null:
 		G.world_env.environment.ssao_enabled = s.ssao
@@ -1155,6 +1324,39 @@ func apply_graphics() -> void:
 		G.world_env.environment.fog_depth_end = G.fog_base[1] * s.fog
 
 
+## [8/10] 动态质量应用:按降级深度运行时降级(不动 G.settings,手动设置优先;level 0 重建)
+func _apply_dq() -> void:
+	var vp := get_viewport()
+	var s: Dictionary = G.settings
+	if _dq_level <= 0:
+		# 完全恢复:按当前手动设置重建渲染
+		if G.apply_graphics.is_valid():
+			G.apply_graphics.call()
+		if GraphicsQuality != null:
+			GraphicsQuality.apply_level_strengths()
+		return
+	if vp != null:
+		vp.msaa_3d = int(s.get("msaa", 0)) if _dq_level < 2 else 0
+	if G.world_env != null and G.world_env.environment != null:
+		var env: Environment = G.world_env.environment
+		env.ssr_enabled = bool(s.get("ssr", false)) if _dq_level < 1 else false
+		env.ssil_enabled = bool(s.get("ssil", false)) and _dq_level < 1
+		env.glow_enabled = bool(s.get("glow", true)) if _dq_level < 5 else false
+		if _dq_level >= 3 and G.sun != null:
+			G.sun.shadow_enabled = true
+			RenderingServer.directional_shadow_atlas_set_size(2048, true)
+	if _cine_rect != null and _dq_level >= 4:
+		_cine_rect.visible = false
+
+
+## 手动改画质时重置动态降级(手动设置优先)
+func reset_dq() -> void:
+	if _dq_level > 0:
+		_dq_level = 0
+		_apply_dq()
+		print("[DQ] 手动设置已重置动态降级")
+
+
 ## ============ 主循环(对应 loop) ============
 func _process(dt_raw: float) -> void:
 	var dt := minf(dt_raw, 0.05)
@@ -1170,15 +1372,22 @@ func _process(dt_raw: float) -> void:
 			_camera.look_at(_room_cam_look + Vector3(sway2, 0, 0), Vector3.UP)
 			_camera.fov = 50
 		elif G.state == "deploy":
-			# 部署界面背景与旧版一致:地图上空视角(友军出生点)
-			var anchor := Vector3.ZERO
-			if not G.spawns["us"].is_empty():
-				anchor = G.spawns["us"][0]
-			var ah: float = G.ground_h.call(anchor.x, anchor.z) if G.ground_h.is_valid() else 0.0
-			_camera.global_position = Vector3(anchor.x + 3.1, ah + 1.55, anchor.z + 5.0)
-			_camera.look_at(Vector3(anchor.x + 0.25, ah + 1.0, anchor.z), Vector3.UP)
+			# 开局 3D 部署视图(实时 3D 部署系统接管相机时跳过旧版静态部署机位)
+			if G.deployment != null and G.deployment.active:
+				pass
+			elif not G.spawns["us"].is_empty():
+				# 部署界面背景与旧版一致:地图上空视角(友军出生点)
+				var anchor := Vector3.ZERO
+				if not G.spawns["us"].is_empty():
+					anchor = G.spawns["us"][0]
+				var ah: float = G.ground_h.call(anchor.x, anchor.z) if G.ground_h.is_valid() else 0.0
+				_camera.global_position = Vector3(anchor.x + 3.1, ah + 1.55, anchor.z + 5.0)
+				_camera.look_at(Vector3(anchor.x + 0.25, ah + 1.0, anchor.z), Vector3.UP)
 
-	var active: bool = (G.state == "playing" or G.state == "dead") and not G.paused
+	var deployment_active: bool = G.deployment != null and G.deployment.active
+	# 开局 3D 部署(state=deploy)期间战场同样实时运行(AI 出生/交战/移动)
+	var active: bool = (G.state == "playing" or G.state == "dead"
+		or (G.state == "deploy" and deployment_active)) and not G.paused
 
 	# 暂停键
 	if Input.is_action_just_pressed("pause"):
@@ -1211,10 +1420,25 @@ func _process(dt_raw: float) -> void:
 			v.update_vehicle(dt)
 		for a in G.aircraft:
 			a.update_aircraft(dt)
-	# 死亡倒地镜头
+	# ---- 大逃杀:全局引用同步(模式实例生命周期归 PortalManager;死亡观战相机接管) ----
+	if G.mode == "br":
+		if G.portal != null:
+			G.br = G.portal.active
+	# 实时 3D 战场部署(征服/突破):死亡升空/自由观察/部署飞行全程独立驱动,
+	# 不受状态切换影响(如部署飞行中对局结束或外部重生,仍需收尾清理)
+	if G.deployment != null and G.deployment.active:
+		G.deployment.update(dt)
+	# 死亡倒地镜头(大逃杀死亡 → 死亡回放 5s + 观战,相机由 BR 接管;
+	# [BR-R] 重部署阶段(直升机追尾/跳伞 TP)相机由 BR 重部署接管,不走倒地镜头)
 	if G.state == "dead":
-		_camera.global_position.y = maxf(0.32, _camera.global_position.y - dt * 1.4)
-		_camera.rotation.z = minf(0.55, _camera.rotation.z + dt * 0.5)
+		if G.mode == "br" and G.br != null and G.br.is_spectating():
+			G.br.update_spectate(dt)
+		elif G.mode == "br" and G.br != null and G.br.has_method("redeploy_cam_active") \
+				and G.br.redeploy_cam_active():
+			G.br.update_redeploy_camera(dt)
+		else:
+			_camera.global_position.y = maxf(0.32, _camera.global_position.y - dt * 1.4)
+			_camera.rotation.z = minf(0.55, _camera.rotation.z + dt * 0.5)
 	# 玩家身体模型:第一人称显示双腿 + 躯干/双肩(upper 顶面 1.35m 低于站立眼高
 	# 1.62m,平视不穿模;低头/蹲姿可见胸口属正常);阵亡倒地与载具驾驶隐藏;
 	# 战役过场由 campaign 控制可见性,跳过覆盖。
@@ -1266,7 +1490,7 @@ func _process(dt_raw: float) -> void:
 		_vm_e.ambient_light_color = se.ambient_light_color
 		_vm_e.ambient_light_energy = se.ambient_light_energy
 
-	# 性能自适应:持续低帧则降级(关 SSAO/阴影/降分辨率)
+	# 性能自适应:持续低帧则降级(进入 GPU 保护档)
 	if not _degraded and G.state == "playing":
 		_fps_acc += dt_raw
 		_fps_n += 1
@@ -1280,20 +1504,72 @@ func _process(dt_raw: float) -> void:
 				_fps_low_t = 0
 			if _fps_low_t >= 4:
 				_degraded = true
+				print("[PERF] 自适应降级触发(fps<42 持续 4s):Windows 进入 GPU 保护档")
 				if OS.has_feature("web"):
 					# Web 端性能有限,降级保帧率
 					G.settings.ssao = false
 					G.settings.shadows = 0
 					G.settings.scale = 0.8
 				else:
-					# Windows 端只关 SSAO,不降分辨率(避免模糊)
-					G.settings.ssao = false
-				apply_graphics()
+					# Windows 端:套用 GPU 保护档(阴影 2048/SSIL off/SSR off/体积雾 32/粒子 0.7)
+					GraphicsQuality.enter_protect()
+	# [PERF] GPU 保护档自适应 v2:帧时间尖峰检测(驱动级挂起前兆——dxgi/D3D12Core 卡死时
+	# 单帧 >250ms 或 2s 均值 >100ms)→ 立即套保护档;5s 无尖峰后恢复原档(仍卡则保持)。
+	# 全模式生效(征服/突破/TDM/战役/BR);慢路径(_degraded 锁存)不自动恢复。
+	# Web 端走自己的静态低碳配置,不参与保护档切换。
+	if not OS.has_feature("web") and (G.state == "playing" or G.state == "dead") and not G.paused:
+		_ps_win_t += dt_raw
+		_ps_win_n += 1
+		var spiked := dt_raw > 0.25
+		if _ps_win_t >= 2.0:
+			if _ps_win_n > 0 and _ps_win_t / _ps_win_n > 0.1:
+				spiked = true
+			_ps_win_t = 0.0
+			_ps_win_n = 0
+		if spiked:
+			_ps_enter_t = Time.get_ticks_msec()
+			if not GraphicsQuality.protect_active():
+				GraphicsQuality.enter_protect()
+				print("[PERF] 自适应 GPU 保护档触发: 帧时间尖峰 %.0fms" % (dt_raw * 1000.0))
+		elif GraphicsQuality.protect_active() and not _degraded \
+				and Time.get_ticks_msec() - _ps_enter_t >= 5000:
+			GraphicsQuality.exit_protect()
+			print("[PERF] 自适应 GPU 保护档恢复(5s 稳定)")
+			_ps_enter_t = -1e9
+	else:
+		_ps_win_t = 0.0
+		_ps_win_n = 0
 
 	if _validate:
 		_validate = false
 		print("[VALIDATE] 首帧渲染完成 state=", G.state)
 		get_tree().quit()
+
+	# [8/10] 动态质量:帧时间 2s 均值 >33ms 逐级降级;<20ms 且稳定 5s 恢复一级
+	if bool(G.settings.get("auto_quality", true)) and G.state == "playing":
+		_dq_t += dt_raw
+		_dq_n += 1
+		if _dq_t >= 2.0:
+			var dq_avg: float = _dq_t / float(_dq_n)
+			if dq_avg > 0.033 and _dq_level < 5:
+				_dq_level += 1
+				_apply_dq()
+				print("[DQ] 动态降级 -> level %d (帧时间 %.0fms)" % [_dq_level, dq_avg * 1000.0])
+				_dq_t = 0.0
+				_dq_n = 0
+				_dq_stable_t = 0.0
+			elif dq_avg < 0.02 and _dq_level > 0:
+				_dq_stable_t += _dq_t
+				if _dq_stable_t >= 5.0:
+					_dq_level -= 1
+					_apply_dq()
+					print("[DQ] 动态恢复 -> level %d" % [_dq_level])
+					_dq_stable_t = 0.0
+				_dq_t = 0.0
+				_dq_n = 0
+			else:
+				_dq_t = 0.0
+				_dq_n = 0
 
 	# 内存监控:--memwatch(每 5 秒打印帧率/静态内存/对象计数)
 	if _memwatch:
@@ -1311,6 +1587,36 @@ func _process(dt_raw: float) -> void:
 			_memwatch_t = 0.0
 			_memwatch_n = 0
 
+	# QA 性能基准采样:--perf-test(每秒打印 fps/帧时间/最低/内存)
+	if _perf_on:
+		_perf_t += dt_raw
+		var fps_now := Engine.get_frames_per_second()
+		if fps_now > 0.0:
+			_perf_min = minf(_perf_min, fps_now)
+			_perf_max = maxf(_perf_max, fps_now)
+		if _perf_t >= 1.0:
+			_perf_t = 0.0
+			var mem := OS.get_static_memory_usage() / 1048576.0
+			print("[PERF] frame=%d fps=%.1f ft=%.2fms min=%.1f max=%.1f mem=%.0fMB state=%s" % [
+				Engine.get_process_frames(), fps_now, 1000.0 / maxf(fps_now, 0.1),
+				_perf_min, _perf_max, mem, G.state])
+
+	# [8/10] 完整性能基准采样:--bench(逐帧采集,到帧写报告退出)
+	if _bench_on and G.state == "playing":
+		_bench_fts.append(dt_raw * 1000.0)
+		_bench_proc.append(Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0)
+		_bench_phys.append(Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0)
+		_bench_dc.append(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME))
+		_bench_prims.append(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME))
+		_bench_objs.append(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_OBJECTS_IN_FRAME))
+		_bench_nodes.append(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+		_bench_mem.append(OS.get_static_memory_usage() / 1048576.0)
+		_bench_n += 1
+		if _bench_n % 300 == 0:
+			print("[BENCH] 采样中 frame=%d/%d fps=%.1f" % [_bench_n, _bench_target, Engine.get_frames_per_second()])
+		if _bench_n >= _bench_target:
+			_dump_bench()
+
 	# 截图测试:--screenshot <帧号> <输出路径>
 	if _shot_frame > 0:
 		_shot_frame -= 1
@@ -1319,3 +1625,100 @@ func _process(dt_raw: float) -> void:
 			img.save_png(_shot_path)
 			print("[SHOT] 已保存截图: ", _shot_path)
 			get_tree().quit()
+	# QA 帧时间尖峰压测采样:--perf-stress <帧数>
+	if _ps_stress_on:
+		if G.state == "playing" or G.state == "dead":
+			_ps_times.append(dt_raw)
+			_ps_stress_n += 1
+			if dt_raw > 0.25:
+				_ps_gt250 += 1
+			if dt_raw > 0.1:
+				_ps_gt100 += 1
+			if _ps_stress_n % 300 == 0:
+				print("[STRESS] frame=%d fps=%.1f" % [_ps_stress_n, Engine.get_frames_per_second()])
+			if _ps_stress_n >= _ps_stress_target:
+				_dump_stress()
+				get_tree().quit()
+
+
+## [8/10] --bench 结果汇总:avg/min/1%Low FPS + CPU/GPU 帧时间 + DrawCalls/Objects/内存,写 json + 打印
+func _dump_bench() -> void:
+	var n := _bench_fts.size()
+	if n == 0:
+		print("[BENCH] 无采样数据(state 未进入 playing)")
+		return
+	var fts := _bench_fts.duplicate()
+	fts.sort()
+	var total := 0.0
+	for t in _bench_fts:
+		total += t
+	var avg_ms: float = total / n
+	var p1_ms: float = fts[clampi(int(n * 0.99), 0, n - 1)]  # 1% 最差帧时间(99 分位)
+	var p95_ms: float = fts[clampi(int(n * 0.95) - 1, 0, n - 1)]
+	var max_ms: float = fts[n - 1]
+	var avg_fps: float = 1000.0 / maxf(avg_ms, 0.01)
+	var p1_fps: float = 1000.0 / maxf(p1_ms, 0.01)
+	# 聚合
+	var avg_proc := 0.0
+	var avg_phys := 0.0
+	var avg_dc := 0.0
+	var max_dc := 0
+	var avg_prims := 0.0
+	var avg_objs := 0.0
+	var avg_nodes := 0.0
+	var avg_mem := 0.0
+	for i in n:
+		avg_proc += _bench_proc[i]
+		avg_phys += _bench_phys[i]
+		avg_dc += _bench_dc[i]
+		max_dc = maxi(max_dc, _bench_dc[i])
+		avg_prims += _bench_prims[i]
+		avg_objs += _bench_objs[i]
+		avg_nodes += _bench_nodes[i]
+		avg_mem += _bench_mem[i]
+	avg_proc /= n; avg_phys /= n; avg_dc /= n
+	avg_prims /= n; avg_objs /= n; avg_nodes /= n; avg_mem /= n
+	print("[BENCH] ===== 汇总 标签=%s frames=%d =====" % [_bench_label, n])
+	print("[BENCH] avg=%.1ffps(%.2fms) 1%%Low=%.1ffps(%.2fms) p95=%.2fms max=%.2fms" % [avg_fps, avg_ms, p1_fps, p1_ms, p95_ms, max_ms])
+	print("[BENCH] process=%.2fms physics=%.2fms drawcalls=%.0f(max %d) prims=%.0f obj=%.0f nodes=%.0f mem=%.0fMB" % [
+		avg_proc, avg_phys, avg_dc, max_dc, avg_prims, avg_objs, avg_nodes, avg_mem])
+	var cf := ConfigFile.new()
+	var label: String = _bench_label if _bench_label != "" else G.current_map + "_" + G.mode
+	cf.set_value("bench", "label", label)
+	cf.set_value("bench", "frames", n)
+	cf.set_value("bench", "avg_fps", avg_fps)
+	cf.set_value("bench", "avg_ft_ms", avg_ms)
+	cf.set_value("bench", "p1_fps", p1_fps)
+	cf.set_value("bench", "p1_ft_ms", p1_ms)
+	cf.set_value("bench", "p95_ft_ms", p95_ms)
+	cf.set_value("bench", "max_ft_ms", max_ms)
+	cf.set_value("bench", "process_ms", avg_proc)
+	cf.set_value("bench", "physics_ms", avg_phys)
+	cf.set_value("bench", "draw_calls", avg_dc)
+	cf.set_value("bench", "max_draw_calls", max_dc)
+	cf.set_value("bench", "primitives", avg_prims)
+	cf.set_value("bench", "render_objects", avg_objs)
+	cf.set_value("bench", "nodes", avg_nodes)
+	cf.set_value("bench", "mem_mb", avg_mem)
+	var path := "user://perf_bench_" + label + ".cfg"
+	cf.save(path)
+	print("[BENCH] 已写入: ", path)
+	get_tree().quit()
+
+
+## --perf-stress 结果汇总:平均 FPS / 帧时间 p95/p99/max / 尖峰次数(>250ms 单帧 / >100ms)
+func _dump_stress() -> void:
+	var n := _ps_times.size()
+	if n == 0:
+		print("[STRESS] 无采样数据(state 未进入 playing)")
+		return
+	var total := 0.0
+	var sorted := _ps_times.duplicate()
+	sorted.sort()
+	for t in sorted:
+		total += t
+	var p95_ms: float = sorted[clampi(int(n * 0.95) - 1, 0, n - 1)] * 1000.0
+	var p99_ms: float = sorted[clampi(int(n * 0.99) - 1, 0, n - 1)] * 1000.0
+	print("[STRESS] ===== 汇总 ===== frames=%d avg=%.1ffps avg_ft=%.2fms p95=%.2fms p99=%.2fms max=%.2fms >250ms=%d >100ms=%d" % [
+		n, n / total, total / n * 1000.0, p95_ms, p99_ms, sorted[n - 1] * 1000.0, _ps_gt250, _ps_gt100])
+

@@ -47,6 +47,7 @@ var _fly_t := 0.0               # 段内进度
 var _fly_done := false          # 航点播完
 var _intro: Array = []          # intro 台词 [{name, text}]
 var _intro_t := 0.0             # 台词播完后的缓冲计时
+var _intro_last_dur := 0.0      # 最后一句台词有效时长(音频播完再进战斗)
 var _intro_line_i := 0
 var _intro_line_t := 0.0        # 台词逐条间隔
 var _outro: Array = []          # outro 台词
@@ -104,6 +105,7 @@ const _INTERACT_RADIUS := 4.0     # interact 默认交互半径(米)
 ## ============ 对外接口(契约) ============
 func start_chapter(id: String) -> void:
 	_data = {}
+	AudioSys.voice_stop()
 	for c in CampaignData.chapters():
 		if c["id"] == id:
 			_data = c
@@ -166,6 +168,7 @@ func start_chapter(id: String) -> void:
 	if not (_intro is Array):
 		_intro = []
 	_intro_t = 0.0
+	_intro_last_dur = 0.0
 	_intro_line_i = 0
 	_intro_line_t = 1.0
 	_outro = cs.get("outro", _data.get("outro", []))
@@ -216,9 +219,10 @@ func update(dt: float) -> void:
 			_briefing_t -= dt
 			if _briefing_t <= 0 and _briefing_i < _data["briefing"].size():
 				var l: Dictionary = _data["briefing"][_briefing_i]
-				_say(l["name"], l["text"], 4.0)
+				var ld: float = _eff_dur(4.0, str(l.get("vid", "")))
+				_say(l["name"], l["text"], 4.0, str(l.get("vid", "")))
 				_briefing_i += 1
-				_briefing_t = 3.4
+				_briefing_t = ld
 			elif _briefing_i >= _data["briefing"].size() and _briefing_t <= -1.6:
 				_enter_combat()
 		"combat":
@@ -234,9 +238,10 @@ func update(dt: float) -> void:
 			_epilogue_t -= dt
 			if _epilogue_t <= 0 and _epilogue_i < _data["epilogue"].size():
 				var l: Dictionary = _data["epilogue"][_epilogue_i]
-				_say(l["name"], l["text"], 4.5)
+				var ld: float = _eff_dur(4.5, str(l.get("vid", "")))
+				_say(l["name"], l["text"], 4.5, str(l.get("vid", "")))
 				_epilogue_i += 1
-				_epilogue_t = 4.4
+				_epilogue_t = ld
 			elif _epilogue_i >= _data["epilogue"].size() and _epilogue_t <= -2.0:
 				running = false
 				done = true
@@ -321,23 +326,25 @@ func _update_intro(dt: float) -> void:
 			_fly_done = true
 		else:
 			_apply_fly_camera(dt, _fly_seg)
-	# intro 台词逐条字幕(与飞行并行,按台词 dur 定节奏)
+	# intro 台词逐条字幕(与飞行并行,按"音频实际长度+尾音"定节奏,保证字幕/声音/过场同步)
 	_intro_line_t -= dt
 	if _intro_line_t <= 0 and _intro_line_i < _intro.size():
 		var l: Dictionary = _intro[_intro_line_i]
-		var ld: float = float(l.get("dur", 4.0))
-		_say(str(l.get("name", "陈振国上校")), str(l.get("text", "")), ld)
+		var ld: float = _eff_dur(float(l.get("dur", 4.0)), str(l.get("vid", "")))
+		_say(str(l.get("name", "陈振国上校")), str(l.get("text", "")), ld, str(l.get("vid", "")))
 		_intro_line_i += 1
-		_intro_line_t = ld * 0.95
-	# 台词播完后的缓冲计时(与飞行完成共同门控)
+		_intro_line_t = ld
+		if _intro_line_i >= _intro.size():
+			_intro_last_dur = ld
+	# 台词播完后的缓冲计时(等最后一句音频播完 + 0.9s,与飞行完成共同门控)
 	if _intro_line_i >= _intro.size():
-		_intro_t -= dt
+		_intro_t += dt
 	# 跳过:空格 / 开火 / ADS
 	if Input.is_action_just_pressed("jump") or Input.is_action_just_pressed("fire") \
 			or Input.is_action_just_pressed("ads"):
 		_enter_combat()
 		return
-	if _fly_done and _intro_line_i >= _intro.size() and _intro_t <= -0.9:
+	if _fly_done and _intro_line_i >= _intro.size() and _intro_t >= _intro_last_dur + 0.9:
 		_enter_combat()
 
 
@@ -379,6 +386,7 @@ func _safe_look(cam: Camera3D, target: Vector3) -> void:
 func _enter_combat() -> void:
 	if _phase == "combat":
 		return
+	AudioSys.voice_stop()
 	_phase = "combat"
 	_fly_done = true
 	_hide_player_model(false)
@@ -404,10 +412,10 @@ func _update_outro(dt: float) -> void:
 	_outro_t -= dt
 	if _outro_t <= 0 and _outro_i < _outro.size():
 		var l: Dictionary = _outro[_outro_i]
-		var ld: float = float(l.get("dur", 4.5))
-		_say(str(l.get("name", "陈振国上校")), str(l.get("text", "")), ld)
+		var ld: float = _eff_dur(float(l.get("dur", 4.5)), str(l.get("vid", "")))
+		_say(str(l.get("name", "陈振国上校")), str(l.get("text", "")), ld, str(l.get("vid", "")))
 		_outro_i += 1
-		_outro_t = ld * 0.95
+		_outro_t = ld
 	elif _outro_i >= _outro.size() and _outro_t <= -2.0:
 		if not _outro_fade:
 			_outro_fade = true
@@ -499,9 +507,9 @@ func on_player_death() -> void:
 			_fail_fade = true
 			_fail_fade_t = 1.0      # 0.5s 黑屏淡入 + 停留,再发判负(结算屏)
 			pending_transition = "fade_out"
-			_say("陈振国上校", "雪豹小队损失过大,任务中止!全体撤离战区,重新整备后再战。", 4.5)
+			_say("陈振国上校", "雪豹小队损失过大,任务中止!全体撤离战区,重新整备后再战。", 4.5, "sys_fail_chen")
 	else:
-		_say("曹锐", "别慌,我还能上。剩余部署次数:" + str(limit - _deaths), 2.5)
+		_say("曹锐", "别慌,我还能上。剩余部署次数:" + str(limit - _deaths), 2.5, "sys_death_caorui")
 
 
 func objective_text() -> String:
@@ -610,6 +618,7 @@ func abort() -> void:
 	running = false
 	done = false
 	_phase = "idle"
+	AudioSys.voice_stop()
 	_hide_player_model(false)
 	_set_player_invincible(false)
 	_free_destroy_targets()
@@ -817,7 +826,7 @@ func _update_squad(dt: float) -> void:
 	for b in _squad:
 		if b.downed and b.downed_t >= _AUTO_REVIVE_TIME:
 			b.revive(b.pos)
-			_say(b.bot_name, "缓过来了,别管我,继续打!", 2.5)
+			_say(b.bot_name, "缓过来了,别管我,继续打!", 2.5, "sys_squad_revive_" + _voice_suffix(b.bot_name))
 	# 2) 救治:队友倒地 + 玩家 3m 内按住 E → 读条 3s 复活
 	_revive_bot = null
 	if p == null or not p.alive or p.vehicle != null:
@@ -837,7 +846,7 @@ func _update_squad(dt: float) -> void:
 		if _revive_t >= _REVIVE_TIME:
 			_revive_t = 0.0
 			cand.revive(cand.pos)
-			_say(cand.bot_name, "谢了,我还能打。", 2.5)
+			_say(cand.bot_name, "谢了,我还能打。", 2.5, "sys_squad_rescued_" + _voice_suffix(cand.bot_name))
 	else:
 		_revive_t = 0.0
 
@@ -875,8 +884,29 @@ func get_revive_info() -> Dictionary:
 
 
 ## ============ 内部逻辑 ============
-func _say(p_name: String, text: String, dur: float) -> void:
-	dialogue_requested.emit(p_name, text, dur)
+## 台词广播:文字字幕 + 可选对白配音(vid=音频行ID,audio/voice/<vid>.wav)。
+## 有配音时字幕时长按音频实际长度取大(字幕与声音同步消失),配音播放失败则退回纯字幕
+func _say(p_name: String, text: String, dur: float, vid := "") -> void:
+	var ed := _eff_dur(dur, vid)
+	if vid != "":
+		AudioSys.voice(vid)
+	dialogue_requested.emit(p_name, text, ed)
+
+
+## 台词有效时长 = max(数据时长, 音频实际长度 + 0.25s 尾音)。
+## 字幕显示、对白播放与过场节奏统一用它,三者严格同步;音频缺失退回纯字幕时长
+func _eff_dur(ld: float, vid: String) -> float:
+	var vd := AudioSys.voice_duration(vid)
+	return maxf(ld, vd + 0.25) if vd > 0.0 else ld
+
+
+## 队友姓名 → 配音行ID后缀(与 audio/voice 文件名对应)
+func _voice_suffix(bot_name: String) -> String:
+	match bot_name:
+		"林雪": return "linxue"
+		"老周": return "laozhou"
+		"铁柱": return "tiezhu"
+	return "laozhou"
 
 
 func _on_objective_active(obj: Dictionary) -> void:
@@ -984,7 +1014,7 @@ func _play_mid_line() -> void:
 	var i := Utils.rand_int(0, _mid_pool.size() - 1)
 	var l: Dictionary = _mid_pool[i]
 	_mid_pool.remove_at(i)
-	_say(str(l.get("name", "陈振国上校")), str(l.get("text", "")), float(l.get("dur", 3.0)))
+	_say(str(l.get("name", "陈振国上校")), str(l.get("text", "")), float(l.get("dur", 3.0)), str(l.get("vid", "")))
 
 
 ## hold/reach/interact 完成台词:本章 finish_lines 随机一条
@@ -993,7 +1023,7 @@ func _play_finish_line() -> void:
 	if not (arr is Array) or arr.is_empty():
 		return
 	var l: Dictionary = arr[Utils.rand_int(0, arr.size() - 1)]
-	_say(str(l.get("name", "曹锐")), str(l.get("text", "")), float(l.get("dur", 3.0)))
+	_say(str(l.get("name", "曹锐")), str(l.get("text", "")), float(l.get("dur", 3.0)), str(l.get("vid", "")))
 
 
 ## 关键目标完成镜头:0.8s 轻微拉近 + 震动(在玩家相机更新后叠加,不打架)
@@ -1041,7 +1071,7 @@ func _update_objective(dt: float) -> void:
 			if in_r:
 				if not _hold_in:
 					_hold_in = true
-					_say("曹锐", "开始坚守,把他们挡在区域外!", 2.5)
+					_say("曹锐", "开始坚守,把他们挡在区域外!", 2.5, "sys_hold_caorui")
 				_hold_time += dt
 				if _hold_time >= float(_objective.get("time", 0)):
 					_complete_objective()
@@ -1052,7 +1082,7 @@ func _update_objective(dt: float) -> void:
 			if G.player != null and G.player.alive:
 				var pos2: Vector3 = _objective.get("pos", Vector3.ZERO)
 				if Vector2(G.player.pos.x - pos2.x, G.player.pos.z - pos2.z).length() < float(_objective.get("radius", 14)):
-					_say("曹锐", "已抵达" + str(_objective.get("loc", "目标区域")) + "。", 2.5)
+					_say("曹锐", "已抵达" + str(_objective.get("loc", "目标区域")) + "。", 2.5, "sys_reach_caorui")
 					_complete_objective()
 		"interact":
 			_update_interact(dt)
@@ -1094,7 +1124,7 @@ func _update_stall(dt: float) -> void:
 	if _stall_t < _STALL_TIMEOUT:
 		return
 	_stall_t = 0.0
-	_say("陈振国上校", "目标区域附近有敌军阻碍,清除后推进!", 3.5)
+	_say("陈振国上校", "目标区域附近有敌军阻碍,清除后推进!", 3.5, "sys_stall_chen")
 	if str(_objective.get("type", "")) == "boss" and not _boss_done \
 			and (_boss == null or not _boss.alive or _boss_blocked()):
 		if _boss != null and is_instance_valid(_boss) and _boss.alive:
@@ -1130,6 +1160,8 @@ func _complete_objective() -> void:
 	var ot := str(_objective.get("type", ""))
 	var obj := _objective
 	_say("任务", "目标完成:" + str(obj.get("desc", "")), 3.0)
+	if G.hud != null:
+		G.hud.event("◇", "OBJECTIVE COMPLETE", str(obj.get("desc", "")), Color(0.16, 0.78, 0.86))
 	# 关键目标(hold/reach/interact)完成:章节完成台词 + 轻微拉近镜头 + 震动
 	if ot == "hold" or ot == "reach" or ot == "interact":
 		_play_finish_line()
@@ -1153,6 +1185,8 @@ func _complete_objective() -> void:
 		_hide_player_model(true)
 		_set_player_invincible(true)
 		cutscene_card_requested.emit("任务完成", 3.0)
+		if G.hud != null:
+			G.hud.event("★", "MISSION COMPLETE", "全部目标达成 · 任务完成", Color(0.16, 0.78, 0.86))
 	else:
 		_objective = _data["objectives"][objective_index]
 		_on_objective_active(_objective)
@@ -1202,10 +1236,10 @@ func _apply_interact_effect(kind: String) -> void:
 			_interact_apply_pos = pos
 		"defuse":
 			_smoke_puff(pos)
-			_say("铁柱", "雷管拆除了,可以安全通过。", 2.8)
+			_say("铁柱", "雷管拆除了,可以安全通过。", 2.8, "sys_defuse_tiezhu")
 			AudioSys.capture(true)
 		"breach":
-			_say("铁柱", "破门,进!", 1.8)
+			_say("铁柱", "破门,进!", 1.8, "sys_breach_tiezhu")
 			AudioSys.explosion(pos)
 			_smoke_puff(pos)
 			var holder = _interact_visual
@@ -1216,7 +1250,7 @@ func _apply_interact_effect(kind: String) -> void:
 				tw.tween_property(holder, "scale", Vector3(1.06, 0.02, 1.06), 0.3)
 				tw.tween_callback(holder.queue_free)
 		"radio":
-			_say("苏雅", "指挥部收到。电台已接通,工兵组 2 分钟内到——等等,有脚步声,小心!", 3.6)
+			_say("苏雅", "指挥部收到。电台已接通,工兵组 2 分钟内到——等等,有脚步声,小心!", 3.6, "sys_radio_suya")
 			AudioSys.capture(true)
 			_spawn_interact_ambush(pos)
 		"supply":
@@ -1224,10 +1258,10 @@ func _apply_interact_effect(kind: String) -> void:
 			if p != null:
 				p.heal(100.0)
 				p.resupply()
-			_say("林雪", "弹药和医疗包都补满了,打回去!", 2.8)
+			_say("林雪", "弹药和医疗包都补满了,打回去!", 2.8, "sys_supply_linxue")
 			AudioSys.capture(true)
 		"revive_survivor":
-			_say("孟海", "……谢谢,兄弟。情报在我身上,带我出去。", 3.2)
+			_say("孟海", "……谢谢,兄弟。情报在我身上,带我出去。", 3.2, "sys_revive_menghai")
 			AudioSys.capture(true)
 		_:
 			pass
@@ -1537,4 +1571,4 @@ func _spawn_boss(pos: Vector3) -> void:
 	b.spawn(pos)
 	b.health = 800.0
 	b.update_health_bar()
-	_say("陈振国上校", "目标确认——佣兵团首领「白狼」现身!击毙他,战争就结束了!", 4.5)
+	_say("陈振国上校", "目标确认——佣兵团首领「白狼」现身!击毙他,战争就结束了!", 4.5, "sys_boss_chen")

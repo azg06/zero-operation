@@ -22,7 +22,7 @@ jobs:
       # Agent: replace this block after detecting the repository's package manager and build script.
       - name: Build static site
         run: |
-          sed -i 's/minimize_html_build, //' project.godot && mkdir -p web_export && curl -fsSL --retry 3 -o godot.zip https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip && curl -fsSL --retry 3 -o templates.tpz https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_export_templates.tpz && unzip -q godot.zip && mkdir -p templates_tmp && unzip -q templates.tpz -d templates_tmp && mkdir -p $HOME/.local/share/godot/export_templates/4.7.1.stable && cp -r templates_tmp/templates/* $HOME/.local/share/godot/export_templates/4.7.1.stable/ && ./Godot_v4.7.1-stable_linux.x86_64 --headless --path . --export-release Web web_export/index.html
+          sed -i 's/"minimize_html_build", //' project.godot && mkdir -p web_export && curl -fsSL --retry 3 -o godot.zip https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip && curl -fsSL --retry 3 -o templates.tpz https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_export_templates.tpz && unzip -q godot.zip && mkdir -p templates_tmp && unzip -q templates.tpz -d templates_tmp && mkdir -p $HOME/.local/share/godot/export_templates/4.7.1.stable && cp -r templates_tmp/templates/* $HOME/.local/share/godot/export_templates/4.7.1.stable/ && ./Godot_v4.7.1-stable_linux.x86_64 --headless --path . --export-release Web web_export/index.html
 
       - name: Install verified VibeHub CLI
         if: github.event_name == 'push'

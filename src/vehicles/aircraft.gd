@@ -119,7 +119,9 @@ func _eng_set_gear(gear: int) -> void:
 	if _eng_tween != null:
 		_eng_tween.kill()
 	_eng_tween = old.create_tween()
-	_eng_tween.tween_property(old, "volume_db", -60.0, 0.15)
+	# 起点夹取:旧 player 音量可能已是 -inf(linear_to_db(0)),直接由此插值会得 NaN,
+	# 故 from 起点钳到 -60dB 以上,确保 lerp 数值有效
+	_eng_tween.tween_property(old, "volume_db", -60.0, 0.15).from(maxf(old.volume_db, -60.0))
 	_eng_tween.tween_callback(old.stop)
 	var newp := _eng_player()
 	newp.stop()
@@ -153,11 +155,11 @@ func _eng_update_sound(speed_ratio: float, vol_target: float, dt: float) -> void
 	if _eng_fade_in_t > 0:
 		_eng_fade_in_t -= dt
 		if _eng_fade_in_t > 0:
-			p.volume_db = linear_to_db(maxf(lerpf(0.004, _eng_vol, 1.0 - _eng_fade_in_t / 0.25), 0.0))
+			p.volume_db = linear_to_db(maxf(lerpf(0.004, _eng_vol, 1.0 - _eng_fade_in_t / 0.25), 0.0001))
 			return
 	# 稳态:音量平滑跟踪;目标≈0 时淡出至静音阈值后才停,防止静音下反复播放/停止
 	if _eng_vol <= 0.004:
-		p.volume_db = linear_to_db(maxf(_eng_vol, 0.0))
+		p.volume_db = linear_to_db(maxf(_eng_vol, 0.0001))
 		if p.playing and p.volume_db <= linear_to_db(0.008):
 			p.stop()
 	elif not p.playing:
@@ -165,11 +167,7 @@ func _eng_update_sound(speed_ratio: float, vol_target: float, dt: float) -> void
 		p.volume_db = linear_to_db(maxf(_eng_vol, 0.02))
 		p.play()
 	else:
-		p.volume_db = linear_to_db(maxf(_eng_vol, 0.0))
-
-
-func alive() -> bool:
-	return not dead
+		p.volume_db = linear_to_db(maxf(_eng_vol, 0.0001))
 
 
 func _spawn() -> void:
@@ -640,6 +638,11 @@ func update_aircraft(dt: float) -> void:
 		vel.x = Utils.damp(vel.x, to_x / d_goal * eff_speed, 0.9, dt)
 		vel.z = Utils.damp(vel.z, to_z / d_goal * eff_speed, 0.9, dt)
 	else:
+		# 到点不停留:巡航模式抵达巡航点立即换点继续飞行,
+		# 避免悬停"卡在空中"不动(失速下坠又被高度弹簧拉回,看似冻结)
+		if mode == "cruise":
+			wp_t = 0.0
+			_pick_waypoint()
 		vel.x = Utils.damp(vel.x, 0, 1.8, dt)
 		vel.z = Utils.damp(vel.z, 0, 1.8, dt)
 	airspeed = Vector2(vel.x, vel.z).length()
@@ -727,9 +730,11 @@ func _update_jet(dt: float) -> void:
 		mesh.visible = true
 		vel = Vector3(dir.x * 78, -6, dir.z * 78)
 		return
-	# 沿航线飞行(受损减速:耐久越低航速越慢)
+	# 沿航线飞行(受损减速:按耐久一次性压低巡航速度,而非逐帧倍减——
+	# 逐帧乘 (0.45+0.55*cap) 会让速度指数衰减到 1m/s,战机"卡死"在空中/原地垂直爬升)
 	var cap2: float = clampf(hp / max_hp, 0.0, 1.0)
-	vel = Utils.safe_norm(vel, Vector3.FORWARD) * maxf(vel.length() * (0.45 + 0.55 * cap2), 1.0)
+	var cruise := 78.0 * (0.45 + 0.55 * cap2)
+	vel = Utils.safe_norm(vel, Vector3.FORWARD) * maxf(cruise, 1.0)
 	pos += vel * dt
 	if _eng_a != null:
 		_eng_a.position = pos  # 位置在移动结算后同步(1 帧 78m/s,前置会偏 1.3m)

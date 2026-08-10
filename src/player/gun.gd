@@ -30,6 +30,7 @@ var sway_x := 0.0
 var sway_y := 0.0
 var draw_t := 1.0               # 拔枪动画
 var trigger_held := false
+var fire_mode := 0              # 0=全自动 1=半自动(B 键切换;仅步枪可切换)
 var equipped := false
 var bolt_t := 0.0               # 拉栓动画(AWM/M24)
 var pump_t := 0.0               # 泵动动画(M1014)
@@ -64,7 +65,6 @@ var _pump_base := Vector3.ZERO
 var _slide: MeshInstance3D = null
 var _slide_base_z := 0.0
 var _rocket: Node3D = null              # 火箭筒膛内弹(换弹时隐藏→装入)
-var scope_ads := false                  # 历史:4倍镜改装用(满开镜全屏放大+隐藏枪身);4x 移除后恒为 false,保留兼容(def.scope 驱动镜罩)
 var _bullet_type := 0                    # 0=rifle 1=sniper 2=shotgun 3=pistol
 
 var _right_hand: Node3D = null
@@ -165,16 +165,16 @@ func _apply_mods() -> void:
 		nd.mag = maxi(1, def.mag + mag_extra)
 		nd.reserve = maxi(0, def.reserve + mag_extra)
 		def = nd
-	# === optic 视野决策:红点/全息近无放大(BF 手感);4倍镜改装已移除 ===
+	# === optic 视野决策:红点 zoom_fov 50(≈1.5x 微放大)/全息 55(机瞄同等);4倍镜改装已移除 ===
 	# 决策规则:改装件 id 判定(opt_std 不干预);狙击枪(def.scope)自带 zoom_fov 数据值更小,
 	# 任何 optic 改装都不覆盖其 zoom(红点/全息只换镜模型),避免削弱狙击本体的开镜倍率。
 	var optic_id: String = String(mods_cfg.get("optic", "opt_std"))
 	if (optic_id == "opt_reddot" or optic_id == "opt_holo") and not def.scope:
-		# 红点/全息:近无放大(仅轻微收 FOV 的 BF 手感);狙击不覆盖
+		# 红点:轻微放大(75→50 FOV,≈1.5x);全息:与机瞄同倍(55);狙击不覆盖
 		# 纯标准件组合时 def 仍是全局表引用:先构建副本再写,不污染 WeaponsData 全局表
 		if def == WeaponsData.W()[id]:
 			def = WeaponModsData.clone_def(def)
-		def.zoom_fov = 78.0
+		def.zoom_fov = 50.0 if optic_id == "opt_reddot" else 55.0
 	mag_cap = def.mag
 	print("[MODS] %s 应用了 %d 个改装件" % [id, applied])
 
@@ -219,6 +219,23 @@ func current_spread() -> float:
 	s += p.suppression * 0.9  # 压制降低精度
 	s += bloom * (1 - ads_amount * 0.45)
 	return s * _spread_mult * (PI / 180.0)
+
+
+## B 键切换射击模式:全自动 ⇄ 半自动(仅步枪;半自动=按一下打一发)
+func toggle_fire_mode() -> void:
+	if def.kind != "rifle":
+		AudioSys.dry_fire()
+		return
+	fire_mode = 1 - fire_mode
+	_semi_ready = true
+	AudioSys.ui()
+	if G.hud != null and G.hud.has_method("hint"):
+		G.hud.hint("射击模式: " + ("半自动(单发)" if fire_mode == 1 else "全自动"))
+
+
+## 是否半自动模式(供 HUD 显示)
+func is_semi() -> bool:
+	return fire_mode == 1
 
 
 func try_fire() -> void:
@@ -439,6 +456,10 @@ func _reload_duration() -> float:
 func update(dt: float) -> void:
 	if not equipped:
 		return
+	var g := group
+	# 防悬空:换枪/BR 剥装时序下 group 可能已被 queue_free(帧末销毁),跳过本帧
+	if not is_instance_valid(g):
+		return
 	var p = player
 	fire_timer -= dt
 	draw_t = minf(1, draw_t + dt / 0.28)
@@ -447,12 +468,13 @@ func update(dt: float) -> void:
 	if G.time - last_shot_t > def.recoil_recover:
 		shot_streak = 0
 
-	# 扳机
-	if trigger_held and (def.auto or _semi_ready):
+	# 扳机(全自动=按住连发;半自动/手动切半自动=按下沿单发)
+	var auto_fire: bool = def.auto and fire_mode == 0
+	if trigger_held and (auto_fire or _semi_ready):
 		try_fire()
 	if not trigger_held:
 		_semi_ready = true
-	elif not def.auto:
+	elif not auto_fire:
 		_semi_ready = false
 
 	# 换弹
@@ -492,7 +514,6 @@ func update(dt: float) -> void:
 		ads_amount = Utils.damp(ads_amount, ads_target, 2.6 / maxf(def.ads_time, 0.05), dt)
 
 	# === 视角模型运动 ===
-	var g := group
 	g.position = _hip_pos.lerp(_ads_pos, ads_amount)
 	g.rotation = Vector3.ZERO
 	# 拔枪/收枪
@@ -752,8 +773,8 @@ func update(dt: float) -> void:
 			# 幅度 0.06 ≈ 护木长度一半,行程醒目
 			_pump.position.z = _pump_base.z - sin(pt * PI) * 0.06
 			g.rotation.x += sin(pt * PI) * 0.06
-	# === 旧方案恢复:镜罩武器(def.scope 狙击,scope_ads 兼容位)满开镜隐藏枪身,2D 镜罩接管画面 ===
-	if def.scope or scope_ads:
+	# === 旧方案恢复:镜罩武器(def.scope 狙击)满开镜隐藏枪身,2D 镜罩接管画面 ===
+	if def.scope:
 		g.visible = ads_amount < 0.7 and draw_t > 0.1
 
 

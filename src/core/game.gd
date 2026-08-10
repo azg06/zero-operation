@@ -2,7 +2,6 @@
 ## 征服/突破模式核心逻辑(对应 game.js):命中判定 / 爆炸 / 旗帜占领 / 兵力值 / 击杀
 
 var drain_t := 0.0
-var arty = null                        # 炮火支援 { pos, shells, interval, t }
 var nv_spot_t := 0.0                   # 夜视仪索敌计时(每 0.3s 刷新标记)
 var _bt_oob := {}                      # 突破模式越界遣返 { actor -> 剩余宽限秒 }
 const BT_OOB_PLAYER := 2.8             # 玩家越界宽限(秒)
@@ -32,7 +31,11 @@ func in_cutscene() -> bool:
 static func _hitscan_actor(actor, shooter, s_team, origin: Vector3, dir: Vector3, max_d: float) -> Dictionary:
 	if actor is Object and shooter is Object and is_same(actor, shooter):
 		return {}
-	if actor.team == s_team:
+	# BR 自由混战:同 squad 为友(玩家=队 0),其余皆敌 —— 阵营 team 字段在 BR 下不用于敌我
+	if G.mode == "br":
+		if Bot.br_same_squad(shooter, actor):
+			return {}
+	elif actor.team == s_team:
 		return {}
 	if actor.alive == false:
 		return {}
@@ -60,8 +63,14 @@ static func _hitscan_actor(actor, shooter, s_team, origin: Vector3, dir: Vector3
 
 ## ============ 地图构建(选图即时生效) ============
 func setup_map(map_id: String) -> void:
+	# 实时 3D 部署中换图:先释放旧环境的状态(去雾/遮挡),世界重建后重新应用
+	var dep_was_active: bool = G.deployment != null and G.deployment.active
+	if dep_was_active:
+		G.deployment._setup_view_cleanup(false)
 	WorldBuilder.build_world(G.world_root, map_id)
 	GraphicsQuality.reapply()  # 环境被重建,重挂画质预设(SSIL/SSR/glow 等)
+	if dep_was_active:
+		G.deployment._setup_view_cleanup(true)
 	for v in G.vehicles:
 		v.dispose()
 	G.vehicles = []
@@ -88,6 +97,9 @@ func setup_map(map_id: String) -> void:
 		elif G.hud.spawn_point != null and G.hud.spawn_point is Dictionary:
 			if G.hud.spawn_point.get("kind") == "beacon":
 				G.hud.spawn_point = null  # 信标网格已销毁
+		# 小队部署点(选中的队友 bot 实例)同随 bot_manager 重建失效,一并清理防悬空引用
+		if G.hud.spawn_mate != null and G.hud.spawn_mate is Object and not is_instance_valid(G.hud.spawn_mate):
+			G.hud.spawn_mate = null
 	# 突破模式:全部目标点初始由防守方控制,仅当前区域可争夺
 	# 防御:build_world 已对无效 map_id 安全返回,此处键访问前置校验防中途中止
 	if not MapsData.M().has(map_id):
@@ -122,10 +134,17 @@ func start_match(mode := "conquest") -> void:
 	var cm = G.get("campaign")
 	if cm != null:
 		cm.abort()  # 切回任意模式前终止战役残留状态
+	# 开局/换模式:退出任何残留的实时 3D 部署状态(如对局结束瞬间死亡)
+	if G.deployment != null and G.deployment.active:
+		G.deployment.exit()
 	if G.hud != null:
 		G.hud.clear_campaign_ui()  # 清战役 UI 残留(目标/字幕/点名卡/箭头)
 	if mode == "campaign":
 		_start_campaign()
+		return
+	if mode == "tdm" or mode == "br":
+		# 门户模式(团队死斗/大逃杀):由 Portal 接管,跳过征服/突破专属初始化
+		_start_portal(mode)
 		return
 	G.mode = mode
 	var pool := []
@@ -147,9 +166,6 @@ func start_match(mode := "conquest") -> void:
 	G.time = 0
 	G.stats = { "kills": 0, "deaths": 0 }
 	G.streak = 0
-	G.streak_uav = false
-	G.streak_arty = false
-	arty = null
 	if mode == "breakthrough":
 		# 突破模式:进攻方(玩家方)兵力有限,防守方无限
 		# 新对局默认玩家为进攻方(世界攻防方向固定 us=进攻 / ru=防守,玩家只选自己的阵营)
@@ -160,12 +176,68 @@ func start_match(mode := "conquest") -> void:
 		G.tickets = { "us": 400, "ru": 400 }
 		G.bt = null
 	G.state = "deploy"
-	G.bot_manager.reset(11)
+	# [BALANCE 8/10] 突破模式:防守方(ru)兵力 11→8(削弱 25%),进攻方 11 保持;
+	# 地图拉大(360→420)后出生区外推,配合封锁线 45m 出生点保护,消除"出门团灭"
+	G.bot_manager.reset(23, -3 if mode == "breakthrough" else 1)
 	G.hud.spawn_point = null
 	G.hud.spawn_mate = null
 	G.hud.hide_screen("death")
-	G.hud.show_deploy(false)
+	# 开局即进入实时 3D 战场部署(兵种/武器栏与战场同屏一体);异常兜底退回旧式部署屏
+	if G.deployment == null or not G.deployment.enter_match_deploy():
+		G.hud.show_deploy(false)
 	AudioSys.start_ambient()
+
+
+## 门户模式(TDM/BR)开局:地图池过滤与 conquest 一致(mode 字段匹配),
+## 不建旗/不设 tickets/不进入部署屏——对局由 PortalManager 模式控制器接管
+const PORTAL_BOT_COUNTS := { "tdm": 11, "br": 5 }  # 每队 AI 数(模式可按需调整)
+
+
+func _start_portal(mode: String) -> void:
+	G.mode = mode
+	var pool := []
+	for id in MapsData.M():
+		var m = MapsData.M()[id]
+		if mode == "tdm":
+			# TDM 地图池:tdm 专属图(tdm_city)+ tdm_ok 主题图(5 张:city/desert/snow/bt_jungle/bt_harbor;
+			# 夜战 bt_peak 无 tdm_ok 标记,自动排除)
+			if m.mode == "tdm" or m.tdm_ok:
+				pool.append(id)
+		elif (m.mode if m.mode != "" else "conquest") == mode:
+			pool.append(id)
+	if mode == "tdm":
+		print("[TDM] 地图池(%d张): %s" % [pool.size(), pool])
+	var sel: String = G.sel_maps.get(mode, "random")
+	# 防御:地图池为空(地图 Agent 尚未提供 tdm/br 地图)时中止开局,不崩溃
+	if pool.is_empty():
+		push_error("[GAME] 无可用地图(mode=%s),已中止开局" % mode)
+		return
+	var map_id: String = Utils.choice(pool) if sel == "random" else sel
+	if not MapsData.M().has(map_id):
+		push_error("[GAME] 未知地图 id \"%s\",已中止开局" % map_id)
+		return
+	setup_map(map_id)
+	G.time = 0
+	G.stats = { "kills": 0, "deaths": 0 }
+	G.streak = 0
+	G.bt = null
+	G.state = "playing"  # 门户模式不进部署屏,出生/重生由模式控制器安排
+	G.bot_manager.reset(PORTAL_BOT_COUNTS.get(mode, 5))
+	G.hud.spawn_point = null
+	G.hud.spawn_mate = null
+	G.hud.hide_screen("death")
+	G.hud.hide_screen("deploy")
+	AudioSys.start_ambient()
+	if G.portal == null:
+		push_error("[GAME] PortalManager 未装配,门户模式无法启动")
+		return
+	G.portal.start_mode(mode, map_id)
+	# 菜单流无 deploy 屏:玩家出生由模式控制器完成,补 HUD 显示 + 鼠标捕获
+	# (与 _start_campaign → deploy() 的契约一致;BR 内部已 lock 此处幂等,
+	#  TDM 出生路径原缺 → 首局无 UI/鼠标不捕获,死亡复活后才补齐)
+	if G.player != null and G.player.alive:
+		G.hud.show_screen("hud")
+		G.input_sys.lock()
 
 
 ## ============ 战役模式:章节地图 + 玩家自动部署 + 战役控制器接管 ============
@@ -186,9 +258,6 @@ func _start_campaign() -> void:
 	G.time = 0
 	G.stats = { "kills": 0, "deaths": 0 }
 	G.streak = 0
-	G.streak_uav = false
-	G.streak_arty = false
-	arty = null
 	G.bt = null
 	G.tickets = { "us": INF, "ru": INF }  # 战役胜负由章节目标决定,不受票数影响
 	G.player.team = "us"
@@ -229,7 +298,10 @@ func set_bt_side(side: String) -> void:
 			break
 
 
-func deploy(class_id: String, loadout) -> void:
+func deploy(class_id: String, loadout, force_pos: Variant = null) -> void:
+	# 直接部署入口(测试/兜底):先退出任何活跃的实时 3D 部署态,防止部署层与战斗相机互相覆盖
+	if G.deployment != null and G.deployment.active:
+		G.deployment.exit()
 	G.player.class_id = class_id
 	G.player.loadout = loadout
 	# 战役模式:固定出生点(章节起始/最近完成据点),跳过部署界面选点
@@ -247,37 +319,45 @@ func deploy(class_id: String, loadout) -> void:
 			cm.apply_cutscene_state()  # 过场中:重新隐藏玩家模型 + 无敌(deploy 重置了它们)
 		G.hud.banner(cm.objective_text() if cm != null and cm.running else "战役进行中")
 		return
-	# 小队部署:优先部署在选中小队成员身旁
-	var sm = G.hud.spawn_mate
-	var sp = G.hud.spawn_point
-	# 悬空引用防护(换图后旧旗帜实例已销毁)
-	if sp != null and not (sp is Dictionary) and not is_instance_valid(sp):
-		sp = null
-		G.hud.spawn_point = null
-	if sm != null and sm.alive and sm.vehicle == null:
-		var a := Utils.rand(TAU)
-		var r := Utils.rand(2.5, 5)
-		var px = sm.pos.x + cos(a) * r
-		var pz = sm.pos.z + sin(a) * r
-		G.player.spawn(Vector3(px, G.ground_h.call(px, pz) if G.ground_h.is_valid() else 0.0, pz))
-	elif sp != null and sp is Dictionary and sp.get("kind") == "beacon" and sp["team"] == G.player.team \
-			and (G.mode != "breakthrough" or G.bt == null \
-				or ((sp["pos"].z >= bt_rear_z()) if G.player.team == "ru" else (sp["pos"].z <= bt_front_z()))):
-		# 重生信标部署(侦察兵部署点)
-		var a3 := Utils.rand(TAU)
-		var r3 := Utils.rand(2, 4)
-		var px3 = sp["pos"].x + cos(a3) * r3
-		var pz3 = sp["pos"].z + sin(a3) * r3
-		G.player.spawn(Vector3(px3, G.ground_h.call(px3, pz3) if G.ground_h.is_valid() else 0.0, pz3))
-	elif sp != null and sp.owner_team == G.player.team \
-			and (G.mode != "breakthrough" or G.bt == null or sp.sector <= G.bt["sector"]):
-		var a2 := Utils.rand(TAU)
-		var r2 := Utils.rand(6, 12)
-		var px2 = sp.pos.x + cos(a2) * r2
-		var pz2 = sp.pos.z + sin(a2) * r2
-		G.player.spawn(Vector3(px2, G.ground_h.call(px2, pz2) if G.ground_h.is_valid() else 0.0, pz2))
+	# 载具部署(实时 3D 部署系统):直接在指定位置生成
+	if force_pos != null:
+		G.player.spawn(force_pos)
 	else:
-		spawn_actor(G.player)
+		# 小队部署:优先部署在选中小队成员身旁
+		var sm = G.hud.spawn_mate
+		var sp = G.hud.spawn_point
+		# 悬空引用防护(换图后旧旗帜实例已销毁)
+		if sp != null and not (sp is Dictionary) and not is_instance_valid(sp):
+			sp = null
+			G.hud.spawn_point = null
+		# 悬空引用防护(换图/重开对局后旧队友 bot 实例已销毁;与 spawn_point 同级别)
+		if sm != null and not is_instance_valid(sm):
+			sm = null
+			G.hud.spawn_mate = null
+		if sm != null and sm.alive and sm.vehicle == null:
+			var a := Utils.rand(TAU)
+			var r := Utils.rand(2.5, 5)
+			var px = sm.pos.x + cos(a) * r
+			var pz = sm.pos.z + sin(a) * r
+			G.player.spawn(Vector3(px, G.ground_h.call(px, pz) if G.ground_h.is_valid() else 0.0, pz))
+		elif sp != null and sp is Dictionary and sp.get("kind") == "beacon" and sp["team"] == G.player.team \
+				and (G.mode != "breakthrough" or G.bt == null \
+					or ((sp["pos"].z >= bt_rear_z()) if G.player.team == "ru" else (sp["pos"].z <= bt_front_z()))):
+			# 重生信标部署(侦察兵部署点)
+			var a3 := Utils.rand(TAU)
+			var r3 := Utils.rand(2, 4)
+			var px3 = sp["pos"].x + cos(a3) * r3
+			var pz3 = sp["pos"].z + sin(a3) * r3
+			G.player.spawn(Vector3(px3, G.ground_h.call(px3, pz3) if G.ground_h.is_valid() else 0.0, pz3))
+		elif sp != null and sp.owner_team == G.player.team \
+				and (G.mode != "breakthrough" or G.bt == null or sp.sector <= G.bt["sector"]):
+			var a2 := Utils.rand(TAU)
+			var r2 := Utils.rand(6, 12)
+			var px2 = sp.pos.x + cos(a2) * r2
+			var pz2 = sp.pos.z + sin(a2) * r2
+			G.player.spawn(Vector3(px2, G.ground_h.call(px2, pz2) if G.ground_h.is_valid() else 0.0, pz2))
+		else:
+			spawn_actor(G.player)
 	G.hud.hide_screen("deploy")
 	G.hud.hide_screen("death")
 	G.hud.show_screen("hud")
@@ -286,11 +366,15 @@ func deploy(class_id: String, loadout) -> void:
 	AudioSys.deploy_sting()
 	if G.mode == "breakthrough":
 		G.hud.banner("突破敌军防线,夺取全部区域!进攻方兵力有限!" if G.bt_player_side == "att" else "坚守防线,消灭进攻方!防守方兵力无限!")
-	else:
-		G.hud.banner("夺取并守住旗帜!")
+	elif G.mode != "tdm" and G.mode != "br":
+		G.hud.banner("夺取并守住旗帜!")  # 门户模式横幅由模式控制器/UI 负责
 
 
 func redeploy() -> void:
+	# 大逃杀:无重生机制,死亡后进入观战(死亡界面"重生"按钮兜底提示)
+	if G.mode == "br":
+		G.hud.hint("大逃杀:阵亡后进入观战模式(按 Tab 切换视角)")
+		return
 	G.hud.hide_screen("death")
 	if G.mode == "campaign":
 		# 战役:不进部署屏,直接在最近据点重生(线性关卡无部署系统)
@@ -340,7 +424,9 @@ func spawn_actor(actor) -> void:
 
 
 ## ============ 命中判定(射击游戏核心) ============
+## [PERF] P0-3:球探针前先做射线 XZ 投影预过滤(命中段外/侧偏必不中者直接跳过)
 func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vector3) -> void:
+	var _bt0 := Time.get_ticks_usec() if Utils._bench else 0
 	var max_dist := 300.0
 	# 1. 墙体
 	var wall = Utils.raycast_world(origin, dir, max_dist)
@@ -349,13 +435,20 @@ func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vecto
 	var hit_actor = null
 	var hit_head := false
 	var s_team = dget(shooter, "team")
+	var thr := 0.43 * 0.43  # 最大探针半径 0.42(胸)+FP 余量
 	for b in G.bots:
-		var hit: Dictionary = _hitscan_actor(b, shooter, s_team, origin, dir, best_dist)
-		if not hit.is_empty():
-			best_dist = hit["dist"]
-			hit_actor = hit["actor"]
-			hit_head = hit["head"]
-	if G.player != null and s_team != G.player.team:
+		var miss := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, b.pos.x, b.pos.z, best_dist)
+		if miss < 0.0 or miss <= thr:
+			var hit: Dictionary = _hitscan_actor(b, shooter, s_team, origin, dir, best_dist)
+			if not hit.is_empty():
+				best_dist = hit["dist"]
+				hit_actor = hit["actor"]
+				hit_head = hit["head"]
+	# BR 下玩家可被任何非队友攻击(team 字段不参与判定);常规模式按阵营
+	var can_hit_player: bool = s_team != G.player.team
+	if G.mode == "br":
+		can_hit_player = not Bot.br_same_squad(shooter, G.player)
+	if G.player != null and can_hit_player:
 		var phit: Dictionary = _hitscan_actor(G.player, shooter, s_team, origin, dir, best_dist)
 		if not phit.is_empty():
 			best_dist = phit["dist"]
@@ -369,41 +462,53 @@ func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vecto
 			continue
 		if v.driver != null and s_team != null and v.driver.team == s_team:
 			continue
-		var v_pos := Vector3(v.pos.x, v.pos.y + 1.2, v.pos.z)
-		var d := Utils.ray_sphere(origin, dir, v_pos, v.def["radius"] + 0.35, best_dist)
-		if d >= 0:
-			best_dist = d
-			hit_vehicle = v
-			hit_actor = null
+		var rv: float = v.def["radius"] + 0.35
+		var mv := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, v.pos.x, v.pos.z, best_dist)
+		if mv < 0.0 or mv <= rv * rv:
+			var v_pos := Vector3(v.pos.x, v.pos.y + 1.2, v.pos.z)
+			var d := Utils.ray_sphere(origin, dir, v_pos, rv, best_dist)
+			if d >= 0:
+				best_dist = d
+				hit_vehicle = v
+				hit_actor = null
 	# 4. 空中载具(直升机/战斗机)
 	for a in G.aircraft:
 		if a.dead:
 			continue
 		if s_team != null and a.team == s_team:
 			continue
-		var d2 := Utils.ray_sphere(origin, dir, a.pos, a.radius, best_dist)
-		if d2 >= 0:
-			best_dist = d2
-			hit_vehicle = a
-			hit_actor = null
+		var ma := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, a.pos.x, a.pos.z, best_dist)
+		if ma < 0.0 or ma <= a.radius * a.radius:
+			var d2 := Utils.ray_sphere(origin, dir, a.pos, a.radius, best_dist)
+			if d2 >= 0:
+				best_dist = d2
+				hit_vehicle = a
+				hit_actor = null
 	# 5. 可破坏物(油桶/木箱/棚屋,子弹可击毁)
 	var hit_ds = null
 	for ds in G.destructibles:
 		if ds.dead:
 			continue
-		var d3 := Utils.ray_sphere(origin, dir, ds.pos, ds.radius, best_dist)
-		if d3 >= 0:
-			best_dist = d3
-			hit_ds = ds
-			hit_actor = null
-			hit_vehicle = null
+		# 粗筛参考点用盒近面:ds.pos 是盒中心(沿射线投影 > 盒面 best 会被误杀——油箱打不坏回归)
+		var _cc: Vector3 = ds.collider.get_center()
+		var _hx: float = ds.collider.size.x * 0.5
+		var _hz: float = ds.collider.size.z * 0.5
+		var md := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, _cc.x - dir.x * _hx, _cc.z - dir.z * _hz, best_dist)
+		if md < 0.0 or md <= ds.radius * ds.radius:
+			# 用真实碰撞盒判定(球半径可能小于盒半对角,球面判定会漏——战役油箱等打不坏)
+			var d3 := Utils.ray_box(origin, dir, ds.collider, best_dist)
+			if d3 >= 0:
+				best_dist = d3
+				hit_ds = ds
+				hit_actor = null
+				hit_vehicle = null
 
 	var end: Vector3 = origin + dir * best_dist
 	# 曳光弹(从枪口出发)
 	G.effects.tracer(muzzle_pos, end, dget(def, "tracer", Color(1, 0.85, 0.63)))
 
 	# 压制效果(BF):敌方子弹掠过玩家附近
-	if G.player.alive and s_team != G.player.team and hit_actor != G.player:
+	if G.player.alive and can_hit_player and hit_actor != G.player:
 		var to_p: Vector3 = G.camera.global_position - origin
 		var t := to_p.dot(dir)
 		if t > 0 and t < best_dist:
@@ -434,6 +539,8 @@ func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vecto
 		else:
 			G.effects.blood(end, dir)
 			hit_actor.take_damage(dmg, shooter, hit_head, def)
+		# 门户模式伤害登记(助攻判定;模式未实现 on_damage 时跳过)
+		_portal_damage(shooter, hit_actor, dmg)
 		if is_player_shooter and hit_actor != G.player:
 			var killed: bool = hit_actor.alive == false
 			G.hud.show_hitmarker(killed, hit_head)
@@ -466,6 +573,9 @@ func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vecto
 		G.effects.impact(end, -dir)
 	elif wall != null:
 		G.effects.impact(end, wall["normal"])
+	if Utils._bench:
+		Utils._bench_fh_t += Time.get_ticks_usec() - _bt0
+		Utils._bench_fh_n += 1
 
 
 ## ============ 重生信标(侦察兵:小队隐蔽重生点,持续 90 秒) ============
@@ -522,6 +632,7 @@ func spawn_beacon(p_owner) -> void:
 	AudioSys.reload(1)
 	if p_owner == G.player:
 		G.hud.hint("重生信标已部署:小队可在此重生(90 秒)")
+		G.hud.event("◆", "SQUAD SPAWN READY", "重生信标已部署 · 小队可在此重生", Color(0.16, 0.78, 0.86))
 
 
 ## ============ C5 炸药(突击兵:定时 4 秒,大威力反工事/载具) ============
@@ -732,15 +843,24 @@ func explode(pos: Vector3, radius: float, max_dmg: float, attacker) -> void:
 		if d < radius:
 			var is_self: bool = attacker is Object and is_same(b, attacker)
 			var dmg: float = max_dmg * (1 - d / radius) * (0.5 if is_self else 1.0)
-			if b.team != a_team or is_self:
+			# BR:同 squad 免伤(自己手雷例外);常规模式按阵营
+			var can_hurt: bool = b.team != a_team or is_self
+			if G.mode == "br":
+				can_hurt = is_self or not Bot.br_same_squad(attacker, b)
+			if can_hurt:
 				b.take_damage(dmg, attacker, false, { "name": "爆炸物", "cn": "爆炸物" })
+				_portal_damage(attacker, b, dmg)
 	# 玩家(过场期间无敌)
 	if G.player != null and G.player.alive and not in_cutscene():
 		var d2: float = G.player.pos.distance_to(pos)
 		if d2 < radius:
 			var is_self2: bool = attacker is Object and is_same(G.player, attacker)
-			var dmg2: float = max_dmg * (1 - d2 / radius) * (0.5 if is_self2 else 1.0)
-			G.player.damage(dmg2, pos, attacker)
+			# BR:队友手雷不伤玩家(自己手雷照常 0.5 倍)
+			var friendly_splash: bool = not is_self2 and G.mode == "br" and Bot.br_same_squad(attacker, G.player)
+			if not friendly_splash:
+				var dmg2: float = max_dmg * (1 - d2 / radius) * (0.5 if is_self2 else 1.0)
+				G.player.damage(dmg2, pos, attacker)
+				_portal_damage(attacker, G.player, dmg2)
 	# 载具受爆炸伤害(3 倍)
 	for v in G.vehicles:
 		if v.dead:
@@ -765,29 +885,40 @@ func explode(pos: Vector3, radius: float, max_dmg: float, attacker) -> void:
 
 
 ## ============ 击杀 ============
+## 门户模式伤害登记(bot.take_damage / player.damage 的等价拦截点,供模式助攻判定;
+## 模式控制器未实现 on_damage 时自动跳过)
+func _portal_damage(attacker, victim, amount: float) -> void:
+	var pm = G.portal
+	if pm == null or pm.active == null:
+		return
+	if pm.active.has_method("on_damage"):
+		pm.active.on_damage(attacker, victim, amount)
+
+
 func on_kill(killer, victim, def, head: bool) -> void:
 	if victim == null:
 		return
 	var v_team = victim.team
-	# 兵力值(突破模式防守方兵力无限,不扣减)
-	if v_team == "us":
-		G.tickets["us"] -= 1
-	elif not is_inf(G.tickets["ru"]):
-		G.tickets["ru"] -= 1
+	# 门户模式(TDM/BR):胜负由模式控制器判定,不扣减征服兵力票
+	var pm = G.portal
+	var in_portal: bool = pm != null and pm.active != null
+	# 开局 3D 部署(state=deploy)期间 AI 已实时交战,但兵力值/胜负判定须等对局正式开始
+	var in_match: bool = G.state == "playing" or G.state == "dead"
+	if not in_portal and in_match:
+		# 兵力值(突破模式防守方兵力无限,不扣减)
+		# [BALANCE 24v24] 击杀扣票 1→0.5:48 人局击杀频率翻倍,扣票减半抵消,
+		# 保证 400 票对局时长与 12v12 时代一致,避免敌方兵力过快耗尽
+		if v_team == "us":
+			G.tickets["us"] -= 0.5
+		elif not is_inf(G.tickets["ru"]):
+			G.tickets["ru"] -= 0.5
 	# 记分
 	if is_player(killer):
 		G.stats["kills"] += 1
-		# 连杀奖励(COD):战役模式禁用(线性关卡无连杀支援)
-		if G.mode != "campaign":
-			G.streak += 1
-			if G.streak == 3 and not G.streak_uav:
-				G.streak_uav = true
-				G.hud.banner("连杀 3 — UAV 就绪,按 4 呼叫")
-				AudioSys.capture(true)
-			if G.streak == 5 and not G.streak_arty:
-				G.streak_arty = true
-				G.hud.banner("连杀 5 — 炮火支援就绪,按 5 呼叫")
-				AudioSys.capture(true)
+	# 连杀奖励已全局取消(原:连杀 3 → UAV、连杀 5 → 炮火支援;征服/突破/门户/战争故事全模式不再授予)
+	# G.streak 仍累计供连杀指示展示;UAV/炮火入口(按键 4/5)与状态位已随清理移除
+	if G.mode != "campaign":
+		G.streak += 1
 	if killer != null and killer.get("kills") != null and not is_player(killer):
 		killer.set("kills", killer.get("kills") + 1)
 	if victim == G.player:
@@ -796,14 +927,15 @@ func on_kill(killer, victim, def, head: bool) -> void:
 	var k_name := "战场"
 	var k_team = v_team
 	if killer != null:
-		if is_player(killer):
-			k_name = "你"
-		else:
-			k_name = killer.get("name") if killer.get("name") != null else "战场"
+		k_name = Bot.display_name(killer, "战场")
 		k_team = dget(killer, "team", v_team)
-	var v_name: String = "你" if is_player(victim) else victim.get("name")
+	var v_name: String = Bot.display_name(victim, "")
 	var w_name: String = dget(def, "cn", dget(def, "name", "爆炸物"))
 	G.hud.add_killfeed(k_name, k_team, v_name, v_team, w_name, head, is_player(killer) or is_player(victim))
+	# 门户模式(TDM/BR):击杀事件转发给模式控制器(GameMode_Portal 契约:
+	# on_player_killed(killer, victim, head);玩家阵亡经 on_player_death 汇入)
+	if in_portal:
+		pm.active.on_player_killed(killer, victim, head)
 	# 战役模式:玩家击杀敌人 → 战役控制器计数
 	var cm = G.get("campaign")
 	if cm != null and cm.running and is_player(killer):
@@ -815,6 +947,9 @@ func on_player_death(attacker) -> void:
 	G.state = "dead"
 	G.streak = 0  # 连杀清零
 	G.input_sys.unlock()
+	# 实时 3D 战场部署(征服/突破):死亡即进入高空观察部署模式,世界继续实时运行
+	if G.deployment != null and (G.mode == "conquest" or G.mode == "breakthrough"):
+		G.deployment.enter()
 	# 战役模式:阵亡计数(达上限判负)
 	var cm = G.get("campaign")
 	if cm != null and cm.running:
@@ -825,47 +960,16 @@ func on_player_death(attacker) -> void:
 			k_name = "你自己"
 		else:
 			var prefix := "敌军" if dget(attacker, "team") != G.player.team else "友军"
-			k_name = prefix + " · " + str(attacker.get("name") if attacker.get("name") != null else "?")
+			k_name = prefix + " · " + Bot.display_name(attacker, "?")
 	get_tree().create_timer(1.2).timeout.connect(func():
 		if G.state == "dead":
-			G.hud.show_death("被 " + k_name + " 击杀"))
+			if G.deployment != null and G.deployment.active:
+				# 实时 3D 部署:死亡信息并入顶部提示(死亡面板让位于同屏装备栏)
+				G.hud.hint("被 " + k_name + " 击杀 · 左键拖动地图选择部署点")
+			else:
+				G.hud.show_death("被 " + k_name + " 击杀"))
 	G.hud.hide_screen("hud")
 	on_kill(attacker, G.player, G.player._killed_by_def, false)
-
-
-## ============ 连杀奖励 ============
-func call_uav() -> void:
-	if G.mode == "campaign":
-		return
-	if not G.streak_uav or G.state != "playing":
-		return
-	G.streak_uav = false
-	for b in G.bots:
-		if b.team != G.player.team and b.alive:
-			b.spotted = 25
-	G.hud.banner("UAV 侦察机上线:敌人已显示在小地图")
-	AudioSys.capture(true)
-
-
-func call_artillery() -> void:
-	if G.mode == "campaign":
-		return
-	if not G.streak_arty or G.state != "playing":
-		return
-	G.streak_arty = false
-	# 打击点:准星所指 80m 内,否则 B 点
-	var dir: Vector3 = -G.camera.global_transform.basis.z
-	var hit = Utils.raycast_world(G.camera.global_position, dir, 80)
-	var pos: Vector3
-	if hit != null:
-		pos = hit["point"]
-	elif G.flags.size() > 1:
-		pos = G.flags[1].pos
-	else:
-		pos = Vector3.ZERO
-	arty = { "pos": pos, "shells": 14, "interval": 0.0, "t": 0.0 }
-	G.hud.banner("炮火支援已呼叫,注意隐蔽!")
-	AudioSys.rpg_fire(pos)
 
 
 func spot_enemies(radius: float, duration: float) -> void:
@@ -896,8 +1000,23 @@ func _update_night_vision(dt: float) -> void:
 ## ============ 旗帜与兵力 ============
 func update_game(dt: float) -> void:
 	if G.state != "playing" and G.state != "dead":
+		# 开局 3D 部署(state=deploy):战场实时运行但不动时间/兵力 —— 仅占点与部署物
+		# (AI 已实时交战并夺旗,玩家可部署到实时变化的占领点)
+		if G.state == "deploy" and G.deployment != null and G.deployment.active:
+			for f in G.flags:
+				if f != null and not f.locked and not f.zone_locked:
+					_update_flag_capture(f, dt, "占领")
+			_update_deployables(dt)
 		return
 	G.time += dt
+
+	# 门户模式(TDM/BR):游戏逻辑由 Portal 模式控制器驱动(跳过旗帜/票数体系)
+	var pm = G.portal
+	if pm != null and pm.active != null:
+		pm.active.tick(dt)
+		_update_deployables(dt)
+		_update_night_vision(dt)
+		return
 
 	if G.mode == "breakthrough":
 		_update_breakthrough(dt)
@@ -907,28 +1026,14 @@ func update_game(dt: float) -> void:
 
 	# ---- 部署物(工程兵弹药包) ----
 	_update_deployables(dt)
-
-	# ---- 炮火支援弹幕 ----
-	if arty != null:
-		arty["t"] += dt
-		arty["interval"] -= dt
-		if arty["interval"] <= 0 and arty["shells"] > 0:
-			arty["interval"] = 0.45
-			arty["shells"] -= 1
-			var px: float = arty["pos"].x + Utils.rand(-14, 14)
-			var pz: float = arty["pos"].z + Utils.rand(-14, 14)
-			var py: float = G.ground_h.call(px, pz) if G.ground_h.is_valid() else 0.0
-			explode(Vector3(px, py + 0.3, pz), 7, 95, G.player)
-		if arty["shells"] <= 0:
-			arty = null
 	check_end()
 	_update_night_vision(dt)
 
 
 ## 征服模式:旗帜占领 + 多数旗帜流血
 func _update_conquest(dt: float) -> void:
-	if G.mode == "campaign":
-		return  # 战役模式:旗帜系统不参与胜负
+	if G.mode == "campaign" or G.mode == "br":
+		return  # 战役模式:旗帜系统不参与胜负;大逃杀:胜负由 BR 模式判定(旗帜仅作 AI 目标点)
 	for f in G.flags:
 		_update_flag_capture(f, dt, "占领")
 
@@ -941,7 +1046,8 @@ func _update_conquest(dt: float) -> void:
 		elif f.owner_team == "ru":
 			ru_flags += 1
 	drain_t += dt
-	if drain_t >= 1.6:
+	# [BALANCE 24v24] 流血间隔 1.6→2.4s:48 人局点差流血同样翻倍,放缓维持对局时长
+	if drain_t >= 2.4:
 		drain_t = 0
 		if us_flags > ru_flags and us_flags >= 2:
 			G.tickets["ru"] -= (us_flags - ru_flags)
@@ -980,6 +1086,9 @@ func _update_breakthrough(dt: float) -> void:
 				f.zone_locked = false
 				f.contested = false
 		G.hud.banner("区域已突破!兵力值 +100 — 向第 " + str(G.bt["sector"] + 1) + "/" + str(G.bt["total"]) + " 区域推进!")
+		G.hud.event("◈", "SECTOR BREACHED",
+			"区域 " + str(G.bt["sector"] + 1) + "/" + str(G.bt["total"]) + " 已突破 · 兵力 +100",
+			Color(0.05, 0.62, 0.6))
 		AudioSys.capture(true)
 		# 攻守双方重新规划目标
 		for b in G.bots:
@@ -988,6 +1097,7 @@ func _update_breakthrough(dt: float) -> void:
 
 ## ============ 突破模式:区域封锁(未解锁区域禁止进入/部署) ============
 ## 前沿封锁线:当前区域与下一区域之间的分界线(双方都不可越过)
+## [BALANCE 8/10] 最后区域前沿止于防守方基地前 45m(原公式允许进攻方冲进防守方出生点)
 func bt_front_z() -> float:
 	if G.bt == null:
 		return G.world_size - 8.0
@@ -1001,11 +1111,12 @@ func bt_front_z() -> float:
 			mn = minf(mn, f.pos.z)
 	if is_inf(mn):
 		# 最后区域:前沿止于防守方基地之前,进攻方不能冲进对方出生点
-		return (mx + (G.world_size - 16.0)) / 2.0
+		return mx + 45.0
 	return (mx + mn) / 2.0
 
 
 ## 后撤封锁线:防守方不得进入已攻陷区域(进攻方可以自由回到后方)
+## [BALANCE 8/10] 第一区域后撤线止于进攻方基地前 45m(原公式允许防守方 AI 冲进进攻方出生点)
 func bt_rear_z() -> float:
 	if G.bt == null:
 		return -(G.world_size - 8.0)
@@ -1019,7 +1130,7 @@ func bt_rear_z() -> float:
 			mn = minf(mn, f.pos.z)
 	if is_inf(mx):
 		# 第一区域:后撤线止于进攻方基地之前,防守方不能冲进对方出生点
-		return (mn + (-(G.world_size - 16.0))) / 2.0
+		return mn - 45.0
 	return (mx + mn) / 2.0
 
 
@@ -1154,12 +1265,18 @@ func _update_flag_capture(f: Flag, dt: float, verb: String) -> void:
 		f.owner_team = "us"
 		if prev_owner != "us":
 			G.hud.banner(("友军" if my_team == "us" else "敌军") + verb + "了 " + f.id + " 点!")
+			G.hud.event("▲", "SECTOR " + f.id + " CAPTURED",
+				("友军" if my_team == "us" else "敌军") + verb + "了 " + f.id + " 点",
+				Color(0.05, 0.62, 0.6))
 			AudioSys.capture(my_team == "us")
 			_on_point_captured(f, "us")
 	elif f.progress <= -100 and f.owner_team != "ru":
 		f.owner_team = "ru"
 		if prev_owner != "ru":
 			G.hud.banner(("友军" if my_team == "ru" else "敌军") + ("夺回" if verb == "夺取" else "占领") + "了 " + f.id + " 点!", true)
+			G.hud.event("▼", "SECTOR " + f.id + " LOST",
+				("敌军" if my_team == "us" else "友军") + "占领了 " + f.id + " 点",
+				Color(1.0, 0.55, 0.22))
 			AudioSys.capture(my_team == "ru")
 			_on_point_captured(f, "ru")
 	# 中立化:进度回到 0 附近时清除敌方所有权
@@ -1170,10 +1287,15 @@ func _update_flag_capture(f: Flag, dt: float, verb: String) -> void:
 
 
 func check_end() -> void:
-	if G.state == "over":
+	if G.state == "over" or G.state == "end":
+		return
+	# 开局 3D 部署(state=deploy)期间不判胜负(对局尚未正式开始)
+	if G.state != "playing" and G.state != "dead":
 		return
 	if G.mode == "campaign":
 		return  # 战役胜负由 campaign 控制器负责(避免票数/旗帜提前结束)
+	if G.mode == "tdm" or G.mode == "br":
+		return  # 门户模式胜负由模式控制器判定(经 G.portal.end_match 收尾)
 	if G.mode == "breakthrough":
 		# 进攻方兵力耗尽 → 防守方获胜;全区域攻陷在 _update_breakthrough 中判定
 		if G.tickets["us"] <= 0:
@@ -1188,6 +1310,9 @@ func check_end() -> void:
 func end_match(win: bool) -> void:
 	G.state = "over"
 	G.input_sys.unlock()
+	# 对局结束:立即退出部署观察层(结算屏接管)
+	if G.deployment != null and G.deployment.active:
+		G.deployment.exit()
 	G.hud.hide_screen("hud")
 	G.hud.hide_screen("death")
 	G.hud.hide_screen("deploy")

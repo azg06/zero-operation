@@ -1,4 +1,4 @@
-class_name VehicleModels
+﻿class_name VehicleModels
 ## 载具建模(对应 vehicles.js 的 buildJeep/buildTank/buildApc/buildAa)
 
 
@@ -145,8 +145,6 @@ static func build_tank() -> Node3D:
 			w.rotation.z = PI / 2.0
 			_add(g, w, tx, 0.36, -2.0 + i * 1.0)
 	_add(g, _box(2.5, 0.85, 4.7, camo), 0, 1.15, 0)
-	var glacis := _add(g, _box(2.5, 0.7, 1.2, camo), 0, 1.05, -2.6)
-	glacis.rotation.x = 0.5
 	_add(g, _box(2.2, 0.3, 1.6, camo), 0, 1.65, 1.6)
 	# 炮塔(独立旋转)
 	var turret := Node3D.new()
@@ -166,7 +164,6 @@ static func build_tank() -> Node3D:
 	cannon.add_child(brake)
 	turret.add_child(cannon)
 	_add(turret, _cyl(0.3, 0.3, 0.12, 10, camo), -0.4, 0.5, 0.5)
-	_add(turret, _box(0.08, 0.08, 0.9, dark), 0.5, 0.55, -0.3)
 	g.add_child(turret)
 	var muzzle := Node3D.new()
 	muzzle.position = Vector3(0, 0.22, -4.6)
@@ -174,6 +171,34 @@ static func build_tank() -> Node3D:
 	g.set_meta("turret", turret)
 	g.set_meta("cannon", cannon)
 	g.set_meta("muzzle", muzzle)
+	# [车内视角 v2] 坦克驾驶位观察舱(低模):舱顶/观察口上缘/后舱壁/侧舱壁/仪表台/地板
+	# 相机驾驶位 ≈ 车体局部 (0, 1.23, 0.35);观察口:上缘 ~19° / 下缘(仪表台)~17.6°
+	# 中央 60%~75% 保持战场视野,车内结构只出现在屏幕四周
+	var interior := Node3D.new()
+	interior.name = "Interior"
+	var in_dark := _std(Color.html("#1c1f22"), 0.85, 0.0)
+	var in_metal := _std(Color.html("#2c3035"), 0.7, 0.3)
+	_add(interior, _box(1.7, 0.06, 1.4, in_dark), 0, 1.545, 0.35)        # 舱顶(齐车体顶,防仰角透天)
+	_add(interior, _box(1.7, 0.105, 0.05, in_dark), 0, 1.5225, -0.35)    # 观察口上缘
+	_add(interior, _box(1.7, 0.87, 0.08, in_dark), 0, 1.14, 1.25)        # 后舱壁
+	_add(interior, _box(0.08, 0.87, 1.6, in_dark), -0.86, 1.14, 0.45)    # 左舱壁
+	_add(interior, _box(0.08, 0.87, 1.6, in_dark), 0.86, 1.14, 0.45)     # 右舱壁
+	_add(interior, _box(1.7, 0.06, 1.6, in_dark), 0, 0.73, 0.45)         # 地板
+	_add(interior, _box(1.6, 0.32, 0.6, in_dark), 0, 0.88, 0.05)         # 仪表台
+	_add(interior, _box(0.5, 0.03, 0.3, in_metal), -0.3, 1.08, -0.25)    # 仪表板
+	g.add_child(interior)
+	g.set_meta("interior", interior)
+	# 炮手位内构(随炮塔):潜望镜(上移到炮塔顶装饰,不挡炮镜视线)+ 炮塔内壁 + 舱盖框
+	# (舱顶内衬已移除:贴脸黑色建模挡视野;炮塔顶盖背面剔除,抬头自然透光)
+	var it := Node3D.new()
+	it.name = "InteriorTurret"
+	_add(it, _cyl(0.045, 0.055, 0.45, 8, in_dark), 0.35, 0.78, -0.6)
+	_add(it, _box(0.5, 0.4, 0.06, in_dark), 0, 0.2, 1.5)
+	_add(it, _box(0.06, 0.4, 1.2, in_dark), -0.95, 0.25, 0.2)
+	_add(it, _box(0.06, 0.4, 1.2, in_dark), 0.95, 0.25, 0.2)
+	_add(it, _box(0.7, 0.08, 0.7, in_dark), 0, 0.62, 0.4)
+	turret.add_child(it)
+	g.set_meta("interior_turret", it)
 	return g
 
 
@@ -196,8 +221,6 @@ static func build_apc() -> Node3D:
 			g.add_child(pivot)
 			wheels.append(tire)
 	_add(g, _box(2.2, 0.9, 5.6, camo), 0, 1.15, 0)
-	var nose := _add(g, _box(2.2, 0.75, 1.1, camo), 0, 1.05, -3.05)
-	nose.rotation.x = 0.55
 	_add(g, _box(1.9, 0.5, 3.4, camo), 0, 1.85, 0.5)
 	for sx in [-1.15, 1.15]:
 		_add(g, _box(0.12, 0.6, 4.6, camo), sx, 0.85, 0)
@@ -224,6 +247,30 @@ static func build_apc() -> Node3D:
 	g.set_meta("cannon", cannon)
 	g.set_meta("muzzle", muzzle)
 	g.set_meta("wheels", wheels)
+	# [车内视角 v2] APC 驾驶位观察舱(低模)
+	# 相机驾驶位 ≈ 车体局部 (0, 1.3, -1.3);观察口:上缘 ~17.4° / 下缘(仪表台)~15.6°
+	var interior := Node3D.new()
+	interior.name = "Interior"
+	var in_dark := _std(Color.html("#1c1f22"), 0.85, 0.0)
+	var in_metal := _std(Color.html("#2c3035"), 0.7, 0.3)
+	_add(interior, _box(1.7, 0.06, 1.8, in_dark), 0, 1.57, -1.2)         # 舱顶(齐车体顶,防仰角透天)
+	_add(interior, _box(1.7, 0.05, 0.05, in_dark), 0, 1.575, -2.1)       # 观察口上缘
+	_add(interior, _box(1.7, 0.87, 0.08, in_dark), 0, 1.165, -0.35)      # 后舱壁
+	_add(interior, _box(0.08, 0.87, 1.8, in_dark), -0.86, 1.165, -1.2)   # 左舱壁
+	_add(interior, _box(0.08, 0.87, 1.8, in_dark), 0.86, 1.165, -1.2)    # 右舱壁
+	_add(interior, _box(1.7, 0.06, 1.8, in_dark), 0, 0.73, -1.2)         # 地板
+	_add(interior, _box(1.6, 0.27, 0.6, in_dark), 0, 0.915, -1.9)        # 仪表台
+	_add(interior, _box(0.5, 0.03, 0.3, in_metal), -0.3, 1.09, -1.6)     # 仪表板
+	g.add_child(interior)
+	g.set_meta("interior", interior)
+	var it := Node3D.new()
+	it.name = "InteriorTurret"
+	_add(it, _cyl(0.035, 0.045, 0.4, 8, in_dark), 0.3, 0.7, -0.55)   # 潜望镜(炮塔顶装饰,不挡炮镜)
+	_add(it, _box(0.4, 0.35, 0.05, in_dark), 0, 0.15, 1.3)
+	_add(it, _box(0.05, 0.35, 1.0, in_dark), -0.62, 0.2, 0.1)
+	_add(it, _box(0.05, 0.35, 1.0, in_dark), 0.62, 0.2, 0.1)
+	turret.add_child(it)
+	g.set_meta("interior_turret", it)
 	return g
 
 
@@ -246,10 +293,9 @@ static func build_aa() -> Node3D:
 			g.add_child(pivot)
 			wheels.append(tire)
 	_add(g, _box(2.1, 0.85, 4.9, camo), 0, 1.1, 0)
-	var nose := _add(g, _box(2.1, 0.6, 1.0, camo), 0, 1.0, -2.7)
-	nose.rotation.x = 0.5
 	_add(g, _box(1.7, 0.6, 1.4, camo), 0, 1.8, -1.5)
-	var win_mat := _plain(Color.html("#20262c"), 0.2, 0.6)
+	var win_mat := _plain(Color(0.16, 0.2, 0.24, 0.35), 0.15, 0.5)
+	win_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_add(g, _box(1.5, 0.4, 0.06, win_mat), 0, 1.85, -2.22)
 	var turret := Node3D.new()
 	turret.position = Vector3(0, 2.0, 0.9)
@@ -278,4 +324,29 @@ static func build_aa() -> Node3D:
 	g.set_meta("cannon", cannon)
 	g.set_meta("muzzle", muzzle)
 	g.set_meta("wheels", wheels)
+	# [车内视角 v2] AA 驾驶位观察舱(低模)
+	# 相机驾驶位 ≈ 车体局部 (0, 1.28, -1.35);观察口:上缘 ~14.4° / 下缘(仪表台)~18.4°
+	var interior := Node3D.new()
+	interior.name = "Interior"
+	var in_dark := _std(Color.html("#1c1f22"), 0.85, 0.0)
+	var in_metal := _std(Color.html("#2c3035"), 0.7, 0.3)
+	_add(interior, _box(1.6, 0.06, 1.8, in_dark), 0, 1.495, -1.25)       # 舱顶(齐车体顶,防仰角透天)
+	_add(interior, _box(1.6, 0.045, 0.05, in_dark), 0, 1.5025, -2.15)    # 观察口上缘
+	_add(interior, _box(1.6, 0.82, 0.08, in_dark), 0, 1.115, -0.4)       # 后舱壁
+	_add(interior, _box(0.08, 0.82, 1.8, in_dark), -0.81, 1.115, -1.25)  # 左舱壁
+	_add(interior, _box(0.08, 0.82, 1.8, in_dark), 0.81, 1.115, -1.25)   # 右舱壁
+	_add(interior, _box(1.6, 0.06, 1.8, in_dark), 0, 0.7, -1.25)         # 地板
+	_add(interior, _box(1.5, 0.27, 0.6, in_dark), 0, 0.895, -1.8)        # 仪表台
+	_add(interior, _box(0.5, 0.03, 0.3, in_metal), -0.3, 1.07, -1.5)     # 仪表板
+	g.add_child(interior)
+	g.set_meta("interior", interior)
+	var it := Node3D.new()
+	it.name = "InteriorTurret"
+	_add(it, _cyl(0.04, 0.05, 0.4, 8, in_dark), 0.3, 0.8, -0.5)      # 潜望镜(炮塔顶装饰,不挡炮镜)
+	_add(it, _box(0.06, 0.5, 1.4, in_dark), -0.75, 0.25, 0.2)
+	_add(it, _box(0.06, 0.5, 1.4, in_dark), 0.75, 0.25, 0.2)
+	_add(it, _box(0.6, 0.45, 0.06, in_dark), 0, 0.2, 1.3)
+	turret.add_child(it)
+	g.set_meta("interior_turret", it)
 	return g
+
