@@ -149,6 +149,22 @@ func _sync_seat_anchors() -> void:
 	_optic.global_transform = turret.global_transform * Transform3D(Basis(), cfg["optic"])
 
 
+## 潜望镜/天线杆显隐:炮手位/炮镜第一人称隐藏(挡视野),其余视角恢复
+func _set_periscope_vis(vis: bool) -> void:
+	if vehicle == null or vehicle.mesh == null:
+		return
+	var it = vehicle.mesh.get_meta("interior_turret", null) if vehicle.mesh.has_meta("interior_turret") else null
+	if it == null:
+		return
+	var stack: Array = [it]
+	while not stack.is_empty():
+		var nd = stack.pop_back()
+		if nd.name == "Periscope":
+			nd.visible = vis
+		for ch in nd.get_children():
+			stack.append(ch)
+
+
 func _shake() -> Vector2:
 	if G.effects == null:
 		return Vector2.ZERO
@@ -176,6 +192,7 @@ func update(dt: float) -> void:
 ## 驾驶位第一人称:只能驾驶;自由观察(鼠标只转相机,不带动炮塔)
 ## 吉普副驾驶(_gunner_mode):相机锚定乘客位(副驾),同样自由观察 + 可持个人武器开火
 func _update_fp_driver(cam: Camera3D, dt: float) -> void:
+	_set_periscope_vis(true)   # 驾驶位/第三人称恢复潜望镜
 	var target: Transform3D = _gunner_seat.global_transform if _gunner_mode else _driver_seat.global_transform
 	# 驾驶位 ⇄ 副驾驶位平滑过渡(换位不瞬移)
 	if _fp_base_key == 1:
@@ -203,6 +220,7 @@ func _update_fp_driver(cam: Camera3D, dt: float) -> void:
 
 ## 炮手位/炮镜位第一人称:瞄准镜头,准心=炮口=准心;位置随座位,方向=炮塔瞄准
 func _update_fp_gunner(cam: Camera3D, dt: float, key: int) -> void:
+	_set_periscope_vis(false)   # 炮手位第一人称隐藏潜望镜/天线杆(挡视野)
 	var target: Transform3D
 	match key:
 		2:

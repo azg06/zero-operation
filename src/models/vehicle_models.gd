@@ -192,7 +192,7 @@ static func build_tank() -> Node3D:
 	# (舱顶内衬已移除:贴脸黑色建模挡视野;炮塔顶盖背面剔除,抬头自然透光)
 	var it := Node3D.new()
 	it.name = "InteriorTurret"
-	_add(it, _cyl(0.045, 0.055, 0.45, 8, in_dark), 0.35, 0.78, -0.6)
+	_add(it, _cyl(0.045, 0.055, 0.45, 8, in_dark), 0.35, 0.78, -0.6).name = "Periscope"  # 潜望镜杆(炮手位第一人称隐藏)
 	_add(it, _box(0.5, 0.4, 0.06, in_dark), 0, 0.2, 1.5)
 	_add(it, _box(0.06, 0.4, 1.2, in_dark), -0.95, 0.25, 0.2)
 	_add(it, _box(0.06, 0.4, 1.2, in_dark), 0.95, 0.25, 0.2)
@@ -265,7 +265,7 @@ static func build_apc() -> Node3D:
 	g.set_meta("interior", interior)
 	var it := Node3D.new()
 	it.name = "InteriorTurret"
-	_add(it, _cyl(0.035, 0.045, 0.4, 8, in_dark), 0.3, 0.7, -0.55)   # 潜望镜(炮塔顶装饰,不挡炮镜)
+	_add(it, _cyl(0.035, 0.045, 0.4, 8, in_dark), 0.3, 0.7, -0.55).name = "Periscope"
 	_add(it, _box(0.4, 0.35, 0.05, in_dark), 0, 0.15, 1.3)
 	_add(it, _box(0.05, 0.35, 1.0, in_dark), -0.62, 0.2, 0.1)
 	_add(it, _box(0.05, 0.35, 1.0, in_dark), 0.62, 0.2, 0.1)
@@ -342,7 +342,7 @@ static func build_aa() -> Node3D:
 	g.set_meta("interior", interior)
 	var it := Node3D.new()
 	it.name = "InteriorTurret"
-	_add(it, _cyl(0.04, 0.05, 0.4, 8, in_dark), 0.3, 0.8, -0.5)      # 潜望镜(炮塔顶装饰,不挡炮镜)
+	_add(it, _cyl(0.04, 0.05, 0.4, 8, in_dark), 0.3, 0.8, -0.5).name = "Periscope"
 	_add(it, _box(0.06, 0.5, 1.4, in_dark), -0.75, 0.25, 0.2)
 	_add(it, _box(0.06, 0.5, 1.4, in_dark), 0.75, 0.25, 0.2)
 	_add(it, _box(0.6, 0.45, 0.06, in_dark), 0, 0.2, 1.3)

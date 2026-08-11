@@ -649,6 +649,9 @@ func update_vehicle(dt: float) -> void:
 	if Input.is_action_just_pressed("interact"):
 		exit_vehicle()
 		return
+	# Z 键(载具内趴下键):召唤附近空闲队友补齐空缺乘员位(驾驶位/炮手/乘客)
+	if Input.is_action_just_pressed("prone"):
+		_call_crew_mates(v)
 	if Input.is_action_just_pressed("crouch"):
 		_veh_tp = not _veh_tp
 	# F 切换乘员位(目标座位被 NPC 占时玩家可顶替,NPC 下一帧自动释放)
@@ -700,13 +703,13 @@ func update_vehicle(dt: float) -> void:
 		if _veh_crew == 1:
 			# 副驾驶:可持个人武器开火(准心=观察方向),第三人称时收枪
 			_update_passenger_gun(dt)
-			G.hud.hint("乘客位 · 左键开火 · R 换弹 · F 换驾驶位 · C 第三人称 · E 下车")
+			G.hud.hint("乘客位 · 左键开火 · R 换弹 · F 换驾驶位 · Z 召唤队友 · C 第三人称 · E 下车")
 		else:
 			if _passenger_gun:
 				_passenger_gun = false
 				if gun() != null:
 					gun().holster()
-			G.hud.hint("W/S 油门刹车 · A/D 转向 · 鼠标观察 · C 第三人称 · E 下车")
+			G.hud.hint("W/S 油门刹车 · A/D 转向 · Z 召唤队友 · C 第三人称 · E 下车")
 	# 鼠标观察(第三人称=360° 环绕;第一人称=观察角;只转相机,不转车体)
 	var md: Vector2 = input.consume_mouse()
 	if _veh_tp:
@@ -738,6 +741,38 @@ func update_vehicle(dt: float) -> void:
 		fov_target = lerpf(VehicleCameraController.FP_FOV, gun().def.zoom_fov, gun().ads_amount)
 	if absf(cam.fov - fov_target) > 0.05:
 		cam.fov = Utils.damp(cam.fov, fov_target, 10, dt)
+
+
+## Z 键召唤队友补齐乘员位:玩家在驾驶位→召炮手/乘客;玩家在炮手/乘客位→召驾驶员
+## 招募 150m 内最近的空间闲同队 bot 登车(步行入车,复用现有 board_vehicle 机制)
+func _call_crew_mates(v) -> void:
+	if v == null or v.dead:
+		return
+	var need_driver: bool = v.driver == null or v.driver == self
+	var need_gunner: bool = v.gunner == null or v.gunner == self
+	if not need_driver and not need_gunner:
+		G.hud.hint("乘员位已满")
+		return
+	var recruited := 0
+	for b in G.bots:
+		if b == null or not b.alive or b.team != team or b.vehicle != null:
+			continue
+		if b.pos.distance_to(pos) > 150.0:
+			continue
+		if need_driver and v.driver == null:
+			b.board_vehicle(v)
+			recruited += 1
+		elif need_gunner and v.gunner == null:
+			b.board_vehicle(v)
+			recruited += 1
+		if recruited >= 2 or (recruited >= 1 and (not need_driver or not need_gunner)):
+			break
+	if recruited > 0:
+		G.hud.hint("已召唤 %d 名队友登车" % recruited)
+		AudioSys.reload(1)
+	else:
+		G.hud.hint("附近没有可召唤的队友")
+		AudioSys.dry_fire()
 
 
 ## 吉普副驾驶持枪:显示个人武器视角模型,左键开火 / 右键开镜 / R 换弹 / B 射速 / 切枪

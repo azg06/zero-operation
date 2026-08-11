@@ -1000,11 +1000,11 @@ class NightVisionOverlay extends Control:
 			HORIZONTAL_ALIGNMENT_CENTER, -1, 12, Color(0.75, 1, 0.8, alpha))
 
 
-# ==================== 载具瞄准辅助(炮塔类:主准星 + 炮管指向指示点) ====================
+# ==================== 载具瞄准辅助(炮塔类:主准星 + 炮管指向指示点;仅炮手位显示) ====================
 class VehicleAim extends Control:
 	func _process(_dt: float) -> void:
 		var vis: bool = G.player != null and G.player.alive and G.player.vehicle != null \
-			and G.player.vehicle.has_turret() and G.state == "playing"
+			and G.player.vehicle.has_turret() and G.player._veh_crew == 1 and G.state == "playing"
 		if visible != vis:
 			visible = vis
 		if vis:

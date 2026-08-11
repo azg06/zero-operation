@@ -12,9 +12,11 @@ config_version=5
 
 config/name="零度行动"
 config/description="大型多兵种征服/突破作战 FPS,Godot 4 引擎驱动。"
-run/main_scene="res://scenes/main.tscn"
+run/main_scene="res://scenes/splash.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
 config/icon="res://icon.svg"
+boot_splash/bg_color=Color(0.043, 0.059, 0.078, 1)
+boot_splash/show_image=false
 
 [autoload]
 
@@ -33,7 +35,7 @@ window/stretch/aspect="expand"
 
 [editor_plugins]
 
-enabled=PackedStringArray("sky_3d", "minimize_html_build")
+enabled=PackedStringArray("sky_3d")
 
 [rendering]
 
@@ -44,11 +46,16 @@ lights_and_shadows/directional_shadow/size=8192
 lights_and_shadows/directional_shadow/soft_shadow_filter_quality=3
 lights_and_shadows/positional_shadow/soft_shadow_filter_quality=3
 textures/default_filters/anisotropic_filtering_level=8
+textures/default_filters/use_nearest_mipmap_filter=false
 environment/ssao/half_size=false
 environment/ssil/half_size=false
-anti_aliasing/quality/use_debanding=true
 environment/screen_space_reflection/half_size=false
-environment/volumetric_fog/volume_size=64
+environment/screen_space_reflection/roughness_quality=1
+environment/volumetric_fog/volume_size=32
+anti_aliasing/quality/msaa_3d=2
+anti_aliasing/quality/use_debanding=true
+occlusion_culling/use_occlusion_culling=true
+occlusion_culling/occlusion_culling_size=256
 
 [xr]
 
