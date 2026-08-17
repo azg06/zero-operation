@@ -77,6 +77,100 @@ static func apply(root: Control) -> void:
 	root.theme = theme()
 
 
+## ==================== 统一 UI 动画管理(按钮/面板/页面) ====================
+static var _button_tweens: Dictionary = {}
+static var _screen_tweens: Dictionary = {}
+
+
+static func _kill_tween(key: Variant) -> void:
+	if _button_tweens.has(key):
+		var old: Tween = _button_tweens[key]
+		if old != null and old.is_valid():
+			old.kill()
+		_button_tweens.erase(key)
+
+
+## 给按钮统一接入 Idle → Hover → Press → Release → Selected/Disabled 动画
+## 所有动画都由 Tween 驱动,并且同一按钮重复触发会先 kill 旧 Tween,避免动画打架。
+static func animate_button(b: Button) -> void:
+	if b == null or b.has_meta("ui_anim_wired"):
+		return
+	b.set_meta("ui_anim_wired", true)
+	b.mouse_entered.connect(func():
+		_button_hover(b, true))
+	b.mouse_exited.connect(func():
+		_button_hover(b, false))
+	b.button_down.connect(func():
+		_button_press(b, true))
+	b.button_up.connect(func():
+		_button_press(b, false))
+	b.pressed.connect(func():
+		pulse_button(b))
+
+
+static func _button_hover(b: Button, hover: bool) -> void:
+	if b == null or not is_instance_valid(b):
+		return
+	_kill_tween(b)
+	b.pivot_offset = b.size * 0.5
+	var tw := b.create_tween()
+	_button_tweens[b] = tw
+	tw.tween_property(b, "scale", Vector2(1.035, 1.035) if hover else Vector2.ONE, 0.09) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+
+static func _button_press(b: Button, down: bool) -> void:
+	if b == null or not is_instance_valid(b):
+		return
+	_kill_tween(b)
+	b.pivot_offset = b.size * 0.5
+	var tw := b.create_tween()
+	_button_tweens[b] = tw
+	tw.set_parallel(true)
+	tw.tween_property(b, "scale", Vector2(0.95, 0.95) if down else Vector2.ONE, 0.05) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN if down else Tween.EASE_OUT)
+	tw.tween_property(b, "position:y", (b.position.y + 1.5) if down else (b.position.y - 1.5), 0.05) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN if down else Tween.EASE_OUT)
+
+
+## 页面/面板统一淡入淡出 + 轻微缩放过渡
+## show=true 会先显示再渐入;show=false 会在动画结束后自动隐藏。
+static func fade_screen(c: Control, show: bool, duration := 0.18, on_done: Callable = Callable()) -> void:
+	if c == null or not is_instance_valid(c):
+		if on_done.is_valid():
+			on_done.call()
+		return
+	if _screen_tweens.has(c):
+		var old: Tween = _screen_tweens[c]
+		if old != null and old.is_valid():
+			old.kill()
+	c.pivot_offset = c.size * 0.5
+	if show:
+		c.visible = true
+		c.modulate.a = 0.0
+		c.scale = Vector2(0.985, 0.985)
+	else:
+		c.modulate.a = 1.0
+		c.scale = Vector2.ONE
+	var tw := c.create_tween()
+	_screen_tweens[c] = tw
+	if show:
+		tw.set_parallel(true)
+		tw.tween_property(c, "modulate:a", 1.0, duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tw.tween_property(c, "scale", Vector2.ONE, duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	else:
+		tw.set_parallel(true)
+		tw.tween_property(c, "modulate:a", 0.0, duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		tw.tween_property(c, "scale", Vector2(0.985, 0.985), duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		tw.chain().tween_callback(func():
+			if is_instance_valid(c):
+				c.visible = false
+				c.modulate.a = 1.0
+				c.scale = Vector2.ONE
+			if on_done.is_valid():
+				on_done.call())
+
+
 static func stylebox(bg: Color, border: Color = Color.TRANSPARENT, border_w := 0, radius := 4, pad := 8) -> StyleBoxFlat:
 	var s := StyleBoxFlat.new()
 	s.bg_color = bg
@@ -108,11 +202,10 @@ static func make_button(text: String, font_size := 16, accent := Color(0.0, 0.1,
 	b.add_theme_color_override("font_hover_color", Color(1, 1, 1))
 	b.add_theme_color_override("font_pressed_color", Color(1, 1, 1))
 	b.add_theme_color_override("font_disabled_color", TXT_DIM)
-	# 悬停音效 + 按下回弹动效(3A 手感)
+	# 悬停音效 + 统一按钮状态动画(Idle/Hover/Press/Release/Pulse)
 	b.mouse_entered.connect(func():
 		AudioSys.ui_hover())
-	b.pressed.connect(func():
-		pulse_button(b))
+	animate_button(b)
 	return b
 
 
@@ -129,8 +222,7 @@ static func pulse_button(b: Button) -> void:
 static func wire_button(b: Button) -> void:
 	b.mouse_entered.connect(func():
 		AudioSys.ui_hover())
-	b.pressed.connect(func():
-		pulse_button(b))
+	animate_button(b)
 
 
 ## 军事化 HUD 面板:半透明深底 + 1px 细边框(战斗 HUD 用)

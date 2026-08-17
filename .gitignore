@@ -7,7 +7,6 @@
 *.zip
 win_export/
 web_export/
-android/
 
 # 编辑器与系统
 *.tmp

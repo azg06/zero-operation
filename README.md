@@ -15,7 +15,7 @@
 
 ## 运行环境
 
-- Godot **4.7.1**（Forward+ / Vulkan），Windows / Web / Android 均可导出
+- Godot **4.7.1**（Forward+ / Vulkan），Windows / Web 均可导出
 - 纯 GDScript，无第三方依赖（内含 Sky3D 开源插件）
 
 ## 快速开始

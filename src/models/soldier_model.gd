@@ -1,12 +1,20 @@
 class_name SoldierModel
 ## 士兵模型(对应 ai.js 的 buildSoldier 与 player.js 的 _buildBody)
 
+static var _mat_cache: Dictionary = {}
+
+
 static func _mat(color: Color, rough := 0.9, unshaded := false) -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = color
-	m.roughness = rough
-	if unshaded:
-		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	# [PERF] 材质缓存:同色/同粗糙/同着色模式共享实例,减少材质数量并让合并真正降 Draw Call
+	var key := "%.4f_%.4f_%.4f_%.4f_%.2f_%d" % [color.r, color.g, color.b, color.a, rough, int(unshaded)]
+	var m: StandardMaterial3D = _mat_cache.get(key)
+	if m == null:
+		m = StandardMaterial3D.new()
+		m.albedo_color = color
+		m.roughness = rough
+		if unshaded:
+			m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_mat_cache[key] = m
 	return m
 
 
@@ -24,6 +32,71 @@ static func _add(parent: Node3D, mesh: MeshInstance3D, x: float, y: float, z: fl
 	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	parent.add_child(mesh)
 	return mesh
+
+
+## [PERF] 合并父节点下的直接静态网格子节点(按材质分组为多 surface,降低 Draw Call)
+## 父节点保持为动画枢轴;合并后的网格仍随父节点刚性运动。
+static func _merge_children(parent: Node3D) -> void:
+	var meshes: Array[MeshInstance3D] = []
+	for c in parent.get_children():
+		if c is MeshInstance3D and (c as MeshInstance3D).mesh != null:
+			meshes.append(c as MeshInstance3D)
+	if meshes.size() <= 1:
+		return
+	var by_mat: Dictionary = {}
+	for m in meshes:
+		var mat: Material = m.material_override
+		if mat == null:
+			continue
+		if not by_mat.has(mat):
+			by_mat[mat] = []
+		by_mat[mat].append(m)
+	var am := ArrayMesh.new()
+	for mat in by_mat:
+		var group: Array = by_mat[mat]
+		var verts := PackedVector3Array()
+		var norms := PackedVector3Array()
+		var uvs := PackedVector2Array()
+		var idx := PackedInt32Array()
+		for mm in group:
+			var mi3 := mm as MeshInstance3D
+			if mi3.mesh.get_surface_count() == 0:
+				continue
+			var arr := mi3.mesh.surface_get_arrays(0)
+			var mv: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			var mn: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+			var muv: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV]
+			var mi2: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+			var tf := mi3.transform
+			var base := verts.size()
+			for v in mv:
+				verts.append(tf * v)
+			for nrm in mn:
+				norms.append((tf.basis * nrm).normalized())
+			for uv in muv:
+				uvs.append(uv)
+			for ix in mi2:
+				idx.append(base + ix)
+		if verts.is_empty():
+			continue
+		var arrs := []
+		arrs.resize(Mesh.ARRAY_MAX)
+		arrs[Mesh.ARRAY_VERTEX] = verts
+		arrs[Mesh.ARRAY_NORMAL] = norms
+		arrs[Mesh.ARRAY_TEX_UV] = uvs
+		arrs[Mesh.ARRAY_INDEX] = idx
+		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrs, [], {}, 0)
+		am.surface_set_material(am.get_surface_count() - 1, mat)
+	if am.get_surface_count() == 0:
+		return
+	var mi := MeshInstance3D.new()
+	mi.name = "Merged"
+	mi.mesh = am
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	parent.add_child(mi)
+	for m in meshes:
+		parent.remove_child(m)
+		m.free()
 
 
 ## 兵种皮肤配色(每兵种 3 套;standard 与无 skin 参数时完全一致)
@@ -73,25 +146,27 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 	var brass := _mat(Color.html("#c8a860"), 0.5)                    # 弹链铜色
 
 	# 腿:髋部枢轴(大腿) + 膝关节(小腿) + 护膝 + 靴
+	# [ANIM] 腿长与髋高(0.78)匹配:thigh→knee 0.40 + knee→靴底 0.36 = 0.76,
+	# 站立可近直腿(脚部 IK 无需深屈膝),跑步摆腿自然腾空
 	var mk_leg := func(x: float) -> Dictionary:
 		var thigh := Node3D.new()
 		thigh.position = Vector3(x, 0.78, 0)
-		var tm := _box(0.16, 0.42, 0.18, uniform)
-		tm.position.y = -0.21
+		var tm := _box(0.16, 0.38, 0.18, uniform)
+		tm.position.y = -0.19
 		tm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 		thigh.add_child(tm)
 		var knee := Node3D.new()
-		knee.position = Vector3(0, -0.44, 0)
-		var sm := _box(0.15, 0.4, 0.16, uniform)
-		sm.position.y = -0.18
+		knee.position = Vector3(0, -0.4, 0)
+		var sm := _box(0.15, 0.36, 0.16, uniform)
+		sm.position.y = -0.16
 		sm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 		knee.add_child(sm)
 		var kp := _box(0.16, 0.12, 0.06, gear)                      # 护膝
-		kp.position = Vector3(0, -0.05, -0.1)
+		kp.position = Vector3(0, -0.03, -0.1)
 		kp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 		knee.add_child(kp)
 		var bt := _box(0.16, 0.1, 0.24, boot)                       # 靴(前伸)
-		bt.position = Vector3(0, -0.4, -0.03)
+		bt.position = Vector3(0, -0.31, -0.03)
 		bt.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 		knee.add_child(bt)
 		thigh.add_child(knee)
@@ -99,6 +174,16 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 		return { "thigh": thigh, "knee": knee }
 	var leg_l: Dictionary = mk_leg.call(-0.11)
 	var leg_r: Dictionary = mk_leg.call(0.11)
+	# 下半身转向组:腿部相对身体独立转向(身体朝向目标,腿朝向移动方向),
+	# 消除"身体已转过去、腿还朝原方向"的僵硬转身
+	var legs := Node3D.new()
+	legs.name = "Legs"
+	g.add_child(legs)
+	for ld in [leg_l, leg_r]:
+		var th: Node3D = ld["thigh"]
+		g.remove_child(th)
+		legs.add_child(th)
+	g.set_meta("legs", legs)
 	g.set_meta("leg_l", leg_l["thigh"])
 	g.set_meta("leg_l_knee", leg_l["knee"])
 	g.set_meta("leg_r", leg_r["thigh"])
@@ -178,6 +263,8 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 	# 皮肤轻量装饰(头盔套/肩带/背包色块,仅非 standard 皮肤)
 	if skin != "standard":
 		_apply_skin_decor(upper, class_id, skin, pal)
+	# [PERF] 合并上半身刚性装具(躯干/头/盔/护具/背包装具),upper 仍为动画枢轴
+	_merge_children(upper)
 
 	# 持枪臂组(rig):肩 → 上臂 → 肘 → 前臂/手(肘关节可动,持枪姿态灵活)
 	var rig := Node3D.new()
@@ -205,7 +292,8 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 		return { "arm": arm, "elbow": elbow }
 	var arm_l: Dictionary = mk_arm.call(-0.2, "arm_l")
 	var arm_r: Dictionary = mk_arm.call(0.2, "arm_r")
-	var gun := WeaponModels.build(weapon_id, false)
+	# 第三人称武器:同步玩家改装配置(附件随枪显示,挂点由 MOD_ANCHORS 精确绑定)
+	var gun := WeaponModels.build(weapon_id, false, WeaponModsData.load_cfg(weapon_id))
 	gun.scale = Vector3.ONE * 1.15
 	gun.position = Vector3(0.1, 0.02, -0.45)
 	rig.add_child(gun)

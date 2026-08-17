@@ -47,6 +47,7 @@ var _tdm_map_cards: Dictionary = {}   # map id("random" 含) → PanelContainer
 var _tdm_map_hint: Label
 
 var _screens: Dictionary = {}
+var _briefing = null
 var _map_btns: Array = []
 var _slot_class: Button
 var _slot_primary: Button
@@ -77,6 +78,11 @@ var _settings_from_pause := false  # 设置屏上下文:true=暂停菜单打开,
 var _pause_switch_btn: Button      # 暂停菜单"切换兵种"按钮(战役/门户模式隐藏,show_pause 时刷新)
 var _portal_last_result: Dictionary = {}  # 门户对局结算数据(G.portal round_ended 提供;未就绪时为空)
 
+# ---- UI 状态机:Opening → Open → Interacting → Closing → Closed ----
+var _ui_state := "closed"
+var _active_screen := ""
+var _ui_lock := false
+
 
 func _ready() -> void:
 	layer = 10
@@ -102,26 +108,26 @@ func _ready() -> void:
 	_build_store()
 	_make_toast()
 	hide_all()
-	_screens["menu"].visible = true
+	_show_screen("menu")
 	# 调试:--test-campaign-menu 直接打开战役章节选择屏(验证构建)
 	if OS.get_cmdline_user_args().has("--test-campaign-menu"):
 		hide_all()
-		_screens["campaign"].visible = true
+		_show_screen("campaign")
 	# 调试:--test-armory-menu 直接打开枪械改装屏(验证 3D 预览 + 槽位/改装件构建)
 	if OS.get_cmdline_user_args().has("--test-armory-menu"):
 		hide_all()
-		_screens["armory"].visible = true
+		_show_screen("armory")
 		_armory_enter()
 	# 调试:--test-battlepass 直接打开战斗通行证屏(验证构建 + 皮肤装备交互)
 	if OS.get_cmdline_user_args().has("--test-battlepass"):
 		hide_all()
-		_screens["battlepass"].visible = true
+		_show_screen("battlepass")
 		_bp_load_equipped(_bp_class)
 		_refresh_bp_grid()
 	# 调试:--test-portal-menu 直接打开门户模式选择屏(验证构建)
 	if OS.get_cmdline_user_args().has("--test-portal-menu"):
 		hide_all()
-		_screens["portal"].visible = true
+		_show_screen("portal")
 	# 调试:--test-tdm-loadout 直接打开 TDM 装备选择屏(验证构建 + 全武器池)
 	if OS.get_cmdline_user_args().has("--test-tdm-loadout"):
 		hide_all()
@@ -145,10 +151,15 @@ func _process(dt: float) -> void:
 			_news_label.text = NEWS[_news_i]
 			if _news_label.text == "":
 				_news_label.text = NEWS[0]
-	# 枪械改装 3D 预览自动旋转(拖拽时暂停)
-	if _screens.has("armory") and _screens["armory"].visible and _arm_pivot != null and not _arm_dragging:
-		_arm_yaw += dt * 0.4
-		_arm_pivot.rotation = Vector3(_arm_pitch, _arm_yaw, 0)
+	# 枪械改装 3D 预览:自动旋转(拖拽暂停)+ 槽位聚焦镜头平滑过渡
+	if _screens.has("armory") and _screens["armory"].visible:
+		if _arm_pivot != null and not _arm_dragging:
+			_arm_yaw += dt * 0.4
+			_arm_pivot.rotation = Vector3(_arm_pitch, _arm_yaw, 0)
+		if _arm_cam != null:
+			var k := 1.0 - exp(-dt * 5.0)
+			_arm_cam.position = _arm_cam.position.lerp(_arm_focus_pos, k)
+			_arm_cam.look_at(_arm_focus_target, Vector3.UP)
 	# 死亡重生倒计时(动画:数字跳动,归零解锁)
 	if _death_btn != null and _death_btn.is_inside_tree() and _screens.has("death") and _screens["death"].visible:
 		# BR 真淘汰:死亡屏短暂展示后自动隐藏进入观战(不等待点击;与 game_mode_br 淘汰流程对齐)
@@ -178,13 +189,18 @@ func _process(dt: float) -> void:
 
 
 func hide_all() -> void:
+	_ui_lock = false
+	_ui_state = "closed"
+	_active_screen = ""
 	for k in _screens:
 		_screens[k].visible = false
+		_screens[k].modulate.a = 1.0
+		_screens[k].scale = Vector2.ONE
 
 
 ## 只隐藏结算屏(hud.gd 门户 round_started 回调调用,防新对局开局残留结算盖 HUD)
 func hide_end() -> void:
-	_screens["end"].visible = false
+	_hide_screen("end")
 
 
 ## 重生倒计时:读取 G.settings.spawn_time(模式配置),无配置保持默认 5s 并记录来源
@@ -200,6 +216,66 @@ func _add_screen(id: String) -> Control:
 	add_child(c)
 	_screens[id] = c
 	return c
+
+
+## UI 状态机辅助:打开页面,带平滑过渡和防重复点击锁
+func _show_screen(id: String, instant := false) -> void:
+	if not _screens.has(id):
+		G.log_err("UI", "尝试打开不存在的页面: " + id, _active_screen)
+		return
+	# 正在播放关闭动画时,禁止中途再开别的页面,避免两个页面同时抢输入
+	if _ui_lock and _active_screen != id:
+		return
+	if _active_screen == id and _screens[id].visible:
+		return
+	_ui_lock = true
+	_ui_state = "opening"
+	_active_screen = id
+	# 旧页面立即隐藏,新页面淡入;避免动画重叠导致输入混乱
+	for k in _screens:
+		if k != id and _screens[k].visible:
+			_screens[k].visible = false
+	var sc: Control = _screens[id]
+	if instant:
+		sc.visible = true
+		sc.modulate.a = 1.0
+		sc.scale = Vector2.ONE
+		_ui_state = "open"
+		_ui_lock = false
+	else:
+		UiTheme.fade_screen(sc, true, 0.18)
+		_ui_state = "open"
+		_ui_lock = false
+
+
+## UI 状态机辅助:关闭页面,播放淡出后隐藏
+func _hide_screen(id: String, instant := false) -> void:
+	if not _screens.has(id):
+		G.log_err("UI", "尝试关闭不存在的页面: " + id, _active_screen)
+		return
+	var sc: Control = _screens[id]
+	if not sc.visible and _active_screen != id:
+		return
+	if instant:
+		if _ui_lock and _active_screen != id:
+			return
+		sc.visible = false
+		sc.modulate.a = 1.0
+		sc.scale = Vector2.ONE
+		if _active_screen == id:
+			_active_screen = ""
+		_ui_state = "closed"
+		_ui_lock = false
+		return
+	if _ui_lock:
+		return
+	_ui_lock = true
+	_ui_state = "closing"
+	UiTheme.fade_screen(sc, false, 0.12, func():
+		if _active_screen == id:
+			_active_screen = ""
+		_ui_state = "closed"
+		_ui_lock = false)
 
 
 func _bg(parent: Control, color := Color(0.04, 0.05, 0.08, 1)) -> ColorRect:
@@ -276,11 +352,11 @@ func _build_main_menu() -> void:
 	bl.add_child(fn_row)
 	var bh := UiTheme.make_button("作战手册", 14)
 	bh.custom_minimum_size = Vector2(130, 38)
-	bh.pressed.connect(func(): AudioSys.ui(); _screens["help"].visible = true)
+	bh.pressed.connect(func(): AudioSys.ui(); _show_screen("help"))
 	fn_row.add_child(bh)
 	var bs := UiTheme.make_button("设置", 14)
 	bs.custom_minimum_size = Vector2(110, 38)
-	bs.pressed.connect(func(): AudioSys.ui(); _settings_from_pause = false; _screens["settings"].visible = true)
+	bs.pressed.connect(func(): AudioSys.ui(); _settings_from_pause = false; _show_screen("settings"))
 	fn_row.add_child(bs)
 	var bq := UiTheme.make_button("退出游戏", 14)
 	bq.custom_minimum_size = Vector2(110, 38)
@@ -365,10 +441,10 @@ Q 索敌标记 · G 手雷 · F 兵种装备 · E 驾驶/离开载具 · Tab 记
 
 [b][color=#7fd0ff]突破模式规则(攻防)[/color][/b]
 你方担任[b]进攻方[/b],沿战线逐区域推进,每区域有 A / B 两个目标点。
-[b]同时[/b]控制当前区域全部目标点即可突破该区域,并[b]补充 100 点兵力值[/b];已突破的区域不可被夺回。
+[b]同时[/b]控制当前区域全部目标点即可突破该区域,并[b]补充 120 点兵力值[/b];已突破的区域不可被夺回。
 [b]区域按顺序解锁[/b]:尚未攻到的区域处于封锁状态,地图上以灰色显示;越过封锁线会被遣返回战线,
 且封锁区域内无法部署 —— 攻守双方都不能跨区域作战。
-进攻方兵力值仅 250 点,每次阵亡 -1,耗尽即战败;防守方兵力无限。攻陷全部 3 个区域即获胜。
+进攻方兵力值 320 点,每次阵亡 -1,耗尽即战败;防守方兵力无限。攻陷全部 3 个区域即获胜。
 每夺取一个目标点都会在该点附近部署载具;阵亡后可在部署界面点击己方点位或绿点小队队友,直接部署到前线。
 
 [b][color=#7fd0ff]兵种[/color][/b]
@@ -387,7 +463,7 @@ Q 索敌标记 · G 手雷 · F 兵种装备 · E 驾驶/离开载具 · Tab 记
 	close.custom_minimum_size = Vector2(200, 38)
 	close.pressed.connect(func():
 		AudioSys.ui()
-		s.visible = false)
+		_show_screen("menu"))
 	v.add_child(close)
 
 
@@ -418,6 +494,8 @@ func _build_settings() -> void:
 		func(val): G.settings.sensitivity = val, func(val): return "%.1f" % val))
 	v.add_child(_make_slider("视野 FOV", 60, 110, 1, G.settings.fov,
 		func(val): G.settings.fov = val, func(val): return str(int(val))))
+	v.add_child(_make_slider("视角模型深度/臂长", 0.8, 1.4, 0.05, float(G.settings.get("viewmodel_depth", 1.0)),
+		func(val): G.settings["viewmodel_depth"] = val, func(val): return str(int(val * 100)) + "%"))
 	v.add_child(_make_slider("音量", 0, 1, 0.05, G.settings.volume,
 		func(val):
 			G.settings.volume = val
@@ -455,7 +533,7 @@ func _build_settings() -> void:
 		G.settings.scale, func(val): _apply_gfx("scale", val)))
 	v.add_child(_make_select("纹理过滤", [[1, "低"], [4, "中"], [8, "高"], [16, "极高"]],
 		G.settings.aniso, func(val): _apply_gfx("aniso", val)))
-	v.add_child(_make_select("阴影质量", [[0, "关"], [1024, "低"], [2048, "中"], [4096, "高"], [8192, "超清 8192"]],
+	v.add_child(_make_select("阴影质量", [[0, "关"], [1024, "低"], [2048, "中"], [4096, "高"]],
 		G.settings.shadows, func(val): _apply_gfx("shadows", val)))
 	v.add_child(_make_select("SSAO 遮蔽", [[true, "开"], [false, "关"]],
 		G.settings.ssao, func(val): _apply_gfx("ssao", val)))
@@ -485,9 +563,10 @@ func _build_settings() -> void:
 		AudioSys.ui()
 		var from_pause := _settings_from_pause
 		_settings_from_pause = false
-		s.visible = false
 		if from_pause:
-			_screens["pause"].visible = true)  # 暂停中打开设置 → 返回暂停界面
+			_show_screen("pause")  # 暂停中打开设置 → 返回暂停界面
+		else:
+			_show_screen("menu"))  # 主界面打开设置 → 返回主菜单
 	outer_v.add_child(close)
 
 
@@ -739,11 +818,11 @@ func show_deploy(is_redeploy := false) -> void:
 	if dbg_idx != -1 and ua.size() > dbg_idx + 1:
 		_toggle_submenu(ua[dbg_idx + 1])
 	_build_map_select()
-	_screens["deploy"].visible = true
+	_show_screen("deploy")
 
 
 func hide_deploy() -> void:
-	_screens["deploy"].visible = false
+	_hide_screen("deploy")
 	if _deploy_bg != null:
 		_deploy_bg.color = Color(0, 0.01, 0.02, 0.9)
 	if _deploy_battlebg != null:
@@ -1021,11 +1100,11 @@ func show_death(killer_text: String) -> void:
 		elif not uses_3d:
 			_death_btn.text = "重新部署 (" + str(int(ceil(_spawn_time))) + ")"
 			_death_btn.modulate = Color(0.85, 0.85, 0.85, 0.9)
-	_screens["death"].visible = true
+	_show_screen("death")
 
 
 func hide_death() -> void:
-	_screens["death"].visible = false
+	_hide_screen("death")
 	if _death_btn != null:
 		_death_btn.visible = true
 		_death_btn.disabled = true
@@ -1083,12 +1162,12 @@ func show_end(win: bool) -> void:
 			_end_title.text = "已退出对局"
 			_end_title.add_theme_color_override("font_color", Color(0.75, 0.8, 0.85))
 			_end_stats.text = _portal_result_text()
-			_screens["end"].visible = true
+			_show_screen("end")
 			return
 		_end_title.text = "胜 利" if win else ("你被淘汰" if G.mode == "br" else "战 败")
 		_end_title.add_theme_color_override("font_color", Color(1, 0.85, 0.4) if win else Color(0.85, 0.4, 0.35))
 		_end_stats.text = _portal_result_text()
-		_screens["end"].visible = true
+		_show_screen("end")
 		return
 	_end_title.text = ("全线突破" if win else "进攻失败") if (is_bt and G.bt_player_side == "att") else (("防守成功" if win else "防线失守") if is_bt else ("胜 利" if win else "战 败"))
 	_end_title.add_theme_color_override("font_color", Color(1, 0.85, 0.4) if win else Color(0.85, 0.4, 0.35))
@@ -1105,7 +1184,7 @@ func show_end(win: bool) -> void:
 	else:
 		line2 = "最终兵力 — 友军 [b]" + str(maxi(0, int(ceil(G.tickets[G.player.team])))) + "[/b] : [b]" + str(maxi(0, int(ceil(G.tickets["ru" if G.player.team == "us" else "us"])))) + "[/b] 敌军 · 用时 [b]" + Utils.fmt_time(G.time) + "[/b]"
 	_end_stats.text = "击杀 [b]" + str(G.stats["kills"]) + "[/b] · 阵亡 [b]" + str(G.stats["deaths"]) + "[/b] · KD [b]" + kd + "[/b]\n" + line2
-	_screens["end"].visible = true
+	_show_screen("end")
 
 
 ## ==================== 战役模式(战争故事):章节选择屏 + 结算屏 + 存档 ====================
@@ -1192,8 +1271,8 @@ func _build_campaign_select() -> void:
 	back.custom_minimum_size = Vector2(200, 38)
 	back.pressed.connect(func():
 		AudioSys.ui()
-		_screens["campaign"].visible = false
-		_screens["menu"].visible = true)
+		_hide_screen("campaign")
+		_show_screen("menu"))
 	v.add_child(back)
 
 
@@ -1263,7 +1342,7 @@ func _campaign_enter(idx: int, d: Dictionary) -> void:
 func _open_campaign_select() -> void:
 	_campaign_load_save()
 	_refresh_campaign_cards()
-	_screens["campaign"].visible = true
+	_show_screen("campaign")
 
 
 ## ==================== 战役结算屏 ====================
@@ -1346,7 +1425,7 @@ func show_campaign_end(win: bool) -> void:
 		_camp_end_btn1.disabled = false
 	_camp_end_stats.text = "击杀 " + str(G.stats["kills"]) + " · 阵亡 " + str(G.stats["deaths"]) + " · 用时 " + Utils.fmt_time(G.time)
 	hide_all()
-	_screens["campaign_end"].visible = true
+	_show_screen("campaign_end")
 
 
 ## 结算主按钮:win → 下一章(无则禁用);fail → 重试本章
@@ -1376,7 +1455,7 @@ func _campaign_end_back() -> void:
 	if G.hud != null:
 		G.hud.hide_screen("hud")
 	hide_all()
-	_screens["campaign"].visible = true
+	_show_screen("campaign")
 
 
 ## ==================== 门户模式(自定义规则):模式选择屏 + 结算 ====================
@@ -1480,13 +1559,13 @@ func _build_portal() -> void:
 	back.custom_minimum_size = Vector2(200, 38)
 	back.pressed.connect(func():
 		AudioSys.ui()
-		_screens["portal"].visible = false
-		_screens["menu"].visible = true)
+		_hide_screen("portal")
+		_show_screen("menu"))
 	v.add_child(back)
 
 
 func _open_portal_select() -> void:
-	_screens["portal"].visible = true
+	_show_screen("portal")
 
 
 ## 模式卡片:中文名 + 英文名 + 程序化地图预览 + 介绍文案 + 人数/时长 + 开始匹配
@@ -1561,14 +1640,14 @@ func _open_tdm_loadout() -> void:
 	var cur := str(G.sel_maps.get("tdm", "random"))
 	tdm_map_sel = cur if (cur == "random" or TDM_MAP_IDS.has(cur)) else "random"
 	_tdm_map_refresh()
-	_screens["tdm_loadout"].visible = true
+	_show_screen("tdm_loadout")
 
 
 ## 返回门户模式选择页
 func _back_from_tdm_loadout() -> void:
 	AudioSys.ui()
-	_screens["tdm_loadout"].visible = false
-	_screens["portal"].visible = true
+	_hide_screen("tdm_loadout")
+	_show_screen("portal")
 
 
 ## 确认出战:装备已写入 menus.tdm_loadout(模式控制器 game_mode_tdm.start() 读取),
@@ -1824,8 +1903,8 @@ func _br_card_start_click(mid: String) -> void:
 		_portal_start(mid)
 		return
 	_br_class_highlight()
-	_screens["portal"].visible = false
-	_screens["br_class"].visible = true
+	_hide_screen("portal")
+	_show_screen("br_class")
 
 
 ## ==================== 任务1:BR 兵种选择屏(大逃杀 · 选择兵种) ====================
@@ -1896,8 +1975,8 @@ func _build_br_class_select() -> void:
 	back.custom_minimum_size = Vector2(160, 42)
 	back.pressed.connect(func():
 		AudioSys.ui()
-		_screens["br_class"].visible = false
-		_screens["portal"].visible = true)
+		_hide_screen("br_class")
+		_show_screen("portal"))
 	row.add_child(back)
 	var confirm := UiTheme.make_cta("确认跳伞", 17)
 	confirm.custom_minimum_size = Vector2(0, 42)
@@ -1937,7 +2016,7 @@ func show_portal_end(result: Dictionary) -> void:
 		_end_title.add_theme_color_override("font_color", Color(0.75, 0.8, 0.85))
 		_end_stats.text = _portal_result_text()
 		hide_all()
-		_screens["end"].visible = true
+		_show_screen("end")
 		return
 	if result.has("my_win"):
 		win = bool(result["my_win"])
@@ -1952,7 +2031,7 @@ func show_portal_end(result: Dictionary) -> void:
 	_end_title.add_theme_color_override("font_color", Color(1, 0.85, 0.4) if win else Color(0.85, 0.4, 0.35))
 	_end_stats.text = _portal_result_text()
 	hide_all()
-	_screens["end"].visible = true
+	_show_screen("end")
 
 
 ## 门户结算统计(胜方比分 / 个人 KD / MVP / 战绩表;result 缺键时逐项降级)
@@ -2031,8 +2110,9 @@ func _build_pause() -> void:
 	b_set.pressed.connect(func():
 		AudioSys.ui()
 		_settings_from_pause = true
-		_screens["pause"].visible = false
-		_screens["settings"].visible = true)
+		# 不要先 _hide_screen("pause") 再 _show_screen("settings"):
+		# _hide_screen 会加 UI 锁,导致 _show_screen 被锁挡住,最终所有页面消失。
+		_show_screen("settings"))
 	v.add_child(b_set)
 	var b2 := UiTheme.make_button("放弃战斗", 15)
 	b2.custom_minimum_size = Vector2(260, 40)
@@ -2043,7 +2123,10 @@ func _build_pause() -> void:
 
 
 func show_pause(p_show: bool) -> void:
-	_screens["pause"].visible = p_show
+	if p_show:
+		_show_screen("pause")
+	else:
+		_hide_screen("pause")
 	# 暂停菜单在启动时一次性构建(G.mode 当时为默认值),每次弹出按当前模式刷新
 	# "切换兵种"可见性:战役/门户 TDM/BR 隐藏(避免误入部署屏/破坏模式自动复活流程)
 	if _pause_switch_btn != null:
@@ -2056,8 +2139,7 @@ func is_pause_visible() -> bool:
 
 ## 暂停菜单 → 切换兵种:还原暂停态 → 载具中先下车 → 强制阵亡 → 进入实时 3D 战场部署(选兵种在部署中按 F2)
 func _switch_class_from_pause() -> void:
-	_screens["pause"].visible = false
-	_screens["settings"].visible = false
+	hide_all()
 	G.paused = false
 	if G.player != null:
 		G.player.exit_vehicle(true)  # 载具中先下车
@@ -2083,25 +2165,48 @@ func _switch_class_from_pause() -> void:
 func close_settings() -> void:
 	_settings_from_pause = false
 	if _screens.has("settings"):
-		_screens["settings"].visible = false
+		_hide_screen("settings")
 
 
-## ==================== 加载 ====================
+## ==================== 加载 / 战场简报 ====================
 func _build_loading() -> void:
 	var s := _add_screen("loading")
-	_bg(s, Color(0.02, 0.03, 0.05, 1))
-	var l := UiTheme.make_label("正在部署战场…", 26, Color(0.8, 0.85, 0.9))
-	l.set_anchors_preset(Control.PRESET_CENTER)
-	s.add_child(l)
+	var lb: GDScript = load("res://src/ui/briefing_loading.gd")
+	if lb != null:
+		_briefing = lb.new()
+		s.add_child(_briefing)
 
 
 func show_loading(p_show: bool) -> void:
-	_screens["loading"].visible = p_show
+	if p_show:
+		_show_screen("loading", true)
+	else:
+		_hide_screen("loading", true)
+
+
+## 加载开始:填充地图情报(地图数据已在 Game 选图时确定)
+func briefing_setup(map_id: String, mode: String) -> void:
+	if _briefing != null:
+		_briefing.setup(map_id, mode)
+	show_loading(true)
+
+
+## 真实加载阶段反馈(Game.setup_map / bot reset 等阶段前调用)
+func set_loading_stage(stage: String, progress: float, detail := "") -> void:
+	if _briefing != null:
+		_briefing.set_stage(stage, progress, detail)
+
+
+## 加载结束:交给部署/游戏状态机;不做多余停留
+func finish_loading() -> void:
+	if _briefing != null:
+		_briefing.set_stage("战场已就绪", 1.0, "正在进入实时部署…")
+	_hide_screen("loading", true)
 
 
 func show_menu() -> void:
 	hide_all()
-	_screens["menu"].visible = true
+	_show_screen("menu")
 	_set_tab_active("menu")
 
 
@@ -2184,7 +2289,7 @@ func _switch_tab(id: String) -> void:
 	if not _screens.has(id):
 		return
 	hide_all()
-	_screens[id].visible = true
+	_show_screen(id)
 	_set_tab_active(id)
 	if id == "armory":
 		_armory_enter()
@@ -2223,11 +2328,15 @@ func _toast(msg: String) -> void:
 
 
 ## ==================== 枪械改装界面(核心,三角洲风格:左选枪/中 3D/右槽位) ====================
-const ARM_SLOT_CN := { "muzzle": "枪口", "mag": "弹匣", "grip": "握把", "trigger": "扳机", "optic": "瞄具" }
+const ARM_SLOT_CN := {
+	"muzzle": "枪口", "barrel": "枪管", "grip": "握把", "stock": "枪托",
+	"mag": "弹匣", "trigger": "扳机", "optic": "瞄具", "laser": "镭射/手电",
+}
 const STAT_CN := {
 	"mag_ammo": "弹匣容量", "reload_mult": "换弹速度", "recoil_mult": "后座控制", "recoil_pitch_mult": "垂直后座控制",
-	"hip_spread_mult": "腰射精度", "spread_mult": "散布精度", "ads_speed_mult": "开镜速度",
-	"fire_rate_mult": "射速", "dmg_mult": "伤害", "suppress": "隐蔽",
+	"recoil_yaw_mult": "水平后座控制", "hip_spread_mult": "腰射精度", "spread_mult": "散布精度",
+	"aim_stability": "瞄准稳定", "ads_speed_mult": "开镜速度",
+	"fire_rate_mult": "射速", "dmg_mult": "伤害", "suppress": "隐蔽", "mobility_mult": "移动速度",
 }
 const KIND_CN := {
 	"rifle": "突击步枪", "smg": "冲锋枪", "lmg": "轻机枪", "shotgun": "霰弹枪",
@@ -2237,12 +2346,18 @@ var _arm_weapon := ""                # 记住上次选择的武器(切 Tab 回�
 var _arm_cfg: Dictionary = {}        # 工作配置 {槽位: 件id}(未保存)
 var _arm_open_slot := ""
 var _arm_pivot: Node3D = null
+var _arm_cam: Camera3D = null
+var _arm_cam_base := Vector3(0, 0.32, 2.6)
+var _arm_focus_pos := Vector3(0, 0.32, 2.6)
+var _arm_focus_target := Vector3(0, -0.02, -0.2)
 var _arm_yaw := 0.0
 var _arm_pitch := 0.0
 var _arm_dragging := false
+var _arm_zoom := 2.6
 var _arm_list: VBoxContainer = null
 var _arm_slots: VBoxContainer = null
 var _arm_cur_label: Label = null
+var _arm_stats: VBoxContainer = null
 var _mod_data: Dictionary = {}       # {槽位:{件id:{n,d,s}}} = WeaponModsData.MODS 各槽位数据
 var _mod_ready := false
 
@@ -2327,6 +2442,10 @@ func _build_armory() -> void:
 	cam.fov = 34
 	vp.add_child(cam)
 	cam.look_at(Vector3(0, -0.02, -0.2), Vector3.UP)
+	_arm_cam = cam
+	_arm_focus_pos = _arm_cam_base
+	_arm_focus_target = Vector3(0, -0.02, -0.2)
+	_arm_zoom = 2.6
 	var l1 := DirectionalLight3D.new()
 	l1.rotation_degrees = Vector3(-50, -35, 0)
 	l1.light_energy = 1.1
@@ -2335,6 +2454,43 @@ func _build_armory() -> void:
 	l2.rotation_degrees = Vector3(15, 50, 0)
 	l2.light_energy = 0.45
 	vp.add_child(l2)
+	# ---- 改枪台(浅色背墙 + 浅木台面 + 环境光,黑枪在深色 UI 上也能看清) ----
+	var arm_env := WorldEnvironment.new()
+	var arm_e := Environment.new()
+	arm_e.background_mode = Environment.BG_COLOR
+	arm_e.background_color = Color(0.62, 0.66, 0.72)
+	arm_e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	arm_e.ambient_light_color = Color(0.72, 0.78, 0.86)
+	arm_e.ambient_light_energy = 1.1
+	arm_env.environment = arm_e
+	vp.add_child(arm_env)
+	var _mk_arm_mat := func(c: Color, rough: float, metal: float) -> StandardMaterial3D:
+		var mm := StandardMaterial3D.new()
+		mm.albedo_color = c
+		mm.roughness = rough
+		mm.metallic = metal
+		return mm
+	var wall := MeshInstance3D.new()
+	var wm := BoxMesh.new()
+	wm.size = Vector3(3.2, 2.4, 0.06)
+	wall.mesh = wm
+	wall.material_override = _mk_arm_mat.call(Color(0.62, 0.66, 0.72), 0.92, 0.0)
+	wall.position = Vector3(0, 0.25, -1.75)
+	vp.add_child(wall)
+	var table := MeshInstance3D.new()
+	var tm := BoxMesh.new()
+	tm.size = Vector3(2.1, 0.09, 1.2)
+	table.mesh = tm
+	table.material_override = _mk_arm_mat.call(Color(0.72, 0.63, 0.46), 0.72, 0.05)
+	table.position = Vector3(0, -0.58, -0.3)
+	vp.add_child(table)
+	var trim := MeshInstance3D.new()
+	var trim_m := BoxMesh.new()
+	trim_m.size = Vector3(2.1, 0.035, 0.05)
+	trim.mesh = trim_m
+	trim.material_override = _mk_arm_mat.call(Color(0.78, 0.82, 0.86), 0.35, 0.75)
+	trim.position = Vector3(0, -0.51, -0.3)
+	vp.add_child(trim)
 	_arm_pivot = Node3D.new()
 	vp.add_child(_arm_pivot)
 	# ---- 右:槽位面板 ----
@@ -2344,6 +2500,11 @@ func _build_armory() -> void:
 	var rv := VBoxContainer.new()
 	rv.add_theme_constant_override("separation", 8)
 	right_panel.add_child(rv)
+	rv.add_child(UiTheme.make_label("性能总览 · 安装前 → 安装后", 14, UiTheme.PRIMARY))
+	_arm_stats = VBoxContainer.new()
+	_arm_stats.add_theme_constant_override("separation", 4)
+	_arm_stats.custom_minimum_size = Vector2(0, 172)
+	rv.add_child(_arm_stats)
 	rv.add_child(UiTheme.make_label("改装槽位", 15, UiTheme.PRIMARY))
 	_arm_slots = VBoxContainer.new()
 	_arm_slots.add_theme_constant_override("separation", 6)
@@ -2429,6 +2590,16 @@ func _armory_select(wid: String) -> void:
 	_armory_refresh_slots()
 
 
+## 配件切换时的平滑视觉反馈(小缩放脉冲,不瞬跳)
+func _armory_pulse_view() -> void:
+	if _arm_pivot == null:
+		return
+	_arm_pivot.scale = Vector3(0.92, 0.92, 0.92)
+	var tw := _arm_pivot.create_tween()
+	tw.tween_property(_arm_pivot, "scale", Vector3.ONE, 0.16) \
+		.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
 ## 3D 预览:重建武器模型(Visual 团队 build(id,with_hands,mods) 扩展前按 2 参调用)
 func _armory_rebuild_view() -> void:
 	if _arm_pivot == null:
@@ -2448,10 +2619,93 @@ func _armory_view_input(ev: InputEvent) -> void:
 		return
 	if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_LEFT:
 		_arm_dragging = ev.pressed
+	elif ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_WHEEL_UP and ev.pressed:
+		_arm_zoom = clampf(_arm_zoom * 0.9, 1.5, 4.2)
+		_armory_apply_focus(_arm_open_slot)
+	elif ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_WHEEL_DOWN and ev.pressed:
+		_arm_zoom = clampf(_arm_zoom * 1.11, 1.5, 4.2)
+		_armory_apply_focus(_arm_open_slot)
 	elif ev is InputEventMouseMotion and _arm_dragging:
 		_arm_yaw += ev.relative.x * 0.01
 		_arm_pitch = clampf(_arm_pitch + ev.relative.y * 0.008, -1.2, 1.2)
 		_arm_pivot.rotation = Vector3(_arm_pitch, _arm_yaw, 0)
+
+
+## 槽位聚焦镜头:选择不同改装部位时平滑移动/缩放 3D 预览相机
+func _armory_apply_focus(slot: String) -> void:
+	var targets := {
+		"optic": Vector3(0.0, 0.06, -0.10),
+		"muzzle": Vector3(0.0, 0.03, -0.72),
+		"barrel": Vector3(0.0, 0.03, -0.48),
+		"grip": Vector3(0.0, -0.04, -0.36),
+		"mag": Vector3(0.0, -0.10, -0.06),
+		"stock": Vector3(0.0, 0.02, 0.22),
+		"trigger": Vector3(0.0, -0.05, 0.02),
+		"laser": Vector3(0.0, -0.04, -0.36),
+	}
+	_arm_focus_target = targets.get(slot, Vector3(0.0, -0.02, -0.2))
+	var dir := Vector3(0.14, 0.24, 1.0).normalized()
+	_arm_focus_pos = _arm_focus_target + dir * _arm_zoom
+
+
+## 性能总览:核心五项(伤害/射程/稳定/操控/精准),前后两段细条对比。
+func _armory_refresh_stats() -> void:
+	if _arm_stats == null:
+		return
+	for c in _arm_stats.get_children():
+		_arm_stats.remove_child(c)
+		c.queue_free()
+	if _arm_weapon == "" or not WeaponsData.W().has(_arm_weapon):
+		return
+	var w = WeaponsData.W()[_arm_weapon]
+	var scr := _wmd_script()
+	var before: Dictionary = {}
+	var after: Dictionary = {}
+	if scr != null and _wmd_methods().has("total_effects") and _wmd_methods().has("defaults"):
+		var dft = scr.call("defaults", _arm_weapon)
+		if dft is Dictionary:
+			before = scr.call("total_effects", dft)
+		after = scr.call("total_effects", _arm_cfg)
+	var def_dmg: float = float(w.damage)
+	var def_rng: float = float(w.rng[1])
+	var rows := [
+		["伤害", def_dmg * float(after.get("dmg_mult", 1.0)), def_dmg * float(before.get("dmg_mult", 1.0)), 120.0],
+		["射程", def_rng, def_rng, 320.0],
+		["稳定", (1.0 - float(after.get("recoil_mult", 1.0))) * 0.5 + (1.0 - float(after.get("recoil_pitch_mult", 1.0))) * 0.5, (1.0 - float(before.get("recoil_mult", 1.0))) * 0.5 + (1.0 - float(before.get("recoil_pitch_mult", 1.0))) * 0.5, 1.0],
+		["操控", (1.0 / maxf(float(after.get("ads_speed_mult", 1.0)), 0.2) + float(after.get("mobility_mult", 1.0))) * 0.5, (1.0 / maxf(float(before.get("ads_speed_mult", 1.0)), 0.2) + float(before.get("mobility_mult", 1.0))) * 0.5, 1.4],
+		["精准", (2.0 - float(after.get("spread_mult", 1.0)) - float(after.get("hip_spread_mult", 1.0)) * 0.4) * 0.5, (2.0 - float(before.get("spread_mult", 1.0)) - float(before.get("hip_spread_mult", 1.0)) * 0.4) * 0.5, 1.0],
+	]
+	for row in rows:
+		var label: String = row[0]
+		var av: float = float(row[1])
+		var bv: float = float(row[2])
+		var mx: float = float(row[3])
+		var line := HBoxContainer.new()
+		line.add_theme_constant_override("separation", 6)
+		var ll := UiTheme.make_label(label, 11, UiTheme.TXT_DIM)
+		ll.custom_minimum_size = Vector2(34, 0)
+		line.add_child(ll)
+		var bar_bg := PanelContainer.new()
+		bar_bg.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		bar_bg.custom_minimum_size = Vector2(0, 12)
+		bar_bg.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.08, 0.1, 0.12, 0.9), Color(0.25, 0.32, 0.4, 0.4), 1, 1, 4))
+		var bars := Control.new()
+		bar_bg.add_child(bars)
+		var bbar := ColorRect.new()
+		bbar.color = Color(0.45, 0.55, 0.62, 0.55)
+		bbar.position = Vector2(1, 2)
+		bbar.size = Vector2(maxf((bar_bg.size.x - 4.0) * clampf(bv / mx, 0.0, 1.0), 1.0), 6.0)
+		bars.add_child(bbar)
+		var abar := ColorRect.new()
+		abar.color = UiTheme.PRIMARY
+		abar.position = Vector2(1, 1)
+		abar.size = Vector2(maxf((bar_bg.size.x - 4.0) * clampf(av / mx, 0.0, 1.0), 1.0), 6.0)
+		bars.add_child(abar)
+		bar_bg.resized.connect(func():
+			bbar.size.x = maxf((bar_bg.size.x - 4.0) * clampf(bv / mx, 0.0, 1.0), 1.0)
+			abar.size.x = maxf((bar_bg.size.x - 4.0) * clampf(av / mx, 0.0, 1.0), 1.0))
+		line.add_child(bar_bg)
+		_arm_stats.add_child(line)
 
 
 ## 槽位面板:5 槽竖排,行=槽名+当前件+属性摘要;点击展开可选件(is_compatible 过滤)
@@ -2459,8 +2713,19 @@ func _armory_refresh_slots() -> void:
 	for c in _arm_slots.get_children():
 		_arm_slots.remove_child(c)
 		c.queue_free()
+	# 按武器种类动态显示可用槽位(手枪/霰弹枪等结构约束,不支持的槽位隐藏)
+	var avail: Array = []
+	var scr := _wmd_script()
+	if _mod_ready and scr != null and _wmd_methods().has("weapon_slots"):
+		var ws = scr.call("weapon_slots", _arm_weapon)
+		if ws is Array:
+			avail = ws
 	for slot in ARM_SLOT_CN:
+		if not avail.is_empty() and not avail.has(slot):
+			continue
 		_arm_slots.add_child(_armory_slot_row(slot))
+	_armory_apply_focus(_arm_open_slot)
+	_armory_refresh_stats()
 
 
 func _armory_slot_row(slot: String) -> Control:
@@ -2571,7 +2836,8 @@ func _armory_mod_item(slot: String, mid: String, md: Dictionary, def_mid := "") 
 			_arm_cfg[slot] = mid
 			_arm_open_slot = ""
 			_armory_refresh_slots()
-			_armory_rebuild_view())
+			_armory_rebuild_view()
+			_armory_pulse_view())
 	return item
 
 
@@ -2595,10 +2861,10 @@ func _stat_line(key: String, val) -> String:
 		"mag_ammo":
 			var iv := int(val)
 			return (green if iv >= 0 else red) + cn + " " + ("+" if iv >= 0 else "") + str(iv) + "[/color]"
-		"reload_mult", "recoil_mult", "recoil_pitch_mult", "hip_spread_mult", "spread_mult", "ads_speed_mult":
+		"reload_mult", "recoil_mult", "recoil_pitch_mult", "recoil_yaw_mult", "hip_spread_mult", "spread_mult", "ads_speed_mult", "aim_stability":
 			var p1 := (1.0 - float(val)) * 100.0
 			return (green if p1 >= 0.0 else red) + cn + " " + ("+" if p1 >= 0.0 else "-") + ("%.0f%%" % absf(p1)) + "[/color]"
-		"fire_rate_mult", "dmg_mult":
+		"fire_rate_mult", "dmg_mult", "mobility_mult":
 			var p2 := (float(val) - 1.0) * 100.0
 			return (green if p2 >= 0.0 else red) + cn + " " + ("+" if p2 >= 0.0 else "-") + ("%.0f%%" % absf(p2)) + "[/color]"
 		"suppress":
@@ -2643,7 +2909,13 @@ func _armory_defaults(wid: String) -> Dictionary:
 			return d
 	var cfg := {}
 	for slot in ARM_SLOT_CN:
-		cfg[slot] = _armory_std_mod(slot)
+		var mid2 := _armory_std_mod(slot)
+		if mid2 == "":
+			continue
+		if scr != null and _wmd_methods().has("is_compatible"):
+			if not bool(scr.call("is_compatible", wid, slot, mid2)):
+				continue
+		cfg[slot] = mid2
 	return cfg
 
 

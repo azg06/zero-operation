@@ -102,10 +102,17 @@ func _assign_skills() -> void:
 var _bot_sh_t := 0.0   # [8/10] bot 阴影分级节流计时
 var _ai_dbg := false   # --ai-debug:头顶 AI 状态浮字(状态/任务/卡死阶段)
 var _ai_dbg_t := 0.0
+# ---- [BENCH-BOTS] 临时 CPU 计时(--bench-bots;性能审计后移除) ----
+var _bb_on := false
+var _bb_t := 0.0
+var _bb_max := 0.0
+var _bb_n := 0
 
 
 func _ready() -> void:
 	_ai_dbg = OS.get_cmdline_user_args().has("--ai-debug")
+	_bb_on = OS.get_cmdline_user_args().has("--bench-bots")
+	Bot._bbot_on = OS.get_cmdline_user_args().has("--bench-bot")
 	# AI 战场指挥层(4s 一拍:回防/支援/夺旗/推进/驻守任务分配)
 	add_child(AIDirector.new())
 
@@ -148,6 +155,9 @@ func update_bots(dt: float) -> void:
 	# [PERF-AUDIT] --noai 临时禁用 AI 更新(仅性能审计用,测量 AI 占 CPU 比例)
 	if OS.get_cmdline_user_args().has("--noai"):
 		return
+	var _bt0 := 0
+	if _bb_on:
+		_bt0 = Time.get_ticks_usec()
 	# [8/10] bot 阴影分级投射:>40m 关阴影(阴影 pass 提交大降,1%Low 波动消除;近处保留视觉)
 	_bot_sh_t += dt
 	if _bot_sh_t >= 0.5:
@@ -177,7 +187,28 @@ func update_bots(dt: float) -> void:
 					b.respawn_t = Utils.rand(4, 7) * (enemy_respawn_mod if b.team != (G.player.team if G.player != null else "us") else 1.0)
 				G.game.spawn_actor(b)
 			continue
+		# [PERF] 远距 bot 更新频率分级:>60m(LOD2)每 2 帧完整更新,中间帧位置外推(移动不冻结,无碰撞远距容忍)
+		if b._anim_lod >= 2 and (Engine.get_process_frames() + b.id) % 2 == 1:
+			b.pos += b.vel * dt
+			b.mesh.position = b.pos
+			continue
 		b.update_bot(dt)
+	if _bb_on:
+		var _bb_dt := Time.get_ticks_usec() - _bt0
+		_bb_t += _bb_dt
+		_bb_max = maxf(_bb_max, _bb_dt)
+		_bb_n += 1
+		if _bb_n >= 900:
+			var _alive := 0
+			for _bb_b in bots:
+				if _bb_b.alive:
+					_alive += 1
+			print("[BENCH-BOTS] update_bots avg=%.1fus max=%.1fus  bots=%d alive=%d  frames=%d" % [_bb_t / float(_bb_n), _bb_max, bots.size(), _alive, _bb_n])
+			_bb_t = 0.0
+			_bb_max = 0.0
+			_bb_n = 0
+	Bot._bbot_report()
+	Utils._bfire_report()
 
 
 ## [PERF-AUDIT] 递归设置阴影投射(审计/分级用)
@@ -202,7 +233,7 @@ func _update_balance(dt: float) -> void:
 	# BR:固定 47×2 混战名单(无阵营/无重生),不适用票差胶带与动态增减
 	if G.mode == "br":
 		return
-	# 突破模式票数天生不对称(攻 250/def ∞),票差胶带不适用,跳过
+	# 突破模式票数天生不对称(攻 320/def ∞),票差胶带不适用,跳过
 	if G.mode == "breakthrough":
 		return
 	# 票差胶带:我方大优 → 敌方变强/复活变快;我方大劣 → 敌方变弱

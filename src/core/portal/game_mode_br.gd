@@ -324,7 +324,7 @@ func start(p_map_id: String = "") -> void:
 	round_started.emit("br", map_id, br_total)
 	if G.hud != null:
 		G.hud.banner("大逃杀:100 名参赛者 · 25 队,10 秒后起飞!")
-	# [PERF] BR 开局应用优化档(shadows 4096 / SSIL 关 / SSR 关),对局收尾恢复
+	# [PERF] BR 开局应用优化档(shadows 2048 / SSIL 关 / SSR 关),对局收尾恢复
 	if GraphicsQuality != null:
 		GraphicsQuality.apply_br_preset()
 

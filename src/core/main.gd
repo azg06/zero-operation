@@ -1,4 +1,4 @@
-﻿extends Node3D
+extends Node3D
 ## 主装配与主循环(对应 main.js)
 
 ## ---- 输入系统(对应 input.js) ----
@@ -34,7 +34,7 @@ var _vm_camera: Camera3D
 var _vm_sun: DirectionalLight3D
 var _vm_e: Environment
 var _fxaa_rect: ColorRect
-var _cine_rect: ColorRect      # 电影级后期(自定义着色器:微对比/泛光/颗粒/暗角/色差)
+var _cine_rect: ColorRect      # 电影级后期(自定义着色器:微对比/泛光/颗粒/暗角;色差已移除)
 # ---- [8/10] 动态质量系统:帧时间超标自动逐级降级(SSR→MSAA→阴影→后期→泛光),稳定后恢复 ----
 var _dq_level := 0
 var _dq_t := 0.0
@@ -89,6 +89,21 @@ var _ps_gt100 := 0
 var _ps_win_t := 0.0
 var _ps_win_n := 0
 var _ps_enter_t := -1e9
+# ---- [PERF] 载具/飞机更新分级计时(--bench-veh;性能审计) ----
+var _bench_veh_on := false
+var _bv_t := 0.0
+var _bv_n := 0
+# ---- [PERF] Debug 性能监控(--perf-monitor 或 F3 切换):实时 FPS/帧时间/CPU/物理/AI/DrawCall/对象/内存/显存 ----
+var _perf_mon := false
+var _perf_layer: CanvasLayer = null
+var _perf_label: Label = null
+var _perf_tick := 0.0
+var _perf_f3_held := false
+var _ai_time_us := 0.0          # 平滑后的 AI(bot) 更新耗时(µs)
+# ---- [PERF] 子系统分项计时(--bench-sys;定位帧尖峰来源) ----
+var _bsys_on := false
+var _bsys := {}                 # name -> { t(累计µs), max(单帧µs), n }
+var _bsys_n := 0
 var _sun_occ_t := 0.0
 var _sun_blocked := false
 var _flashlight: SpotLight3D
@@ -167,7 +182,7 @@ func _ready() -> void:
 	_vm_viewport = SubViewport.new()
 	_vm_viewport.own_world_3d = true
 	_vm_viewport.transparent_bg = true
-	_vm_viewport.msaa_3d = Viewport.MSAA_4X  # 手臂/枪械抗锯齿(原 FXAA 覆盖不到独立世界边缘)
+	_vm_viewport.msaa_3d = Viewport.MSAA_2X  # 手臂/枪械抗锯齿(独立世界;4X→2X 降低视角模型采样开销)
 	_vm_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	_vm_viewport.size = get_viewport().get_visible_rect().size
 	vm_container.add_child(_vm_viewport)
@@ -211,10 +226,11 @@ func _ready() -> void:
 	pcss_mat.shader = load("res://src/fx/pcss_soft.gdshader")
 	pcss_rect.material = pcss_mat
 	pcss_layer.add_child(pcss_rect)
-	# 阴影基础质量:软模糊 + 高分辨率阴影图集(进一步降低锯齿/闪烁)
+	# 阴影基础质量:软模糊 + 高分辨率阴影图集 + 32bit 深度(use_16_bits=false,
+	# 更高的深度精度可显著减少阴影边缘锯齿/闪烁与 shadow acne)
 	if G.sun != null:
 		G.sun.shadow_blur = 1.15
-		RenderingServer.directional_shadow_atlas_set_size(4096, true)
+		RenderingServer.directional_shadow_atlas_set_size(4096, false)
 	# ---- 电影级后期(自定义着色器;层 4.5:3D/FXAA 之上,HUD(5) 之下,设置可开关) ----
 	var cine_layer := CanvasLayer.new()
 	cine_layer.layer = 4.5
@@ -355,6 +371,8 @@ func _ready() -> void:
 		print("[VALIDATE] 初始化完成,世界已构建: 碰撞体=", G.colliders.size(), " 旗帜=", G.flags.size())
 	# 无头游玩测试:--test-play [mode] [map]
 	var ua := OS.get_cmdline_user_args()
+	if ua.has("--test-play"):
+		print("[TEST] 收到 --test-play, args=", ua)
 	if ua.has("--screenshot"):
 		var sidx := ua.find("--screenshot")
 		if ua.size() > sidx + 2:
@@ -506,6 +524,10 @@ func _ready() -> void:
 				G.vm_viewport.get_texture().get_image().save_png(cap_path)
 				print("[ADS-CAP] saved ", cap_path)
 				var cap_full := "user://ads_%s_full.png" % opt_arg
+				# 强制刷新 HUD 准星后截图(红点/全息镜内准星状态最新)
+				if G.hud != null:
+					G.hud._crosshair.queue_redraw()
+				await get_tree().process_frame
 				get_viewport().get_texture().get_image().save_png(cap_full)
 				print("[ADS-CAP] saved ", cap_full)
 			# 恢复原档(原本无档则删除临时文件,不留残留)
@@ -842,6 +864,83 @@ func _ready() -> void:
 			print("[INPUT] F 后 driver=", vv.driver == G.player, " gunner=", vv.gunner == G.player, " crew=", G.player._veh_crew)
 			await tap.call("gadget")
 			print("[INPUT] F 再按 driver=", vv.driver == G.player, " gunner=", vv.gunner == G.player, " crew=", G.player._veh_crew)
+	# 程序化运动链路测试:--test-motion(配合 --test-play)
+	# 覆盖 Idle -> Walk -> Run -> Sprint -> Hard Stop -> Turn -> ADS -> Aim Walk -> Jump -> Landing。
+	# 只打印诊断,不修改手感参数;正常游玩无此 flag 时零开销。
+	if ua.has("--test-motion") and G.player != null and G.player.alive:
+		await get_tree().create_timer(1.5).timeout
+		G.player.spawn_protect = 999.0
+		G.player.sprint_toggled = false
+		var mot := G.player.motion as FirstPersonMotionSystem
+		var log := func(tag: String) -> void:
+			if mot == null:
+				print("[MOTION] ", tag, " motion=null")
+				return
+			var gg := G.player.gun() as Gun
+			var wpo: Vector3 = mot.weapon_offset()
+			var wro: Vector3 = mot.weapon_rotation_offset()
+			print("[MOTION] %-12s state=%-10s hspd=%5.2f ads=%4.2f cam_off=(%+.4f,%+.4f,%+.4f) cam_rot=(%+.4f,%+.4f,%+.4f) wpn_off=(%+.4f,%+.4f,%+.4f) wpn_rot=(%+.4f,%+.4f,%+.4f)" % [
+				tag, mot.state_name(), Vector2(G.player.vel.x, G.player.vel.z).length(),
+				gg.ads_amount if gg != null else 0.0,
+				mot.camera_position().x, mot.camera_position().y, mot.camera_position().z,
+				mot.camera_rotation().x, mot.camera_rotation().y, mot.camera_rotation().z,
+				wpo.x, wpo.y, wpo.z, wro.x, wro.y, wro.z])
+		var tap := func(action: String) -> void:
+			var ev := InputEventAction.new()
+			ev.action = action
+			ev.pressed = true
+			Input.parse_input_event(ev)
+			await get_tree().process_frame
+			var ev2 := InputEventAction.new()
+			ev2.action = action
+			ev2.pressed = false
+			Input.parse_input_event(ev2)
+			await get_tree().process_frame
+		await get_tree().create_timer(1.2).timeout
+		log.call("idle")
+		# 1) Walk:不切 sprint,按住 W 0.9s
+		Input.action_press("move_forward")
+		await get_tree().create_timer(0.9).timeout
+		log.call("walk")
+		# 2) Run -> Sprint:sprint 切换为 toggle,速度平滑爬升期间经过 run 状态
+		await tap.call("sprint")
+		await get_tree().create_timer(0.12).timeout
+		log.call("run")
+		await get_tree().create_timer(0.78).timeout
+		log.call("sprint")
+		# 3) Hard Stop:释放 W,让武器前冲并回弹;采样停止瞬间与稳定后
+		Input.action_release("move_forward")
+		await get_tree().create_timer(0.10).timeout
+		log.call("stop")
+		await get_tree().create_timer(0.75).timeout
+		log.call("stop_settle")
+		# 4) Turn:注入快速鼠标 Delta(等价于快速右转),Sway 应按速度非线性增大
+		G.input_sys.mouse_dx += 420.0
+		G.input_sys.mouse_dy -= 30.0
+		await get_tree().create_timer(0.08).timeout
+		log.call("turn_peak")
+		await get_tree().create_timer(0.55).timeout
+		log.call("turn_settle")
+		# 5) ADS:开镜后 Bob/Sway 大幅降低,呼吸保留
+		Input.action_press("ads")
+		await get_tree().create_timer(0.85).timeout
+		log.call("ads")
+		# 6) Aim Walk:开镜中移动,程序层必须仍保留轻微节奏
+		Input.action_press("move_forward")
+		await get_tree().create_timer(0.8).timeout
+		log.call("aim_walk")
+		Input.action_release("move_forward")
+		Input.action_release("ads")
+		await get_tree().create_timer(0.6).timeout
+		# 7) Jump -> Landing:真实跳跃输入,随后落地冲量衰减
+		await tap.call("jump")
+		await get_tree().create_timer(0.10).timeout
+		log.call("jump")
+		await get_tree().create_timer(0.70).timeout
+		log.call("landing")
+		await get_tree().create_timer(1.10).timeout
+		log.call("landing_settle")
+		print("[MOTION] 运动链路测试完成")
 	if ua.has("--test-end"):
 		await get_tree().create_timer(4.0).timeout
 		G.tickets["ru"] = 0
@@ -886,6 +985,11 @@ func _ready() -> void:
 		G.settings["vsync"] = 0
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 		print("[BENCH] --bench 开启:目标 %d 帧 标签=%s(垂直同步已关)" % [_bench_target, _bench_label])
+	_bench_veh_on = ua.has("--bench-veh")
+	_bsys_on = ua.has("--bench-sys")
+	_perf_mon = ua.has("--perf-monitor")
+	if _perf_mon:
+		_build_perf_monitor()
 	if ua.has("--test-lookdown"):
 		_dbg_lookdown = true
 	if ua.has("--test-pose"):
@@ -949,7 +1053,7 @@ func _setup_menu_scene() -> void:
 	# 隐藏玩家视角模型/乘员/身体(主菜单不显示)
 	if G.player != null:
 		for gun in G.player.guns:
-			gun.holster()
+			gun.holster(true)
 		if G.player.veh_body != null:
 			G.player.veh_body.visible = false
 		G.player.alive = false
@@ -1275,7 +1379,7 @@ func apply_graphics() -> void:
 	# 阴影
 	if G.sun != null:
 		G.sun.shadow_enabled = s.shadows > 0
-		RenderingServer.directional_shadow_atlas_set_size(int(s.shadows) if s.shadows > 0 else 1024, true)
+		RenderingServer.directional_shadow_atlas_set_size(int(s.shadows) if s.shadows > 0 else 1024, false)
 		if OS.has_feature("web"):
 			G.sun.shadow_bias = 0.09
 			G.sun.shadow_normal_bias = 0.35
@@ -1344,7 +1448,7 @@ func _apply_dq() -> void:
 		env.glow_enabled = bool(s.get("glow", true)) if _dq_level < 5 else false
 		if _dq_level >= 3 and G.sun != null:
 			G.sun.shadow_enabled = true
-			RenderingServer.directional_shadow_atlas_set_size(2048, true)
+			RenderingServer.directional_shadow_atlas_set_size(2048, false)
 	if _cine_rect != null and _dq_level >= 4:
 		_cine_rect.visible = false
 
@@ -1360,6 +1464,18 @@ func reset_dq() -> void:
 ## ============ 主循环(对应 loop) ============
 func _process(dt_raw: float) -> void:
 	var dt := minf(dt_raw, 0.05)
+
+	# [PERF] Debug 性能监控:F3 切换显隐 + 节流刷新(0.5s 一拍,避免监控自身成为开销)
+	if _perf_mon and _perf_label != null:
+		var _f3 := Input.is_key_pressed(KEY_F3)
+		if _f3 and not _perf_f3_held:
+			_perf_label.visible = not _perf_label.visible
+		_perf_f3_held = _f3
+		if _perf_label.visible:
+			_perf_tick -= dt
+			if _perf_tick <= 0.0:
+				_perf_tick = 0.5
+				_update_perf_label()
 
 	# 特勤处备战屋状态机:菜单态显示房间 + 相机缓慢左右摆动;非菜单态隐藏(相机交还战斗/部署逻辑)
 	if _ready_room != null:
@@ -1410,16 +1526,66 @@ func _process(dt_raw: float) -> void:
 			# 战役过场:相机由 campaign 接管(不跑玩家相机/输入),结束交还
 			if not (G.campaign != null and G.campaign.is_cutscene()):
 				G.player.update_player(dt)
+		var _bt := 0
+		if _bsys_on or _perf_mon:
+			_bt = Time.get_ticks_usec()
+		# [PERF] 动态实体空间网格每帧重建(ballistic_fire 命中扫描 O(n)→O(近邻))
+		Utils.rebuild_actor_grid()
 		G.bot_manager.update_bots(dt)
+		if _bsys_on:
+			_bsys_tick("bot", _bt)
+		if _perf_mon:
+			_ai_time_us = Utils.damp(_ai_time_us, float(Time.get_ticks_usec() - _bt), 4.0, dt)
+		if _bsys_on:
+			_bt = Time.get_ticks_usec()
 		_effects.update_effects(dt)
+		if _bsys_on:
+			_bsys_tick("fx", _bt)
+		if _bsys_on:
+			_bt = Time.get_ticks_usec()
 		WorldBuilder.update_map(dt)
+		if _bsys_on:
+			_bsys_tick("world", _bt)
+		if _bsys_on:
+			_bt = Time.get_ticks_usec()
 		G.game.update_game(dt)
+		if _bsys_on:
+			_bsys_tick("game", _bt)
 		if G.campaign != null and G.campaign.running:
 			G.campaign.update(dt)
+		var _vbt0 := 0
+		if _bench_veh_on or _bsys_on:
+			_vbt0 = Time.get_ticks_usec()
+		# [PERF] 载具/飞机距离分级:远距降频 + 位置外推(移动连续);debug --veh-lod-off 关闭用于基线
+		var _pv_pos: Vector3 = G.player.pos if (G.player != null and G.player.alive) else Vector3.ZERO
+		var _pv_ok: bool = G.player != null and G.player.alive
+		var _frm := Engine.get_process_frames()
+		var _veh_lod_off: bool = OS.get_cmdline_user_args().has("--veh-lod-off")
 		for v in G.vehicles:
+			if not _veh_lod_off and _pv_ok and v.pos.distance_to(_pv_pos) > 70.0 and (_frm + v.get_instance_id()) % 2 == 1:
+				v.pos.x += -sin(v.yaw) * v.speed * dt
+				v.pos.z += -cos(v.yaw) * v.speed * dt
+				if v.mesh != null:
+					v.mesh.position = v.pos
+				continue
 			v.update_vehicle(dt)
 		for a in G.aircraft:
+			if not _veh_lod_off and _pv_ok and a.pos.distance_to(_pv_pos) > 140.0 and (_frm + a.get_instance_id()) % 2 == 1:
+				a.pos += a.vel * dt
+				if a.mesh != null:
+					a.mesh.position = a.pos
+				continue
 			a.update_aircraft(dt)
+		if _bench_veh_on:
+			_bv_t += Time.get_ticks_usec() - _vbt0
+			_bv_n += 1
+			if _bv_n >= 900:
+				print("[BENCH-VEH] update_veh+air avg=%.1fus/frame  vehicles=%d aircraft=%d frames=%d" % [_bv_t / float(_bv_n), G.vehicles.size(), G.aircraft.size(), _bv_n])
+				_bv_t = 0.0
+				_bv_n = 0
+		if _bsys_on:
+			_bsys_tick("veh", _vbt0)
+			_bsys_report()
 	# ---- 大逃杀:全局引用同步(模式实例生命周期归 PortalManager;死亡观战相机接管) ----
 	if G.mode == "br":
 		if G.portal != null:
@@ -1634,11 +1800,84 @@ func _process(dt_raw: float) -> void:
 				_ps_gt250 += 1
 			if dt_raw > 0.1:
 				_ps_gt100 += 1
+			if dt_raw > 0.05:
+				print("[SPIKE] frame=%d dt=%.0fms state=%s bots=%d vehicles=%d aircraft=%d nodes=%d" % [
+					Engine.get_process_frames(), dt_raw * 1000.0, G.state, G.bots.size(), G.vehicles.size(), G.aircraft.size(),
+					Performance.get_monitor(Performance.OBJECT_NODE_COUNT)])
 			if _ps_stress_n % 300 == 0:
 				print("[STRESS] frame=%d fps=%.1f" % [_ps_stress_n, Engine.get_frames_per_second()])
 			if _ps_stress_n >= _ps_stress_target:
 				_dump_stress()
 				get_tree().quit()
+
+
+## [PERF] 构建 Debug 性能监控浮层(CanvasLayer + Label,最顶层)
+func _build_perf_monitor() -> void:
+	_perf_layer = CanvasLayer.new()
+	_perf_layer.layer = 100
+	add_child(_perf_layer)
+	_perf_label = Label.new()
+	_perf_label.position = Vector2(12, 12)
+	_perf_label.add_theme_font_size_override("font_size", 15)
+	_perf_label.add_theme_color_override("font_color", Color(0.35, 1.0, 0.55))
+	_perf_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	_perf_label.add_theme_constant_override("outline_size", 5)
+	_perf_label.text = "PERF MONITOR ..."
+	_perf_layer.add_child(_perf_label)
+
+
+## [PERF] 子系统计时累加(--bench-sys)
+func _bsys_tick(name: String, t0: int) -> void:
+	if not _bsys_on:
+		return
+	var d: Dictionary = _bsys.get(name, {})
+	if d.is_empty():
+		d = { "t": 0.0, "max": 0.0, "n": 0 }
+	var us := float(Time.get_ticks_usec() - t0)
+	d["t"] += us
+	d["max"] = maxf(float(d["max"]), us)
+	d["n"] = int(d["n"]) + 1
+	_bsys[name] = d
+
+
+## [PERF] 子系统计时汇报(--bench-sys;每 900 帧打印 avg/max)
+func _bsys_report() -> void:
+	if not _bsys_on:
+		return
+	_bsys_n += 1
+	if _bsys_n < 900:
+		return
+	var parts: Array = []
+	for name in _bsys:
+		var d: Dictionary = _bsys[name]
+		parts.append("%s=%.0f/%.0fus" % [name, d["t"] / maxf(float(d["n"]), 1.0), d["max"]])
+	print("[BENCH-SYS] " + "  ".join(parts))
+	_bsys.clear()
+	_bsys_n = 0
+
+
+## [PERF] 刷新性能监控文本:实时 FPS/帧时间/CPU/物理/AI/DrawCall/对象/可见对象/NPC/粒子/内存/显存
+func _update_perf_label() -> void:
+	var fps := Engine.get_frames_per_second()
+	var ft := 1000.0 / maxf(fps, 0.1)
+	var proc := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+	var phys := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+	var rs := RenderingServer
+	var dc := rs.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+	var objs := rs.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_OBJECTS_IN_FRAME)
+	var nodes := Performance.get_monitor(Performance.OBJECT_NODE_COUNT)
+	var vram := rs.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED) / 1048576.0
+	var smem := OS.get_static_memory_usage() / 1048576.0
+	var npc := G.bots.size()
+	var parts := 0
+	if G.effects != null and G.effects.has_method("particle_count"):
+		parts = G.effects.particle_count()
+	_perf_label.text = (
+		"FPS %5.1f   FT %4.2fms\n" % [fps, ft] +
+		"CPU %4.2fms  Phys %4.2fms  AI %4.2fms\n" % [proc, phys, _ai_time_us / 1000.0] +
+		"DrawCall %d  Obj %d  Node %d\n" % [dc, objs, nodes] +
+		"NPC %d  Particle %d\n" % [npc, parts] +
+		"Mem %dMB  VRAM %dMB" % [int(smem), int(vram)])
 
 
 ## [8/10] --bench 结果汇总:avg/min/1%Low FPS + CPU/GPU 帧时间 + DrawCalls/Objects/内存,写 json + 打印

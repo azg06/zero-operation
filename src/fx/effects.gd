@@ -1,4 +1,4 @@
-﻿class_name Effects extends Node3D
+class_name Effects extends Node3D
 ## 特效系统(对应 effects.js):粒子池 / 曳光弹 / 枪口焰 / 弹壳 / 手雷 / 火箭弹 / 屏幕震动
 
 static var MAXP := 0                    # 每类粒子池大小(Web 端自动缩减)
@@ -15,7 +15,6 @@ var fx_scale := 1.0          # 总粒子预算倍率(quality * 帧率降级)
 var _fps_scale := 1.0        # 帧率自适应倍率(低帧率自动降粒子数)
 var _fps_smoothed := 60.0    # 平滑 FPS 采样
 var _eff_t := 0.0
-var _fxaa_wired := false          # --fxaa-debug 开关只接线一次
 
 # ---- 全屏特效层(爆闪/死亡淡出,CanvasLayer 自包含,不动 HUD) ----
 var _flash_layer: CanvasLayer
@@ -90,6 +89,7 @@ var _grenade_mat: StandardMaterial3D
 var _rocket_mat: StandardMaterial3D
 # ---- 掉落武器池(士兵阵亡掉枪) ----
 var _drops: Array = []
+var _drop_cache: Dictionary = {}      # [PERF] weapon_id -> 已建武器模板(掉落时 duplicate 复用,免重复 build)
 # ---- 冲击波环 ----
 var _rings: Array = []
 # ---- 屏幕震动 ----
@@ -240,6 +240,21 @@ func _build_particle_pools() -> void:
 	_fire_power.resize(MAXP)
 	_fire_size.fill(1.0)
 	_fire_power.fill(1.0)
+
+
+## [PERF] 当前活跃粒子总数(3 个 MultiMesh 池中 life>0 的实例;供性能监控节流调用)
+func particle_count() -> int:
+	var n := 0
+	for i in _sparks_life.size():
+		if _sparks_life[i] > 0.0:
+			n += 1
+	for i in _smoke_life.size():
+		if _smoke_life[i] > 0.0:
+			n += 1
+	for i in _fire_life.size():
+		if _fire_life[i] > 0.0:
+			n += 1
+	return n
 
 
 ## 全屏特效层:爆闪(暖白) + 死亡淡出(黑),CanvasLayer 自包含不依赖 HUD
@@ -893,7 +908,9 @@ func casing(pos: Vector3, cam_basis: Basis, bullet_type := 0, power := 1.0) -> v
 
 
 ## 换弹时掉落的弹匣
-func spawn_mag(pos: Vector3) -> void:
+## cam_basis:主相机朝向;弹匣速度在相机局部空间生成(向下 + 向前),再变换到世界,
+## 保证无论玩家面朝哪里,弹匣都是朝视线前方掉落,而不会按世界轴随机向左/右飞。
+func spawn_mag(pos: Vector3, cam_basis: Basis = Basis.IDENTITY) -> void:
 	var mg = null
 	for m2 in _mags:
 		if m2["life"] <= 0:
@@ -903,7 +920,11 @@ func spawn_mag(pos: Vector3) -> void:
 		mg = _mags[0]
 	var m: MeshInstance3D = mg["mesh"]
 	m.position = pos
-	mg["vel"] = Vector3(Utils.rand(-0.4, 0.4), Utils.rand(-0.5, -0.2), Utils.rand(-0.4, 0.4))
+	var local_vel := Vector3(
+		Utils.rand(-0.12, 0.12),
+		Utils.rand(-0.5, -0.2),
+		Utils.rand(-0.5, -0.2))
+	mg["vel"] = cam_basis * local_vel
 	mg["rot"] = Vector3(Utils.rand(-6, 6), Utils.rand(-6, 6), Utils.rand(-6, 6))
 	mg["life"] = 2.5
 	m.visible = true
@@ -989,7 +1010,12 @@ func spawn_dropped_weapon(weapon_id: String, pos: Vector3) -> void:
 	var holder: Node3D = d["holder"]
 	for c in holder.get_children():
 		c.queue_free()
-	holder.add_child(WeaponModels.build(weapon_id, false))
+	# [PERF] 掉落武器按 weapon_id 缓存模板:首次 build 后 duplicate(共享 mesh/材质)复用,免每次死亡重建(~150µs→~10µs)
+	var tmpl: Node3D = _drop_cache.get(weapon_id)
+	if tmpl == null:
+		tmpl = WeaponModels.build(weapon_id, false, WeaponModsData.load_cfg(weapon_id))
+		_drop_cache[weapon_id] = tmpl
+	holder.add_child(tmpl.duplicate(Node.DUPLICATE_USE_INSTANTIATION))
 	holder.position = pos
 	holder.rotation = Vector3(Utils.rand(-0.15, 0.15), Utils.rand(TAU), PI / 2.0 * 0.92)
 	d["vel"] = Vector3(Utils.rand(-0.9, 0.9), Utils.rand(1.4, 2.4), Utils.rand(-0.9, 0.9))
@@ -1232,10 +1258,6 @@ func set_night_vision(on: bool) -> void:
 # ==================== 每帧更新 ====================
 func update_effects(dt: float) -> void:
 	_eff_t += dt
-	if not _fxaa_wired:
-		_fxaa_wired = true
-		if OS.get_cmdline_user_args().has("--fxaa-debug"):
-			_wire_fxaa_debug()
 	# 画质档位联动:设置菜单/预设任意路径改动 particles 都能生效
 	var sp: Dictionary = G.settings
 	fx_scale = float(sp.get("particles", 1.0)) * float(sp.get("fx_scale", 1.0))
@@ -1286,27 +1308,6 @@ func update_effects(dt: float) -> void:
 	var s := shake_amt * shake_amt * 0.02
 	shake_pitch = Utils.rand(-s, s) + shake_amt * 0.004
 	shake_yaw = Utils.rand(-s, s) + _shake_bias * shake_amt
-
-
-## --fxaa-debug 调试开关:把主界 FXAA 材质换成 fxaa_test.gdshader
-## (mode: 0=原样透传校准 1=轻量 FXAA 2=边缘可视化,默认 2;可 --fxaa-debug 1 指定)
-## 只动 fx 层(读取 main.gd 的 _fxaa_rect 并替换 material),不改 main.gd
-func _wire_fxaa_debug() -> void:
-	if G.main == null:
-		return
-	var rect: ColorRect = G.main.get("_fxaa_rect")
-	if rect == null:
-		return
-	var mode := 2
-	var ua := OS.get_cmdline_user_args()
-	var idx := ua.find("--fxaa-debug")
-	if idx >= 0 and ua.size() > idx + 1 and ua[idx + 1] in ["0", "1", "2"]:
-		mode = int(ua[idx + 1])
-	var mat := ShaderMaterial.new()
-	mat.shader = load("res://src/fx/fxaa_test.gdshader")
-	mat.set_shader_parameter("mode", mode)
-	rect.material = mat
-	print("[FXAA-DEBUG] 已切换到 fxaa_test.gdshader mode=", mode, " (0=透传 1=轻量FXAA 2=边缘可视化)")
 
 
 ## 受伤红边:受击瞬间脉冲(按血量下降量) + 低血量常驻微红

@@ -1,4 +1,4 @@
-﻿class_name WorldBuilder
+class_name WorldBuilder
 ## 地图构建器(对应 map.js 的 buildWorld / updateMap)
 
 
@@ -266,7 +266,8 @@ static func _mark_grid_dirty() -> void:
 
 ## 静态道具 MultiMesh 批量落地(每个材质一个 MultiMeshInstance3D)
 ## [PERF] end_dist > 0:视距裁剪(end_dist 全隐,end_dist*0.75 起渐变淡出;800m BR 图植被用)
-static func _flush_prop_mm(wg: Node3D, buf: Dictionary, end_dist := 0.0) -> void:
+## [PERF] shadows=false:关闭阴影投射(小体积植被,省 4 级 cascade 重渲染)
+static func _flush_prop_mm(wg: Node3D, buf: Dictionary, end_dist := 0.0, shadows := true) -> void:
 	for mat in buf:
 		var entry: Dictionary = buf[mat]
 		var list: Array = entry["t"]
@@ -281,16 +282,16 @@ static func _flush_prop_mm(wg: Node3D, buf: Dictionary, end_dist := 0.0) -> void
 		var mmi := MultiMeshInstance3D.new()
 		mmi.multimesh = mm
 		mmi.material_override = mat
-		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if shadows else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		if end_dist > 0.0:
 			mmi.visibility_range_end = end_dist
 			mmi.visibility_range_end_margin = end_dist * 0.25
 		wg.add_child(mmi)
 
 
-## 预烘焙 4m 分辨率地形高度网格(供粒子/雪花着地判定,避免逐帧噪声求值)
+## 预烘焙 2m 分辨率地形高度网格(供粒子/雪花着地判定 + raycast_world 地形步进,免逐帧噪声求值)
 static func _bake_hgrid() -> Dictionary:
-	var res := 4.0
+	var res := 2.0
 	var half: float = G.bounds + 20.0
 	var hn := int(ceil(half * 2.0 / res)) + 1
 	var h := PackedFloat32Array()
@@ -657,12 +658,21 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 	# 其余保持平地。TDM 圈定副本(T2)同走本分支,圈定区域内地形起伏自动保留)
 	if is_br:
 		G.ground_h = make_br_ground_h(T)
+		G.ground_flat = false
 	elif theme_id == "snow":
 		G.ground_h = make_snow_ground_h(T)
+		G.ground_flat = false
 	elif theme_id == "bt_jungle":
 		G.ground_h = make_jungle_ground_h(T)
+		G.ground_flat = false
 	else:
 		G.ground_h = make_bt_ground_h(T, size) if is_bt else make_ground_h(theme_id, size, road)
+		G.ground_flat = true  # 征服/突破其余图均恒 0 平地
+	# [PERF] 非平地地图烘焙 4m 高度网格(raycast_world 地形步进双线性插值,免逐点 Callable 求值)
+	if G.ground_flat:
+		G.ground_grid = {}
+	else:
+		G.ground_grid = _bake_hgrid()
 
 	var add_collider := func(x: float, y: float, z: float, w: float, h: float, d: float) -> AABB:
 		var gh: float = G.ground_h.call(x, z)
@@ -941,27 +951,61 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 		mm_push.call(cont_mats[0], m_barrel_mesh, x, z, 0.0, 0.475, Vector3.ONE)
 		add_collider.call(x, 0, z, 0.7, 0.95, 0.7)
 
+	# [PERF] 车辆 MultiMesh 批绘(车身 5 色 + 驾驶舱 + 车轮,各 1 材质 1 draw;原每车 6 独立 mesh)
+	var car_colors := [Color.html("#5a6a7a"), Color.html("#7a5a4a"), Color.html("#4a5a4a"), Color.html("#6a6a6a"), Color.html("#8a7a3a")]
+	var car_body_mats := {}
+	for _cc in car_colors:
+		car_body_mats[_cc] = _std(_cc, 0.5, 0.6)
+	var car_cab_mat := _std(Color.html("#1a2028"), 0.2, 0.8)
+	var car_wheel_mat := _std(Color.html("#14161a"), 0.9)
+	var car_glass_mat := _std(Color.html("#1c2a36"), 0.12, 0.6)   # 车窗玻璃
+	var car_trim_mat := _std(Color.html("#262a2e"), 0.55, 0.35)   # 保险杠/侧裙
+	var car_light_mat := _basic(Color.html("#ffe8a8"), true)      # 前大灯
+	var car_tail_mat := _basic(Color.html("#ff5a40"), true)       # 尾灯
+	var car_hub_mat := _std(Color.html("#8a9096"), 0.35, 0.7)     # 轮毂
+	var car_unit_wheel := CylinderMesh.new()
+	car_unit_wheel.top_radius = 1.0
+	car_unit_wheel.bottom_radius = 1.0
+	car_unit_wheel.height = 1.0
+	car_unit_wheel.radial_segments = 10
+	var car_mm := {}
+	for _cc in car_colors:
+		car_mm[car_body_mats[_cc]] = { "mesh": m_box1, "t": [] }
+	car_mm[car_cab_mat] = { "mesh": m_box1, "t": [] }
+	car_mm[car_wheel_mat] = { "mesh": car_unit_wheel, "t": [] }
+	car_mm[car_glass_mat] = { "mesh": m_box1, "t": [] }
+	car_mm[car_trim_mat] = { "mesh": m_box1, "t": [] }
+	car_mm[car_light_mat] = { "mesh": m_box1, "t": [] }
+	car_mm[car_tail_mat] = { "mesh": m_box1, "t": [] }
+	car_mm[car_hub_mat] = { "mesh": car_unit_wheel, "t": [] }
 	var car := func(x: float, z: float, rot := 0.0, col_override = null) -> void:
-		var g := Node3D.new()
-		var col: Color = col_override if col_override != null else Utils.choice(
-			[Color.html("#5a6a7a"), Color.html("#7a5a4a"), Color.html("#4a5a4a"), Color.html("#6a6a6a"), Color.html("#8a7a3a")])
-		var body_mat := _std(col, 0.5, 0.6)
-		var body := _box(4.2, 0.85, 1.9, body_mat)
-		body.position.y = 0.65
-		g.add_child(body)
-		var cab := _box(2.2, 0.7, 1.7, _std(Color.html("#1a2028"), 0.2, 0.8))
-		cab.position = Vector3(-0.2, 1.35, 0)
-		g.add_child(cab)
-		var wheel_mat := _std(Color.html("#14161a"), 0.9)
+		var gh: float = G.ground_h.call(x, z)
+		var col: Color = col_override if col_override != null else Utils.choice(car_colors)
+		var bm = car_body_mats.get(col)
+		if bm == null:
+			bm = _std(col, 0.5, 0.6)
+			car_body_mats[col] = bm
+			car_mm[bm] = { "mesh": m_box1, "t": [] }
+		var base := Transform3D(Basis(Vector3.UP, rot), Vector3(x, gh, z))
+		# 车身(下层底盘 + 引擎盖 + 后备箱 + 驾驶舱 + 车窗)
+		(car_mm[bm]["t"] as Array).append(base * Transform3D(Basis().scaled(Vector3(4.2, 0.85, 1.9)), Vector3(0, 0.65, 0)))
+		(car_mm[bm]["t"] as Array).append(base * Transform3D(Basis().scaled(Vector3(1.5, 0.3, 1.75)), Vector3(1.3, 0.85, 0)))
+		(car_mm[bm]["t"] as Array).append(base * Transform3D(Basis().scaled(Vector3(1.25, 0.32, 1.75)), Vector3(-1.45, 0.83, 0)))
+		(car_mm[car_cab_mat]["t"] as Array).append(base * Transform3D(Basis().scaled(Vector3(2.2, 0.7, 1.7)), Vector3(-0.2, 1.35, 0)))
+		(car_mm[car_glass_mat]["t"] as Array).append(base * Transform3D(Basis().scaled(Vector3(1.95, 0.46, 1.52)), Vector3(-0.18, 1.52, 0)))
+		# 保险杠(前后) + 侧裙
+		(car_mm[car_trim_mat]["t"] as Array).append(base * Transform3D(Basis().scaled(Vector3(0.26, 0.4, 2.0)), Vector3(2.22, 0.38, 0)))
+		(car_mm[car_trim_mat]["t"] as Array).append(base * Transform3D(Basis().scaled(Vector3(0.26, 0.4, 2.0)), Vector3(-2.22, 0.38, 0)))
+		for sb in [-1.0, 1.0]:
+			(car_mm[car_trim_mat]["t"] as Array).append(base * Transform3D(Basis().scaled(Vector3(4.0, 0.12, 0.08)), Vector3(0, 0.3, sb * 0.98)))
+		# 前大灯 / 尾灯
+		for lz in [-0.55, 0.55]:
+			(car_mm[car_light_mat]["t"] as Array).append(base * Transform3D(Basis().scaled(Vector3(0.06, 0.15, 0.4)), Vector3(2.16, 0.75, lz)))
+			(car_mm[car_tail_mat]["t"] as Array).append(base * Transform3D(Basis().scaled(Vector3(0.06, 0.14, 0.4)), Vector3(-2.16, 0.75, lz)))
+		# 车轮 + 轮毂
 		for wp in [[-1.4, 0.95], [1.4, 0.95], [-1.4, -0.95], [1.4, -0.95]]:
-			var w := _cyl(0.36, 0.36, 0.3, 10, wheel_mat)
-			w.rotation.x = PI / 2.0
-			w.position = Vector3(wp[0], 0.36, wp[1])
-			g.add_child(w)
-		g.rotation.y = rot
-		g.position = Vector3(x, G.ground_h.call(x, z), z)
-		_shadows_on(g)
-		wg.add_child(g)
+			(car_mm[car_wheel_mat]["t"] as Array).append(base * Transform3D(Basis(Vector3.RIGHT, PI / 2.0).scaled(Vector3(0.72, 0.3, 0.72)), Vector3(wp[0], 0.36, wp[1])))
+			(car_mm[car_hub_mat]["t"] as Array).append(base * Transform3D(Basis(Vector3.RIGHT, PI / 2.0).scaled(Vector3(0.4, 0.34, 0.4)), Vector3(wp[0], 0.36, wp[1])))
 		var ww := 4.2 if absf(cos(rot)) > 0.5 else 1.9
 		add_collider.call(x, 0, z, ww, 1.7, 1.9 if ww == 4.2 else 4.2)
 
@@ -974,12 +1018,33 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 		var ds := Destructible.new()
 		var col2: AABB
 		if kind == "barrel":
-			var b := _cyl(0.34, 0.34, 0.92, 12, _std(Color.html("#7a3a1e"), 0.5, 0.6))
+			# 可殉爆油桶(细节:桶身 + 上下桶沿 + 双钢箍 + 黄色危险带 + 注油盖)
+			var body_col := _std(Color.html("#7a3a1e"), 0.5, 0.6)   # 锈红桶身
+			var steel := _std(Color.html("#3a3d42"), 0.4, 0.7)       # 钢箍/桶沿
+			var hazard := _std(Color.html("#d8b020"), 0.55, 0.4)     # 危险警示黄带
+			var b := _cyl(0.34, 0.34, 0.92, 14, body_col)
 			b.position.y = 0.46
 			g.add_child(b)
-			var band := _cyl(0.355, 0.355, 0.12, 12, _std(Color.html("#3a3d42"), 0.4, 0.7))
-			band.position.y = 0.62
-			g.add_child(band)
+			# 顶部/底部加强桶沿(凸起圆环)
+			var rim_top := _cyl(0.365, 0.365, 0.07, 14, steel)
+			rim_top.position.y = 0.9
+			g.add_child(rim_top)
+			var rim_bot := _cyl(0.365, 0.365, 0.07, 14, steel)
+			rim_bot.position.y = 0.05
+			g.add_child(rim_bot)
+			# 上下两道钢箍
+			for by in [0.24, 0.7]:
+				var band := _cyl(0.355, 0.355, 0.11, 14, steel)
+				band.position.y = by
+				g.add_child(band)
+			# 危险警示带(桶身中部)
+			var haz := _cyl(0.347, 0.347, 0.22, 14, hazard)
+			haz.position.y = 0.47
+			g.add_child(haz)
+			# 桶顶注油盖(偏心小圆盘)
+			var cap := _cyl(0.1, 0.1, 0.05, 10, steel)
+			cap.position = Vector3(0.1, 0.925, 0.0)
+			g.add_child(cap)
 			col2 = add_collider.call(x, 0, z, 0.68, 0.92, 0.68)
 			ds.hp = 40
 			ds.pos = Vector3(x, gh2 + 0.46, z)
@@ -1217,6 +1282,7 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 
 	# ---------- 草地与地表细节(3A 植被/碎石;密度随画质档位) ----------
 	_flush_prop_mm(wg, mm_buf)
+	_flush_prop_mm(wg, car_mm)
 	add_grass(wg, theme_id, is_bt, T, lv)
 	var stone_k: float = T.size / 320.0 if is_br else 1.0   # BR 大地图碎石密度按面积缩放
 	_add_surface_stones(wg, int(q_stones[lv] * (0.5 if web else 1.0) * stone_k), rock_photo_mat)
@@ -1394,15 +1460,18 @@ static func _city_blocks(_T, wg: Node3D, add_collider: Callable, minimap_rects: 
 		m.roughness = 0.9
 		facade_mats.append(m)
 	var roof_mat := _std(Color.html("#3a3c40"), 0.95)
+	# [PERF] 建筑盒批量 MultiMesh:单位盒缩放,按材质分桶(4 facade + 1 roof),1 材质 1 次绘制
+	# (原每栋 2 个独立 BoxMesh 无法合批,~245 栋 ≈ 490 draw;改后 5 draw)
+	var _unit_box := BoxMesh.new()
+	_unit_box.size = Vector3.ONE
+	var mm_buf := {}
+	for fd in facade_mats:
+		mm_buf[fd] = { "mesh": _unit_box, "t": [] }
+	mm_buf[roof_mat] = { "mesh": _unit_box, "t": [] }
 	var add_building := func(x: float, z: float, w: float, d: float, h: float) -> void:
 		var gh: float = G.ground_h.call(x, z)
-		var b := _box(w, h, d, Utils.choice(facade_mats))
-		b.position = Vector3(x, gh + h / 2.0, z)
-		b.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		wg.add_child(b)
-		var roof := _box(w + 0.4, 0.5, d + 0.4, roof_mat)
-		roof.position = Vector3(x, gh + h + 0.2, z)
-		wg.add_child(roof)
+		mm_buf[Utils.choice(facade_mats)]["t"].append(Transform3D(Basis().scaled(Vector3(w, h, d)), Vector3(x, gh + h / 2.0, z)))
+		mm_buf[roof_mat]["t"].append(Transform3D(Basis().scaled(Vector3(w + 0.4, 0.5, d + 0.4)), Vector3(x, gh + h + 0.2, z)))
 		add_collider.call(x, 0, z, w, h, d)
 		minimap_rects.append({ "x": x, "z": z, "w": w, "d": d })
 	var B := road * 2 - 18
@@ -1430,6 +1499,7 @@ static func _city_blocks(_T, wg: Node3D, add_collider: Callable, minimap_rects: 
 				add_building.call(cx + Utils.rand(-bw * 0.28, bw * 0.28), cz + Utils.rand(-bd * 0.28, bd * 0.28),
 					Utils.rand(10, 16), Utils.rand(10, 16), Utils.rand(12, 26))
 		i += 2
+	_flush_prop_mm(wg, mm_buf)
 	# [8/10] 城市遮挡剔除已移除:大体积 BoxOccluder 在快速镜头移动下导致楼群闪动(相机移动
 	# 时整片街区在遮挡边界来回剔除),且无遮挡收益;改为纯 draw call 渲染(城市楼数可控)
 	# 坠毁直升机地标
@@ -1468,15 +1538,15 @@ static func _city_blocks(_T, wg: Node3D, add_collider: Callable, minimap_rects: 
 			3: crate.call(Utils.rand(-140 * sc, 140 * sc), Utils.rand(-140 * sc, 140 * sc))
 			4: barrel.call(Utils.rand(-140 * sc, 140 * sc), Utils.rand(-140 * sc, 140 * sc))
 			5: barrier.call(Utils.rand(-140 * sc, 140 * sc), Utils.choice([-R, 0.0, R]) + Utils.rand(-5, 5), Utils.rand(PI))
-	# 天际线
+	# 天际线([PERF] 26 栋远景楼合并单 MultiMesh:原 26 独立盒 → 1 draw)
 	var skyline_mat := _basic(Color.html("#6a7684"), true)
+	var sky_buf := { skyline_mat: { "mesh": _unit_box, "t": [] } }
 	for k in 26:
 		var a := k / 26.0 * TAU + Utils.rand(-0.1, 0.1)
 		var r := Utils.rand(190 * sc, 260 * sc)
 		var h := Utils.rand(30, 90)
-		var b := _box(Utils.rand(15, 30), h, Utils.rand(15, 30), skyline_mat)
-		b.position = Vector3(cos(a) * r, h / 2 - 2, sin(a) * r)
-		wg.add_child(b)
+		(sky_buf[skyline_mat]["t"] as Array).append(Transform3D(Basis().scaled(Vector3(Utils.rand(15, 30), h, Utils.rand(15, 30))), Vector3(cos(a) * r, h / 2 - 2, sin(a) * r)))
+	_flush_prop_mm(wg, sky_buf)
 	# ---------- 战争沉浸感街道物件(路灯/垃圾桶/消防栓/邮箱/长椅/路障锥/烧毁车辆/弹壳) ----------
 	var R2 := road
 	var flag_pts := [[-R2, -R2], [R2, -R2], [0.0, 0.0], [-R2, R2], [R2, R2]]
@@ -1886,9 +1956,13 @@ static func _desert_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects:
 			wg.add_child(grp)
 			add_collider.call(bx, 0, bz, 4.8, 2.8, 2.8)
 			break
-	# 报废卡车(缺轮斜躺,带碰撞)
+	# 报废卡车(缺轮斜躺,带碰撞;细节:底盘大梁/木货厢/车头/引擎/排气管/破窗/散落备胎)
 	var wrk_mat := _std(Color.html("#7a5a3a"), 0.9, 0.2)
 	var wrk_cab := _std(Color.html("#5a4a3a"), 0.95)
+	var wrk_wood := _std_tex(Color.html("#8a6f4e"), 0.95, "plywood")
+	var wrk_metal := _std_tex(Color.html("#4a3a2a"), 0.7, "rusty_metal", 0.5)
+	var wrk_glass := _std(Color.html("#141d18"), 0.15, 0.3)
+	var whm := _std(Color.html("#1a1a1a"), 0.95)
 	for k in 3:
 		for t in 40:
 			var on_h := randf() < 0.5
@@ -1901,18 +1975,56 @@ static func _desert_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects:
 			if near_flag3.call(bx, bz, 22.0) or not clear_spot.call(bx, bz, 1.5):
 				continue
 			var grp := Node3D.new()
-			var bd := _box(5.4, 1.1, 2.1, wrk_mat)
-			bd.position.y = 0.55
-			grp.add_child(bd)
-			var cb := _box(1.6, 1.5, 2.1, wrk_cab)
-			cb.position = Vector3(2.0, 0.9, 0)
+			# 底盘大梁(两根纵梁)
+			for cr in [-0.72, 0.72]:
+				var rail := _box(5.6, 0.16, 0.12, wrk_metal)
+				rail.position = Vector3(0, 0.42, cr)
+				grp.add_child(rail)
+			# 木货厢(底板 + 左右栏板 + 前挡板)
+			var deck := _box(4.0, 0.14, 2.3, wrk_wood)
+			deck.position = Vector3(-1.5, 0.95, 0)
+			grp.add_child(deck)
+			for sr in [-1.15, 1.15]:
+				var rail2 := _box(4.0, 0.18, 0.07, wrk_metal)
+				rail2.position = Vector3(-1.5, 1.18, sr)
+				grp.add_child(rail2)
+			var headboard := _box(0.1, 0.55, 2.3, wrk_mat)
+			headboard.position = Vector3(0.5, 1.22, 0)
+			grp.add_child(headboard)
+			# 车头(驾驶室 + 车顶 + 引擎盖 + 前脸 + 破窗)
+			var cb := _box(1.7, 1.4, 2.2, wrk_cab)
+			cb.position = Vector3(2.15, 1.15, 0)
 			grp.add_child(cb)
-			var whm := _std(Color.html("#1a1a1a"), 0.95)
-			for wpp in [[-1.8, 0.95], [1.6, -0.95]]:
+			var roof := _box(1.85, 0.16, 2.32, wrk_cab)
+			roof.position = Vector3(2.15, 1.92, 0)
+			grp.add_child(roof)
+			var hood := _box(1.05, 0.5, 1.95, wrk_mat)
+			hood.position = Vector3(3.2, 0.85, 0)
+			grp.add_child(hood)
+			var front := _box(0.14, 0.5, 2.0, wrk_metal)
+			front.position = Vector3(3.75, 0.55, 0)
+			grp.add_child(front)
+			var ws := _box(0.07, 0.62, 1.9, wrk_glass)
+			ws.position = Vector3(1.28, 1.5, 0)
+			ws.rotation.z = -0.18
+			grp.add_child(ws)
+			# 排气管(竖管) + 外露引擎
+			var stack := _cyl(0.09, 0.09, 1.3, 8, wrk_metal)
+			stack.position = Vector3(1.55, 2.0, 1.18)
+			grp.add_child(stack)
+			var engine := _box(0.6, 0.4, 1.4, wrk_metal)
+			engine.position = Vector3(3.0, 0.75, 0)
+			grp.add_child(engine)
+			# 车轮(前左缺失 + 三只残留 + 散落备胎)
+			for wpp in [[-1.7, 0.95], [-1.7, -0.95], [2.6, -0.95]]:
 				var wh := _cyl(0.42, 0.42, 0.32, 8, whm)
 				wh.rotation.x = PI / 2.0
 				wh.position = Vector3(wpp[0], 0.4, wpp[1])
 				grp.add_child(wh)
+			var spare := _cyl(0.42, 0.42, 0.32, 8, whm)
+			spare.rotation = Vector3(Utils.rand(-0.5, 0.5), 0, Utils.rand(-0.5, 0.5))
+			spare.position = Vector3(-2.6, 0.2, 1.7)
+			grp.add_child(spare)
 			grp.rotation.y = Utils.rand(TAU)
 			grp.rotation.z = Utils.rand(-0.04, 0.1)
 			grp.position = Vector3(bx, G.ground_h.call(bx, bz), bz)
@@ -2833,66 +2945,68 @@ static func _snow_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects: A
 	var pine_leaf := _std(Color.html("#2a4a3a"), 1.0)
 	var pine_snow := _std(Color.html("#d8e4ec"), 1.0)
 	var rock_mat: Material = rock_photo_mat
+	# [PERF] 雪地建筑/树/岩 MultiMesh 批绘(碉堡/哨塔/松树/岩石,原每栋/棵独立 mesh 无法合批)
+	var _sn_ubox := BoxMesh.new()
+	_sn_ubox.size = Vector3.ONE
+	var _sn_ucyl := CylinderMesh.new()
+	_sn_ucyl.top_radius = 1.0
+	_sn_ucyl.bottom_radius = 1.0
+	_sn_ucyl.height = 1.0
+	_sn_ucyl.radial_segments = 6
+	var _sn_ucone := CylinderMesh.new()
+	_sn_ucone.top_radius = 0.0
+	_sn_ucone.bottom_radius = 1.0
+	_sn_ucone.height = 1.0
+	_sn_ucone.radial_segments = 8
+	var _sn_uico := SphereMesh.new()
+	_sn_uico.radius = 1.0
+	_sn_uico.height = 2.0
+	_sn_uico.radial_segments = 12
+	_sn_uico.rings = 8
+	var _sn_slit_mat := _basic(Color.html("#1a1e22"), true)
+	var sm_buf := {}
+	var sm_veg := {}   # [PERF] 小体积植被(松树/岩石):关闭阴影投射,省 4 级 cascade
+	var sm_push := func(buf: Dictionary, mat: Material, mesh: Mesh, t: Transform3D) -> void:
+		var entry = buf.get(mat)
+		if entry == null:
+			entry = { "mesh": mesh, "t": [] }
+			buf[mat] = entry
+		(entry["t"] as Array).append(t)
 	var bunker := func(x: float, z: float, rot := 0.0) -> void:
 		var w := Utils.rand(7, 10)
 		var d := Utils.rand(6, 8)
 		var h := Utils.rand(3, 4.2)
 		var gh: float = G.ground_h.call(x, z)
-		var b := _box(w, h, d, bunker_mat)
-		b.rotation.y = rot
-		b.position = Vector3(x, gh + h / 2.0, z)
-		b.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		wg.add_child(b)
-		var slit := _box(w * 0.8, 0.3, 0.1, _basic(Color.html("#1a1e22"), true))
+		var rb := Basis(Vector3.UP, rot)
+		sm_push.call(sm_buf, bunker_mat, _sn_ubox, Transform3D(rb.scaled(Vector3(w, h, d)), Vector3(x, gh + h / 2.0, z)))
+		# 射击孔(世界朝向,与原逻辑一致)
 		if absf(cos(rot)) > 0.5:
-			slit.position = Vector3(x, gh + h * 0.65, z + d / 2.0 + 0.01)
+			sm_push.call(sm_buf, _sn_slit_mat, _sn_ubox, Transform3D(Basis().scaled(Vector3(w * 0.8, 0.3, 0.1)), Vector3(x, gh + h * 0.65, z + d / 2.0 + 0.01)))
 		else:
-			slit.rotation.y = PI / 2.0
-			slit.position = Vector3(x + d / 2.0 + 0.01, gh + h * 0.65, z)
-		wg.add_child(slit)
+			sm_push.call(sm_buf, _sn_slit_mat, _sn_ubox, Transform3D(Basis(Vector3.UP, PI / 2.0).scaled(Vector3(w * 0.8, 0.3, 0.1)), Vector3(x + d / 2.0 + 0.01, gh + h * 0.65, z)))
 		var ww := w if absf(cos(rot)) > 0.5 else d
 		add_collider.call(x, 0, z, ww, h, d if ww == w else w)
 		minimap_rects.append({ "x": x, "z": z, "w": ww, "d": d if ww == w else w })
 	var tower := func(x: float, z: float) -> void:
-		var g := Node3D.new()
+		var gh: float = G.ground_h.call(x, z)
 		for lp in [[-1.2, -1.2], [1.2, -1.2], [-1.2, 1.2], [1.2, 1.2]]:
-			var leg := _box(0.25, 6, 0.25, wood_mat)
-			leg.position = Vector3(lp[0], 3, lp[1])
-			g.add_child(leg)
-		var cabin := _box(3.4, 2.2, 3.4, wood_mat)
-		cabin.position.y = 7.1
-		g.add_child(cabin)
-		var roof := _cone(2.8, 1.4, 4, pine_snow)
-		roof.position.y = 9
-		roof.rotation.y = PI / 4.0
-		g.add_child(roof)
-		g.position = Vector3(x, G.ground_h.call(x, z), z)
-		_shadows_on(g)
-		wg.add_child(g)
+			sm_push.call(sm_buf, wood_mat, _sn_ubox, Transform3D(Basis().scaled(Vector3(0.25, 6, 0.25)), Vector3(x + lp[0], gh + 3, z + lp[1])))
+		sm_push.call(sm_buf, wood_mat, _sn_ubox, Transform3D(Basis().scaled(Vector3(3.4, 2.2, 3.4)), Vector3(x, gh + 7.1, z)))
+		sm_push.call(sm_buf, pine_snow, _sn_ucone, Transform3D(Basis(Vector3.UP, PI / 4.0).scaled(Vector3(5.6, 1.4, 5.6)), Vector3(x, gh + 9, z)))
 		add_collider.call(x, 0, z, 2.8, 8, 2.8)
 		minimap_rects.append({ "x": x, "z": z, "w": 2.8, "d": 2.8 })
 	var pine := func(x: float, z: float) -> void:
-		var g := Node3D.new()
+		var gh: float = G.ground_h.call(x, z)
 		var h := Utils.rand(4, 7)
-		var trunk := _cyl(0.18, 0.25, h * 0.4, 6, pine_trunk)
-		trunk.position.y = h * 0.2
-		g.add_child(trunk)
-		var c1 := _cone(h * 0.32, h * 0.55, 8, pine_leaf)
-		c1.position.y = h * 0.55
-		g.add_child(c1)
-		var c2 := _cone(h * 0.24, h * 0.45, 8, pine_snow if randf() < 0.6 else pine_leaf)
-		c2.position.y = h * 0.82
-		g.add_child(c2)
-		g.position = Vector3(x, G.ground_h.call(x, z), z)
-		_shadows_on(g)
-		wg.add_child(g)
+		sm_push.call(sm_veg, pine_trunk, _sn_ucyl, Transform3D(Basis().scaled(Vector3(0.44, h * 0.4, 0.44)), Vector3(x, gh + h * 0.2, z)))
+		sm_push.call(sm_veg, pine_leaf, _sn_ucone, Transform3D(Basis().scaled(Vector3(h * 0.64, h * 0.55, h * 0.64)), Vector3(x, gh + h * 0.55, z)))
+		sm_push.call(sm_veg, pine_snow if randf() < 0.6 else pine_leaf, _sn_ucone, Transform3D(Basis().scaled(Vector3(h * 0.48, h * 0.45, h * 0.48)), Vector3(x, gh + h * 0.82, z)))
 		add_collider.call(x, 0, z, 0.7, h, 0.7)
 	var rock := func(x: float, z: float, s := 1.0) -> void:
-		var r := _ico(Utils.rand(1, 2) * s, rock_mat)
-		r.position = Vector3(x, G.ground_h.call(x, z) + Utils.rand(0.3, 0.7) * s, z)
-		r.rotation = Vector3(Utils.rand(3), Utils.rand(3), Utils.rand(3))
-		r.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		wg.add_child(r)
+		var gh: float = G.ground_h.call(x, z)
+		var rr := Basis.from_euler(Vector3(Utils.rand(3), Utils.rand(3), Utils.rand(3)))
+		var rs := Utils.rand(1, 2) * s
+		sm_push.call(sm_veg, rock_mat, _sn_uico, Transform3D(rr.scaled(Vector3(rs, rs, rs)), Vector3(x, gh + Utils.rand(0.3, 0.7) * s, z)))
 		add_collider.call(x, 0, z, 2 * s, 1.5 * s, 2 * s)
 	var tower_spots := []
 	var blocks := [-142, -94, -66, -14, 14, 66, 94, 142]
@@ -2928,6 +3042,8 @@ static func _snow_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects: A
 			2: sandbag.call(Utils.rand(-140 * sc, 140 * sc), Utils.choice([-R, 0.0, R]) + Utils.rand(-6, 6), Utils.rand(PI))
 			3: container.call(Utils.rand(-140 * sc, 140 * sc), Utils.rand(-140 * sc, 140 * sc), Utils.rand(PI))
 			4: barrier.call(Utils.rand(-140 * sc, 140 * sc), Utils.choice([-R, 0.0, R]) + Utils.rand(-5, 5), Utils.rand(PI))
+	_flush_prop_mm(wg, sm_buf)
+	_flush_prop_mm(wg, sm_veg, 0.0, false)
 	# ---------- 积雪核心物件(雪堆/覆雪木箱与沙袋/结冰车/房檐冰柱/雪人彩蛋/弹壳) ----------
 	var flag_pts := [[-R, -R], [R, -R], [0.0, 0.0], [-R, R], [R, R]]
 	var near_flag3 := func(x: float, z: float, r: float) -> bool:
@@ -3387,22 +3503,22 @@ static func _jungle_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects:
 	trunk_mesh.top_radius = 0.22
 	trunk_mesh.bottom_radius = 0.34
 	trunk_mesh.height = 1.0
-	trunk_mesh.radial_segments = 7
+	trunk_mesh.radial_segments = 6
 	var crown1_mesh := SphereMesh.new()
 	crown1_mesh.radius = 0.36
 	crown1_mesh.height = 0.72
-	crown1_mesh.radial_segments = 8
-	crown1_mesh.rings = 6
+	crown1_mesh.radial_segments = 6
+	crown1_mesh.rings = 4
 	var crown2_mesh := SphereMesh.new()
 	crown2_mesh.radius = 0.26
 	crown2_mesh.height = 0.52
-	crown2_mesh.radial_segments = 7
-	crown2_mesh.rings = 5
+	crown2_mesh.radial_segments = 6
+	crown2_mesh.rings = 4
 	var bush_mesh := SphereMesh.new()
 	bush_mesh.radius = 0.5
 	bush_mesh.height = 1.0
-	bush_mesh.radial_segments = 7
-	bush_mesh.rings = 5
+	bush_mesh.radial_segments = 6
+	bush_mesh.rings = 4
 	var tree_buf := {}
 	var tree_push := func(mat: Material, mesh: Mesh, x: float, z: float, rot: float, y_off: float, s: Vector3) -> void:
 		var gh: float = G.ground_h.call(x, z)
@@ -3638,7 +3754,8 @@ static func _jungle_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects:
 			break
 	_flush_prop_mm(wg, buf)
 	# [8/10] 丛林树/灌木 MultiMesh 批绘提交(420m 图内 420m 裁剪,远处树雾中不可见)
-	_flush_prop_mm(wg, tree_buf, 420.0)
+	# [PERF] 散布树/灌木关闭阴影投射(密林中阴影本就重叠,与密林环松树一致;省 4 级 cascade)
+	_flush_prop_mm(wg, tree_buf, 420.0, false)
 	# 远山天际线
 	var hill_mat := _basic(Color.html("#5a7a52"), true)
 	for i in 18:
@@ -4472,12 +4589,13 @@ static func update_map(dt: float) -> void:
 		var parity: int = _update_frame & 1
 		for i in positions.size():
 			var p := positions[i]
-			var y: float = p.y - dt * Utils.rand(2, 4)
+			# [PERF] 内联随机(免 Utils.rand 静态调用开销,~500 次/帧)
+			var y: float = p.y - dt * (2.0 + randf() * 2.0)
 			var x: float = p.x + dt * 0.8
-			# 着地判定:隔帧采样预烘焙 4m 高度网格(避免逐帧噪声求值)
+			# 着地判定:隔帧采样预烘焙高度网格(复用静态缓存,免字典查找)
 			var gy := 0.0
 			if not hg.is_empty() and (i & 1) == parity:
-				gy = _hgrid_h(hg, x, p.z)
+				gy = Utils._ground_h_fast(x, p.z)
 			if y < gy:
 				y += 30
 			if x - cam.x > 35: x -= 70

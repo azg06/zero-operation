@@ -93,6 +93,7 @@ var _burn_timer := 0.0             # 燃烧粒子发射间隔计时
 # === 卡死检测与脱困(滑动解析之外的兜底) ===
 var stuck_t := 0.0              # 持续踩油门但净位移极小的累计时间
 var stuck_net := Vector2.ZERO   # 卡死窗口内累计净位移(矢量求和,原地抖动互消)
+var _still_t := 0.0             # [PERF] 静止空车累计时长(>1s 进入节流,跳过悬挂/地形/碰撞重采样)
 var unstuck_t := 0.0            # 脱困剩余时间(>0 表示脱困中,驾驶输入被覆盖)
 var unstuck_turn_t := 0.0       # 脱困阶段1(随机侧向原地转向)剩余时间
 var unstuck_side := 0.0         # 脱困转向侧(±1;保留上次值用于交替换向)
@@ -508,6 +509,16 @@ func update_vehicle(dt: float) -> void:
 			mesh.visible = true
 		if respawn_protect <= 0:
 			mesh.visible = true
+	# [PERF] 静止空车节流:无乘员且停稳 >1s → 跳过驾驶/移动/碰撞/悬挂/地形重采样(外观位置不变),
+	# 仅同步模型位置(可能被移动载具推挤微动);乘员上车/开动即恢复完整更新
+	if driver == null and gunner == null and absf(speed) < 0.05 and absf(steer) < 0.05:
+		_still_t += dt
+		if _still_t > 1.0:
+			mesh.position = pos
+			mesh.rotation.y = yaw
+			return
+	else:
+		_still_t = 0.0
 	# 幽灵驾驶防护:阵亡后不再接受玩家输入(防止死后到重部署前仍可驾驶)
 	var player_driving: bool = driver != null and driver == G.player and driver.alive
 	if player_driving:

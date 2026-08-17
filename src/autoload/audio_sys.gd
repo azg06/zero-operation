@@ -101,6 +101,20 @@ func _ready() -> void:
 		_players_3d.append(p3)
 		_played_3d.append(false)
 	apply_volumes()
+	_preload_hot()
+
+
+## [PERF] 预加载高频音效(枪声/命中/击杀/换弹):消除战斗中首次播放的加载尖峰
+## (实测 bot 开火 max 1545µs 来自 audio/guns 首次 ResourceLoader.load,预载后归零)
+func _preload_hot() -> void:
+	for v in GUN_SOUND_FILES.values():
+		_snd(v, "guns")
+	for k in ["shoot_rifle", "shoot_smg", "shoot_lmg", "shoot_sniper", "shoot_pistol", "shoot_shotgun", "shoot_dmr",
+			"hit", "hit_head", "kill", "kill_head", "dry_fire", "bolt",
+			"reload_1", "reload_2", "reload_3", "rpg_fire"]:
+		_snd(k)
+	for e in VEH_SOUND_FILES.values():
+		_snd(e[0], "vehicles")
 
 
 ## 从 G.settings 恢复各总线音量(Master + 四条分层)

@@ -1,4 +1,4 @@
-﻿class_name HUD extends CanvasLayer
+class_name HUD extends CanvasLayer
 ## 战斗 HUD — 极简军事数字终端设计系统
 ## 设计语言:细边框 / 圆角 / 半透明磨砂(20~40%)/ 青绿+白主色 / 敌方橙 / 警告红 / 占领蓝绿
 ## 信息分层:
@@ -19,11 +19,15 @@ const FLAG_NAMES := {
 
 ## 武器配件短名(右下配件状态标签)
 const MOD_SHORT := {
-	"mag_ext": "扩容", "mag_quick": "快拔", "mag_ap": "穿甲",
-	"muz_supp": "消音", "muz_flash": "消焰", "muz_brk": "制退",
-	"grip_vert": "垂直", "grip_ang": "斜角", "grip_light": "轻量",
+	"mag_ext": "扩容", "mag_quick": "快拔", "mag_ap": "穿甲", "mag_drum": "弹鼓",
+	"muz_supp": "消音", "muz_flash": "消焰", "muz_brk": "制退", "muz_comp": "补偿", "muz_choke": "收束",
+	"grip_vert": "垂直", "grip_ang": "斜角", "grip_light": "轻量", "grip_fg": "前握",
+	"stock_light": "轻托", "stock_heavy": "重托", "stock_fold": "折托",
+	"barrel_long": "长管", "barrel_short": "短管", "barrel_heavy": "重管",
 	"trig_comp": "比赛", "trig_dual": "双段",
-	"opt_reddot": "红点", "opt_holo": "全息",
+	"opt_reddot": "红点", "opt_holo": "全息", "opt_reddot_mini": "微红点", "opt_reddot_dot": "大视窗",
+	"opt_2x": "2倍镜", "opt_1xprism": "棱镜",
+	"laser_tac": "镭射", "laser_flash": "手电", "laser_ir": "红外",
 }
 
 ## 模式名(小地图状态条)
@@ -33,6 +37,8 @@ const MODE_NAMES := {
 }
 
 # ==================== 准星:四短线 + 中心点(命中白闪 + 淡环反馈 + 爆头微放大) ====================
+# 光学瞄具准星样式(ret_style):reddot=纯红实心点 / holo=红环+点 / tac=细十字+点;
+# 红点尺寸随分辨率稳定缩放,固定屏幕中心(不随散布),无模糊无发光
 class Crosshair extends Control:
 	var spread_px := 4.0
 	var ch_opacity := 1.0
@@ -41,6 +47,8 @@ class Crosshair extends Control:
 	var hit_kill := false
 	var hit_head := false
 	var zoom_k := 1.0           # 爆头轻微放大(平滑)
+	var ret_style := ""         # ""=机械瞄具四短线 | reddot | holo | tac
+	var ret_color := Color(1.0, 0.12, 0.1)   # 红点/全息分划红
 
 	func show_hit(kill: bool, head: bool) -> void:
 		hit_kill = kill
@@ -63,6 +71,40 @@ class Crosshair extends Control:
 	func _draw() -> void:
 		var c := size / 2.0 + Vector2(0, -kick_px)
 		var col := Color(1, 1, 1, 0.8 * ch_opacity)
+		# 光学瞄具准星:固定屏幕中心、不随散布扩散、尺寸按分辨率缩放
+		if ret_style == "reddot":
+			# 纯实心红点:极小、稳定、无圆环无十字
+			var dr := clampf(2.0 * size.y / 1080.0, 1.5, 3.2)
+			draw_circle(c, dr, Color(ret_color.r, ret_color.g, ret_color.b, 0.95 * ch_opacity))
+			return
+		if ret_style == "holo":
+			# 全息:小圆环 + 中心实心点(经典 EOTech 风格)
+			var s := clampf(size.y / 1080.0, 0.7, 1.4)
+			var rr := 4.6 * s
+			draw_arc(c, rr, 0, TAU, 24, Color(ret_color.r, ret_color.g, ret_color.b, 0.9 * ch_opacity), 1.4 * s)
+			draw_circle(c, 1.6 * s, Color(ret_color.r, ret_color.g, ret_color.b, 0.95 * ch_opacity))
+			return
+		if ret_style == "tac":
+			# 低倍战术镜:细十字 + 中心点(中心隙 1px,短线 7px)
+			var s := clampf(size.y / 1080.0, 0.7, 1.4)
+			var gap := 1.5 * s
+			var L2 := 7.0 * s
+			var cc := Color(0.0, 0.0, 0.0, 0.5 * ch_opacity)
+			var cw := Color(1, 1, 1, 0.75 * ch_opacity)
+			for i in 2:
+				var w: float = 1.2 if i == 0 else 0.7
+				draw_line(c + Vector2(-gap - L2, 0), c + Vector2(-gap, 0), cw, w)
+				draw_line(c + Vector2(gap, 0), c + Vector2(gap + L2, 0), cw, w)
+				draw_line(c + Vector2(0, -gap - L2), c + Vector2(0, -gap), cw, w)
+				draw_line(c + Vector2(0, gap), c + Vector2(0, gap + L2), cw, w)
+				draw_line(c + Vector2(-gap - 1.2, 0), c + Vector2(-gap, 0), cc, w + 0.8)
+				draw_line(c + Vector2(gap, 0), c + Vector2(gap + 1.2, 0), cc, w + 0.8)
+				draw_line(c + Vector2(0, -gap - 1.2), c + Vector2(0, -gap), cc, w + 0.8)
+				draw_line(c + Vector2(0, gap), c + Vector2(0, gap + 1.2), cc, w + 0.8)
+				L2 *= 0.62
+				gap *= 1.0
+			draw_circle(c, 1.3 * s, cw)
+			return
 		var L := 8.0 * zoom_k
 		var g := (5.0 + spread_px) * zoom_k
 		var w := 1.5
@@ -1064,12 +1106,13 @@ class ScopeOverlay extends Control:
 		var c := size / 2.0
 		var r := minf(size.x, size.y) * 0.42
 		# 四周径向渐变暗角(替代硬边矩形:内圈透明 → 外圈全黑)
+		# 注意:必须用圆环(draw_arc),不能用 draw_circle 填充圆——后者会一层层盖黑中央镜内画面。
 		var steps := 14
+		var ring_w: float = maxf(2.0, r * 0.045)
 		for i in steps:
-			var rr: float = r * (1.0 + float(i) / float(steps) * 0.55)
-			var a: float = pow(float(i) / float(steps), 1.6) * 1.0
-			if i > 0:
-				draw_circle(c, rr, Color(0, 0, 0, a * 0.55))
+			var rr: float = r * (1.0 + (float(i) + 0.5) / float(steps) * 0.55)
+			var a: float = pow((float(i) + 0.5) / float(steps), 1.6) * 1.0
+			draw_arc(c, rr, 0, TAU, 96, Color(0, 0, 0, a * 0.55), ring_w)
 			# 用弧形挖出中央圆窗
 		# 精确遮罩:中央圆外全黑(圆环填充)
 		var mask := 64
@@ -2651,22 +2694,31 @@ func update_hud(dt: float) -> void:
 		# 准星扩散
 		var ch_op: float
 		var spread_px: float
+		var ret_style: String = ""
 		if p.vehicle != null:
 			ch_op = 0.0
 			spread_px = 0.0
-		elif gun == null or not gun.def.scope or gun.ads_amount < 0.7:
-			spread_px = clampf(gun.current_spread() / (G.camera.fov * PI / 180.0) * get_viewport().get_visible_rect().size.y, 2, 90) if gun != null else 2.0
-			ch_op = 0.25 if (gun != null and gun.ads_amount > 0.6 and not gun.def.scope) else 1.0
+		elif gun == null or not gun.scope_sight() or gun.ads_amount < 0.7:
+			# 光学瞄具开镜:镜内准星(红点/全息/战术镜)固定屏幕中心,不随散布
+			if gun != null and gun.ads_amount > 0.6 and gun.ret_style() != "":
+				ret_style = gun.ret_style()
+				ch_op = 1.0
+				spread_px = 0.0
+			else:
+				spread_px = clampf(gun.current_spread() / (G.camera.fov * PI / 180.0) * get_viewport().get_visible_rect().size.y, 2, 90) if gun != null else 2.0
+				ch_op = 0.25 if (gun != null and gun.ads_amount > 0.6 and not gun.scope_sight()) else 1.0
 		else:
 			spread_px = 2.0
 			ch_op = 0.0
 		if _crosshair.kick_px > 0:
 			_crosshair.kick_px = maxf(_crosshair.kick_px - dt * 18.0, 0.0)
-		if absf(spread_px - _crosshair.spread_px) > 0.5 or ch_op != _crosshair.ch_opacity or _crosshair.kick_px > 0.01:
+		if absf(spread_px - _crosshair.spread_px) > 0.5 or ch_op != _crosshair.ch_opacity \
+				or _crosshair.kick_px > 0.01 or ret_style != _crosshair.ret_style:
 			_crosshair.spread_px = spread_px
 			_crosshair.ch_opacity = ch_op
+			_crosshair.ret_style = ret_style
 			_crosshair.queue_redraw()
-		_scope.visible = gun != null and gun.def.scope and gun.ads_amount > 0.7
+		_scope.visible = gun != null and gun.scope_sight() and gun.ads_amount > 0.7
 		if _scope.visible:
 			_scope.queue_redraw()
 		# 占领进度

@@ -21,7 +21,6 @@ var menus = null
 var game = null
 var player = null
 var bot_manager = null
-var touch = null
 var campaign = null                  # 战役控制器(Campaign 实例,main.gd 创建)
 var portal = null                    # 门户模式管理器(PortalManager,架构 Agent;BR 未就绪时由 GameMode_BR 兜底)
 var br = null                        # 大逃杀模式实例(GameMode_BR;PortalManager 实例化或 main.gd 兜底)
@@ -40,6 +39,8 @@ var bt_spawns = null                 # 突破模式出生线 { att: [[...]], def
 var bounds := 110.0                  # 地图半径(米)
 var world_size := 120.0
 var ground_h: Callable = Callable()  # 地形高度场 (x, z) -> y
+var ground_flat := false             # [PERF] 平地(恒 0)标记:raycast_world 走封闭解免步进
+var ground_grid := {}                # [PERF] 非平地 4m 高度网格(raycast_world 双线性插值加速)
 var minimap_rects: Array = []
 var destructibles: Array = []
 var vehicle_spawns: Array = []
@@ -78,7 +79,7 @@ var settings := {
 	"ssr": false,       # 屏幕空间反射(水面/金属反射细节)
 	"ssil": false,      # 屏幕空间间接光照(环境光反弹)
 	"glow": true,       # 泛光 Bloom
-	"cinema": true,     # 电影级后期(自定义着色器:微对比/颗粒/暗角/色差)
+	"cinema": true,     # 电影级后期(自定义着色器:微对比/颗粒/暗角;色差已移除防红蓝彩边)
 	"auto_quality": true,  # [8/10] 动态质量:帧时间超标自动逐级降级,稳定后恢复(不覆盖手动设置)
 }
 var fog_base := [60.0, 400.0]
@@ -88,6 +89,12 @@ var apply_graphics: Callable = Callable()
 ## 音频/UI 辅助:读取带默认值的设置项(音量等)
 func audio_setting(key: String, def_v: float = 1.0) -> float:
 	return float(settings.get(key, def_v))
+
+
+## 统一错误日志:所有子系统通过它记录对象、状态和上下文,便于定位崩溃来源
+func log_err(tag: String, msg: String, ctx: Variant = null) -> void:
+	var detail := "" if ctx == null else " | ctx=" + str(ctx)
+	push_error("[%s] %s%s" % [tag, msg, detail])
 
 
 ## 音频/UI 辅助:mm:ss 时钟格式(击杀时间戳等)

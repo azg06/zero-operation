@@ -1,4 +1,4 @@
-﻿class_name Player extends Node3D
+class_name Player extends Node3D
 ## 玩家控制器(对应 player.js)
 
 var team := "us"
@@ -10,6 +10,9 @@ var recoil_pitch := 0.0
 var recoil_yaw := 0.0
 var cam_kick_pitch := 0.0          # 开火瞬间摄像机微后坐(高衰减)
 var cam_kick_yaw := 0.0
+var reload_cam_pitch := 0.0        # 换弹镜头反馈(ReloadController 驱动,克制幅度)
+var reload_cam_yaw := 0.0
+var reload_cam_roll := 0.0
 var look_vel_x := 0.0
 var look_vel_y := 0.0
 var radius := 0.38
@@ -33,6 +36,7 @@ var class_id := "assault"
 var loadout = null
 var step_t := 0.0
 var bob_y := 0.0
+var motion: FirstPersonMotionSystem = null   # 程序化 Camera + Weapon Motion(单实例集中驱动)
 var vehicle = null                # 驾驶中的载具
 var prone := false                # 趴下
 var spot_cd := 0.0                # 索敌冷却
@@ -77,6 +81,7 @@ var _melee_prev_empty := false    # 上一节流周期弹药状态(转移沿检�
 
 func _ready() -> void:
 	name = "你"
+	motion = FirstPersonMotionSystem.new(self)
 	body = SoldierModel.build_player_body()
 	G.main.add_child(body)
 
@@ -92,7 +97,7 @@ func _update_body_gun() -> void:
 	var g := gun()
 	if g == null or g.id == "rpg":
 		return
-	var gn: Node3D = WeaponModels.build(g.id, false)
+	var gn: Node3D = WeaponModels.build(g.id, false, WeaponModsData.load_cfg(g.id))
 	gn.name = "BodyGun"
 	gn.scale = Vector3.ONE * 1.15
 	gn.position = Vector3(0.16, 0.28, -0.35)
@@ -171,6 +176,8 @@ func spawn(p_pos: Vector3) -> void:
 	vel = Vector3.ZERO
 	health = 100
 	alive = true
+	if motion != null:
+		motion.reset(vel)
 	prone = false
 	body.rotation.x = 0
 	# 手雷蓄力复位(重生不残留)
@@ -194,6 +201,9 @@ func spawn(p_pos: Vector3) -> void:
 	pitch = 0
 	recoil_pitch = 0
 	recoil_yaw = 0
+	reload_cam_pitch = 0
+	reload_cam_yaw = 0
+	reload_cam_roll = 0
 	give_class(class_id, loadout)
 	# 夜视仪重部署自动关闭(防残留)
 	night_vision = false
@@ -529,6 +539,8 @@ func _try_repair_vehicle() -> bool:
 func enter_vehicle(v) -> void:
 	if melee_active:
 		_deactivate_melee(false)   # 上车:小刀强制收回(载具互斥)
+	if motion != null:
+		motion.reset(Vector3.ZERO)  # 车上由 VehicleCameraController 接管,清掉步战运动残留
 	vehicle = v
 	# 座位分配:优先驾驶位;驾驶位被占(队友/NPC)则坐炮手/乘客位;两个座位都满则不能上车
 	if v.driver == null:
@@ -604,6 +616,8 @@ func exit_vehicle(silent := false) -> void:
 	else:
 		vel = Vector3.ZERO
 	yaw = v.yaw
+	if motion != null:
+		motion.reset(vel)  # 下车继承速度直接作为运动系统初始输入,避免首帧加速度尖峰
 	if not silent:
 		gun().equip()
 	else:
@@ -827,6 +841,8 @@ func update_player(dt: float) -> void:
 	# ---- 视角 ----
 	var md: Vector2 = input.consume_mouse()
 	apply_look(md.x, md.y)
+	if motion != null:
+		motion.input_mouse(md.x, md.y)  # 原始 Delta 进 Sway(apply_look 已扣灵敏度)
 	look_vel_x = Utils.damp(look_vel_x, 0, 12, dt)
 	look_vel_y = Utils.damp(look_vel_y, 0, 12, dt)
 
@@ -889,6 +905,8 @@ func update_player(dt: float) -> void:
 		speed = 1.3
 	if gun().ads_amount > 0.5:
 		speed = minf(speed, 2.8)
+	# 枪械重量:配件(长枪管/重型枪托/弹鼓等)降低移动速度
+	speed *= gun().mobility_mult()
 
 	if slide_t > 0:
 		# 滑铲:方向锁定,初速 8.8 爆发,后段干净收束
@@ -905,15 +923,20 @@ func update_player(dt: float) -> void:
 	if on_ground and not prone and slide_t <= 0 and Input.is_action_just_pressed("jump"):
 		vel.y = 5.4
 		on_ground = false
+		if motion != null:
+			motion.notify_jump()
 	vel.y -= 13.5 * dt
 	pos.x += vel.x * dt
 	pos.z += vel.z * dt
 	pos.y += vel.y * dt
 	var gh: float = G.ground_h.call(pos.x, pos.z) if G.ground_h.is_valid() else 0.0
 	if pos.y <= gh:
+		var fall_impact := -vel.y
 		pos.y = gh
 		vel.y = 0
 		on_ground = true
+		if motion != null and fall_impact > 1.0:
+			motion.notify_landing(fall_impact)
 	pos = Utils.move_collide(pos, radius, 0.75 if prone else (1.25 if (crouched or slide_t > 0) else height))
 	# 载具实体碰撞(不再穿模)
 	pos = Vehicle.vehicle_collide(pos, radius)
@@ -947,6 +970,10 @@ func update_player(dt: float) -> void:
 
 	# ---- 近战小刀状态机(H 长按/弹尽自动/挥击/收回) ----
 	_update_melee(dt)
+	# ---- 程序化 Camera + Weapon Motion 主更新(必须在 g.update 之前,相机/枪械共用同一输入) ----
+	if motion != null:
+		motion.update(dt)
+		bob_y = motion.stride_phase()   # 腿/脚动画继续与步距相位同步
 	var g := gun()
 	if not melee_active:
 		# ---- 武器操作 ----
@@ -1119,24 +1146,30 @@ func update_player(dt: float) -> void:
 	var target_eye := 0.45 if prone else (0.72 if slide_t > 0 else (1.12 if crouched else 1.62))
 	# 滑铲视线快速压下(22),起身利落回正(12)
 	eye_height = Utils.damp(eye_height, target_eye, 22.0 if slide_t > 0 else 12.0, dt)
-	# 相机 bob
-	if on_ground and h_speed > 0.5:
-		bob_y += dt * h_speed * 1.55
-	var bob_amp := 0.035 if sprint_amount > 0.5 else 0.018
+	# ---- Camera Base -> Breathing -> Movement Bob -> Inertia -> Recoil 逐层合成 ----
+	# Bob/呼吸/惯性/落地冲量全部由 FirstPersonMotionSystem 输出;这里只做:
+	#   1) 基础位置 + 本地空间偏移(随相机朝向变换)
+	#   2) 基础朝向 + 后坐/换弹/压制/滑铲 + 程序化旋转增量
 	var cam := camera()
-	cam.global_position = Vector3(
-		pos.x + sin(bob_y) * bob_amp * 0.5,
-		pos.y + eye_height + absf(cos(bob_y)) * bob_amp,
-		pos.z)
 	cam.rotation_order = EULER_ORDER_YXZ
+	# 换弹镜头反馈兜底衰减:枪械被收起(近战/载具)时控制器不更新,这里确保镜头归零不残留
+	if not g.reloading:
+		reload_cam_pitch = Utils.damp(reload_cam_pitch, 0.0, 10.0, dt)
+		reload_cam_yaw = Utils.damp(reload_cam_yaw, 0.0, 10.0, dt)
+		reload_cam_roll = Utils.damp(reload_cam_roll, 0.0, 10.0, dt)
 	# 压制效果:被压制时准星抖动(开镜大幅减免)
 	var sup_j := clampf(suppression, 0, 1) * 0.0032 * (1.0 - g.ads_amount * 0.65)
 	var jt: float = G.time
-	cam.rotation.y = yaw + recoil_yaw + cam_kick_yaw + G.effects.shake_yaw + sin(jt * 31.0) * sup_j
-	cam.rotation.x = pitch + recoil_pitch + cam_kick_pitch + G.effects.shake_pitch + cos(jt * 27.0 + 1.4) * sup_j
+	var motion_rot := motion.camera_rotation() if motion != null else Vector3.ZERO
+	var motion_pos := motion.camera_position() if motion != null else Vector3.ZERO
+	cam.rotation.y = yaw + recoil_yaw + cam_kick_yaw + reload_cam_yaw + G.effects.shake_yaw + sin(jt * 31.0) * sup_j + motion_rot.y
+	cam.rotation.x = pitch + recoil_pitch + cam_kick_pitch + reload_cam_pitch + G.effects.shake_pitch + cos(jt * 27.0 + 1.4) * sup_j + motion_rot.x
 	# 滑铲相机侧倾:快速压入,干净回正
 	_slide_roll = Utils.damp(_slide_roll, -0.1 if slide_t > 0 else 0.0, 16.0 if slide_t > 0 else 10.0, dt)
-	cam.rotation.z = sin(bob_y * 0.5) * 0.003 + recoil_yaw * 0.3 + _slide_roll
+	cam.rotation.z = recoil_yaw * 0.3 + _slide_roll + reload_cam_roll + motion_rot.z
+	# 位置 = 眼位 + 相机局部空间偏移;偏移随相机 basis 旋转,保证与屏幕上下左右一致
+	var cam_base := Vector3(pos.x, pos.y + eye_height, pos.z)
+	cam.global_position = cam_base + cam.global_transform.basis * motion_pos
 	# FOV:冲刺 +,滑铲瞬时冲击(随滑铲进程衰减),开镜全屏向 zoom_fov 缩小放大
 	# 所有武器统一:主相机 FOV 从 base_fov 向 def.zoom_fov 过渡(狙击 awm 12/m24 13/svd 14
 	# 全屏放大,2D 镜罩接管画面;普通武器 55 机瞄略缩),红点/全息改装近无放大(78)

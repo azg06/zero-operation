@@ -39,17 +39,17 @@ enabled=PackedStringArray("sky_3d")
 
 [rendering]
 
-renderer/rendering_method.mobile="forward_plus"
 renderer/rendering_method.web="gl_compatibility"
 textures/vram_compression/import_etc2_astc=true
-lights_and_shadows/directional_shadow/size=8192
+lights_and_shadows/directional_shadow/size=4096
 lights_and_shadows/directional_shadow/soft_shadow_filter_quality=3
 lights_and_shadows/positional_shadow/soft_shadow_filter_quality=3
-textures/default_filters/anisotropic_filtering_level=8
+lights_and_shadows/directional_shadow/16_bits=false
+textures/default_filters/anisotropic_filtering_level=4
 textures/default_filters/use_nearest_mipmap_filter=false
-environment/ssao/half_size=false
-environment/ssil/half_size=false
-environment/screen_space_reflection/half_size=false
+environment/ssao/half_size=true
+environment/ssil/half_size=true
+environment/screen_space_reflection/half_size=true
 environment/screen_space_reflection/roughness_quality=1
 environment/volumetric_fog/volume_size=32
 anti_aliasing/quality/msaa_3d=2
