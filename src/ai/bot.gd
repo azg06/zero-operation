@@ -1,10 +1,41 @@
-﻿class_name Bot extends Node3D
+class_name Bot extends Node3D
 ## AI 士兵(对应 ai.js 的 Bot 类)
 
 const NAMES_US := ["幽灵", "猎鹰", "毒蛇", "雷神", "铁壁", "夜鹰", "风暴", "游侠", "幻影", "战马", "雪豹", "苍狼"]
 const NAMES_RU := ["伊万", "熊罴", "红狼", "寒鸦", "钢牙", "夜枭", "黑鲨", "秃鹫", "雪狐", "战熊", "灰狼", "毒蜂"]
 
 static var BOT_ID := 0
+
+# ---- [PERF] 细粒度 bot 计时(--bench-bot;定位 bot 帧尖峰来源:think/shoot/die/cover) ----
+static var _bbot_on := false
+static var _bbot := {}          # name -> { t(累计µs), max(单次µs), n }
+static var _bbot_n := 0
+
+static func _bbot_tick(name: String, t0: int) -> void:
+	if not _bbot_on:
+		return
+	var d: Dictionary = _bbot.get(name, {})
+	if d.is_empty():
+		d = { "t": 0.0, "max": 0.0, "n": 0 }
+	var us := float(Time.get_ticks_usec() - t0)
+	d["t"] += us
+	d["max"] = maxf(float(d["max"]), us)
+	d["n"] = int(d["n"]) + 1
+	_bbot[name] = d
+
+static func _bbot_report() -> void:
+	if not _bbot_on:
+		return
+	_bbot_n += 1
+	if _bbot_n < 900:
+		return
+	var parts: Array = []
+	for name in _bbot:
+		var d: Dictionary = _bbot[name]
+		parts.append("%s=%.0f/%.0fus" % [name, d["t"] / maxf(float(d["n"]), 1.0), d["max"]])
+	print("[BENCH-BOT] " + "  ".join(parts))
+	_bbot.clear()
+	_bbot_n = 0
 
 
 ## actor → 展示名(全库统一实现):玩家="你";bot 优先 bot_name(防同名节点被
@@ -100,7 +131,7 @@ var follow: Node = null          # 跟随目标(战役为玩家);非战役模式
 var squad_slot := -1             # 编队槽位(0=左后 / 1=右后 / 2=正后)
 var downed := false              # 我方队友倒地(hp<=0,可被救治,不触发击杀播报)
 var downed_t := 0.0              # 倒地持续时长(超时自动撤离)
-var walk_t := 0.0
+var walk_t := 0.0  # [动画] 已由 _ik_phase 步态相位取代(保留字段防外部引用)  
 var last_fired_t := -99.0
 var _last_attacker_def = null
 var _last_hit_head := false
@@ -128,6 +159,22 @@ var cover_scan_cd := 0.0           # 掩体扫描节流
 var last_attacker = null
 var last_attacker_pos := Vector3.ZERO
 var hit_t := 0.0
+# ---- 步坦协同:坦克支援步兵 / 步兵跟随坦克 ----
+var _coop_tank = null              # 跟随的己方坦克/步战(共同目标,6~55m 内,think 期缓存)
+var _support_inf := 0              # 坦克驾驶:目标点 90m 内己方步兵数(节流缓存)
+var _support_cd := 0.0             # 步兵统计节流计时
+# ---- 程序化动画系统(第三人称动作:速度数据链/步态/朝向分层/姿态混合/脚部 IK) ----
+var _anim_speed := 0.0             # 平滑动画速度(滞后于实际速度,加减速过渡,防滑步)
+var _anim_cad := 0.0               # 平滑步频(步/秒)
+var _ik_phase := 0.0               # 步态相位(与位移同步积分,相位连续无跳变)
+var _legs_yaw := 0.0               # 下半身朝向(移动时腿朝运动方向,静止时随身体)
+var _raise := 0.0                  # 举枪度(0 低垂 → 1 端枪,平滑过渡)
+var _alert := 0.0                  # 警觉度(影响摆幅/姿态,平滑过渡)
+var _lean := 0.0                   # 奔跑/急停前倾量
+var _ik_hip_l := 0.0               # 左大腿 IK 角度缓存
+var _ik_knee_l := 0.0              # 左膝 IK 角度缓存
+var _ik_hip_r := 0.0               # 右大腿 IK 角度缓存
+var _ik_knee_r := 0.0              # 右膝 IK 角度缓存
 # ---- 人化射击精度 ----
 var skill := 0.8                   # 0.45~1.1 技能系数(管理器平衡)
 var aim_err := 0.01                # 当前瞄准误差(弧度,受击/新目标跳变后收敛)
@@ -160,6 +207,9 @@ var _think_every := 0.14
 # ---- [PERF] BR 远距节流:距玩家 >250m 的 bot think 0.3s + 索敌半径 30m ----
 var _br_far := false
 var _br_far_logged := false
+# ---- [PERF] 距离分级(距玩家距离缓存,驱动动画 LOD;think 期更新,避免每帧距离计算) ----
+var _dist_p := 999.0                # 距玩家距离缓存
+var _anim_lod := 0                  # 动画 LOD:0=完整(含脚部 IK) 1=简化腿 2=极简(腿摆+不演上半身/持枪)
 # ---- 战场噪音静态日志(听觉感知;cap 48 条环形丢弃) ----
 static var _noise_log: Array = []
 var _crew_pose := ""                # 乘员姿态日志状态:"" / "seat" / "hidden"(仅状态变化时打印)
@@ -214,12 +264,10 @@ func _init(p_team: String) -> void:
 		_:
 			weapon_id = "m4"
 	def = WeaponsData.W()[weapon_id]
-	mesh = SoldierModel.build_soldier(team, weapon_id, class_id)
+	# [PERF] 外观模型延后到 apply_loadout 统一构建(消除 _init 随机装 + apply_loadout 指派装的双重建模)
+	mesh = null
 	hb = SoldierModel.make_health_bar()
-	mesh.add_child(hb["sprite"])
 	mk = { "sprite": SoldierModel.make_team_marker() }
-	mesh.add_child(mk["sprite"])
-	add_child(mesh)
 	think_t = (id % 9) * 0.016 + Utils.rand(0, 0.03)  # 错峰首 tick
 
 
@@ -310,6 +358,9 @@ func spawn(p_pos: Vector3) -> void:
 
 
 func die(attacker) -> void:
+	var _bt := 0
+	if _bbot_on:
+		_bt = Time.get_ticks_usec()
 	alive = false
 	deaths += 1
 	death_t = 0
@@ -359,6 +410,8 @@ func die(attacker) -> void:
 		"p1": Utils.rand(6.3), "p2": Utils.rand(6.3), "p3": Utils.rand(6.3), "p4": Utils.rand(6.3),
 	}
 	G.game.on_kill(attacker, self, _last_attacker_def, _last_hit_head)
+	if _bbot_on:
+		_bbot_tick("die", _bt)
 
 
 ## ==================== 四人小队(战役队友) ====================
@@ -745,6 +798,9 @@ func _br_zone_urgent_active() -> bool:
 ## 寻找可见敌人(含敌方有人载具)
 ## reacq:追踪中重获目标 → 放宽视锥(侧身走位时仍能跟住);初始索敌严格视锥(约 77°)
 func acquire_target(reacq := false):
+	var _bt := 0
+	if _bbot_on:
+		_bt = Time.get_ticks_usec()
 	var best = null
 	var best_d := 75.0 if not _far_zone else 55.0  # 索敌半径(战事稀疏区减半)
 	# [BR-DIFF] 非决赛圈索敌保守 75→55m;决赛圈(r<80m)恢复原范围(近战激烈)
@@ -807,6 +863,8 @@ func acquire_target(reacq := false):
 			if Utils.los_clear(pos + Vector3(0, 1.5, 0), a.pos):
 				best = a
 				best_d = d4
+	if _bbot_on:
+		_bbot_tick("think", _bt)
 	return best
 
 
@@ -886,6 +944,9 @@ func _enter_flee(dur: float) -> void:
 
 ## 找掩体:优先沿攻击方向射线找静态碰撞盒/可破坏物(油桶木箱),兜底扫描近处碰撞盒
 func _find_cover() -> void:
+	var _bt := 0
+	if _bbot_on:
+		_bt = Time.get_ticks_usec()
 	cover_valid = false
 	var threat := last_attacker_pos
 	var att_alive: bool = last_attacker != null and (last_attacker.get("alive") == true or last_attacker.get("air") == true)
@@ -963,6 +1024,8 @@ func _find_cover() -> void:
 		cover_pos = best_v
 		cover_valid = true
 		cover_until = G.time + 4.0
+	if _bbot_on:
+		_bbot_tick("cover", _bt)
 
 
 ## ==================== 射击模式与换弹 ====================
@@ -1163,10 +1226,10 @@ func _unstuck_override() -> Vector3:
 
 ## 互挤推开:附近 1.2m 内其他 bot 互相推开(防扎堆/互堵)
 func _push_away_bots() -> void:
-	_push_t -= 1.0 / 60.0
-	if _push_t > 0:
+	# [PERF] 帧错峰:每 12 帧一次、按 id 错开(原 _push_t 固定 0.2s 重置使所有 bot 同帧执行
+	# O(n²) 分离检测 → 周期性尖峰;改为帧错峰后尖峰摊平到 12 帧,稳定 1%Low)
+	if (Engine.get_process_frames() + id * 7) % 12 != 0:
 		return
-	_push_t = 0.2
 	for b in G.bots:
 		if b == self or not b.alive:
 			continue
@@ -1293,7 +1356,7 @@ func _has_lead() -> bool:
 	return hear_t > 0 or G.time - _last_seen_t < 3.5
 
 
-## 蹲伏决策(掩体后蹲、换弹蹲)
+## 蹲伏决策(掩体后蹲、换弹蹲;突破防守方近旗蹲守)
 func _decide_crouch() -> void:
 	var want := false
 	if prone:
@@ -1302,11 +1365,25 @@ func _decide_crouch() -> void:
 		want = true
 	elif _in_cover() and (suppress_t > 0 or (target != null and target_visible and pos.distance_to(last_seen_pos) < 30)):
 		want = true
+	elif G.mode == "breakthrough" and team == "ru" and objective != null \
+			and Utils.dist_2d(pos.x, pos.z, objective.pos.x, objective.pos.z) < 18:
+		want = true  # 防守方近旗:蹲守走位(替代旧"必趴",保持机动)
 	crouch = want
 
 
 ## 性能节流:战事稀疏区 → 低频思考+短索敌;人多 → 整体降频(错峰 tick)
 func _update_perf_lod() -> void:
+	# [PERF] 距玩家距离缓存 + 动画 LOD(驱动 update_bot 内动画分级;debug --anim-lod-off 关闭用于基线对比)
+	var _pp = G.player
+	_dist_p = pos.distance_to(_pp.pos) if (_pp != null and _pp.alive) else 999.0
+	if OS.get_cmdline_user_args().has("--anim-lod-off"):
+		_anim_lod = 0
+	elif _dist_p < 26.0:
+		_anim_lod = 0
+	elif _dist_p < 60.0:
+		_anim_lod = 1
+	else:
+		_anim_lod = 2
 	_far_zone = true
 	for b in G.bots:
 		if b.alive and b.team != team and b.pos.distance_to(pos) < 70:
@@ -1354,6 +1431,33 @@ func _compute_buddy() -> void:
 		_buddy_ok = true
 
 
+## 步坦协同:缓存最近 55m 内己方有人驾驶的坦克/步战(驾驶员与自己的攻点目标一致时,
+## 跟随其侧后推进,坦克作移动掩体)。think 期算一次,避免每帧 O(n)
+func _compute_coop_tank() -> void:
+	_coop_tank = null
+	if _br_free_for_all() or _is_following() or target != null:
+		return
+	if objective == null or not is_instance_valid(objective):
+		return
+	var best = null
+	var best_d := 55.0
+	for v in G.vehicles:
+		if v.dead or v.driver == null or not v.driver.alive:
+			continue
+		if v.team() != team:
+			continue
+		if not (v.is_tank() or v.type == "apc"):
+			continue
+		var d: float = pos.distance_to(v.pos)
+		if d < best_d and d > 6.0:
+			best = v
+			best_d = d
+	if best != null:
+		var vobj = best.driver.objective
+		if vobj != null and is_instance_valid(vobj) and vobj == objective:
+			_coop_tank = best
+
+
 ## 趴下决策
 func _decide_prone() -> void:
 	# BR 决赛圈伏地埋伏:保持趴下(时长在 think 期递减,避免每帧开销)
@@ -1375,10 +1479,8 @@ func _decide_prone() -> void:
 	if suppress_t > 0.6 and d > 18:
 		prone = true
 		return
-	if G.mode == "breakthrough" and team == "ru" and objective != null \
-			and Utils.dist_2d(pos.x, pos.z, objective.pos.x, objective.pos.z) < 18 and d > 16:
-		prone = true
-		return
+	# [BALANCE] 原"突破防守方近旗必趴"已移除:近旗改为蹲守(_decide_crouch),
+	# 防守方交火同样保持机动,不再全线趴桩
 	prone = false
 
 
@@ -1446,6 +1548,7 @@ func _drive(dt: float) -> void:
 		mesh.visible = true
 		return
 	pos = v.pos
+	_support_cd = maxf(0.0, _support_cd - dt)
 	think_t -= dt
 	spotted = maxf(0, spotted - dt)
 	hb_t -= dt
@@ -1495,6 +1598,27 @@ func _drive(dt: float) -> void:
 		dy += TAU
 	var fwd := -0.55 if absf(dy) > 2.2 else (1.0 if dist > 10 else 0.1)
 	var steer := clampf(dy * 1.6, -1, 1)
+	# ---- 步坦协同:坦克/步战与步兵线保持支援距离(步兵统计 0.4s 节流) ----
+	if (v.is_tank() or v.type == "apc") and objective != null and is_instance_valid(objective):
+		if _support_cd <= 0.0:
+			_support_cd = 0.4
+			_support_inf = 0
+			var odist := Utils.dist_2d(v.pos.x, v.pos.z, objective.pos.x, objective.pos.z)
+			if odist < 180.0:
+				for b in G.bots:
+					if not b.alive or b.team != team or b.vehicle != null or b == self:
+						continue
+					if Utils.dist_2d(b.pos.x, b.pos.z, objective.pos.x, objective.pos.z) < 90.0:
+						_support_inf += 1
+		if _support_inf > 0:
+			if dist > 130.0:
+				pass  # 步兵尚未到位:全速推进接应
+			elif dist > 40.0:
+				fwd = minf(fwd, 0.55)  # 跟随步兵推进节奏,不脱离步兵
+			else:
+				fwd = minf(fwd, 0.08)  # 抵达步兵线:停车掩护,炮手持续火力支援
+		elif dist < 40.0:
+			fwd = minf(fwd, 0.25)  # 无步兵伴随:目标外围待命,不冒进
 	# 前方避障(主射线 + 双侧须,错峰每 3 帧探测一次,中间帧用缓存)
 	var dir := Vector3(-sin(v.yaw), 0, -cos(v.yaw))
 	if (Engine.get_process_frames() + id * 7) % 3 == 0:
@@ -1800,6 +1924,7 @@ func update_bot(dt: float) -> void:
 		_decide_prone()
 		_class_duty_search()
 		_compute_buddy()
+		_compute_coop_tank()
 		# 战术换弹:安全时低弹量提前换
 		if not reloading and ammo > 0 and ammo <= def.mag * 0.3 and (target == null or not target_visible):
 			_start_reload()
@@ -1905,16 +2030,27 @@ func update_bot(dt: float) -> void:
 			elif hear_t <= 0 and G.time - _last_seen_t > 4.0:
 				state = "move"
 		"engage":
-			# 交火:接近理想交战距离 + 环绕走位(蹲伏/趴下时不开大位移)
-			if prone and engaging:
-				pass  # 趴下射击:原地不动
+			# 交火:接近理想交战距离 + 环绕走位(蹲伏/趴下时小位移换位,不再原地站桩)
+			# [BALANCE] 突破模式进攻方额外机动加成:更主动压近、更强走位(机动突进)
+			var bt_att_boost: bool = G.mode == "breakthrough" and team == "us" and def.kind != "sniper"
+			if prone and engaging and def.kind != "sniper":
+				# 匍匐换位:低速横移(趴射也有机动,不暴露成固定靶)
+				strafe_t -= dt
+				if strafe_t <= 0:
+					strafe_t = Utils.rand(0.5, 1.1)
+					strafe_dir = Utils.choice([-1, 1])
+				var to_p := Vector2(last_seen_pos.x - pos.x, last_seen_pos.z - pos.z)
+				var tp_i: float = 1.0 / (to_p.length() + 1e-6)
+				move_x = -to_p.y * tp_i * strafe_dir * 0.5
+				move_z = to_p.x * tp_i * strafe_dir * 0.5
+				speed = 1.0
 			else:
 				goal_x = last_seen_pos.x
 				goal_z = last_seen_pos.z
 				var d := Utils.dist_2d(pos.x, pos.z, goal_x, goal_z)
 				strafe_t -= dt
 				if strafe_t <= 0:
-					strafe_t = Utils.rand(0.7, 1.6)
+					strafe_t = Utils.rand(0.45, 1.1)
 					strafe_dir = Utils.choice([-1, 1])
 				var to_x := goal_x - pos.x
 				var to_z := goal_z - pos.z
@@ -1923,10 +2059,16 @@ func update_bot(dt: float) -> void:
 				# [BR-DIFF] BR 非决赛圈:近战谨慎,更倾向中距离交火(20→30m);决赛圈恢复压近
 				if _br_ai_slow() and def.kind != "sniper" and def.kind != "shotgun":
 					ideal = 30.0
+				if bt_att_boost:
+					ideal *= 0.85
 				var approach := clampf((d - ideal) / 8.0, -1, 1)
-				move_x = to_x * inv * approach + (-to_z * inv) * strafe_dir * 0.8
-				move_z = to_z * inv * approach + (to_x * inv) * strafe_dir * 0.8
-				speed = 3.4
+				var strafe_k: float = 1.1 if bt_att_boost else 0.85
+				move_x = to_x * inv * approach + (-to_z * inv) * strafe_dir * strafe_k
+				move_z = to_z * inv * approach + (to_x * inv) * strafe_dir * strafe_k
+				if def.kind == "sniper":
+					speed = 2.6  # 狙击手:停走射击节奏(移动中不开火,保留站定特性)
+				else:
+					speed = 4.1 if bt_att_boost else 3.7
 		"assault":
 			# 占点:围点站位 / 覆盖手殿后 / 侧翼包抄
 			var f = objective
@@ -2016,6 +2158,20 @@ func update_bot(dt: float) -> void:
 					move_x = to_x5 / d5
 					move_z = to_z5 / d5
 				speed = 4.4
+			elif _coop_tank != null and is_instance_valid(_coop_tank) and _coop_tank.driver != null \
+					and objective != null and is_instance_valid(objective):
+				# 步坦协同:跟随己方坦克/步战侧后推进(坦克作移动掩体,不挡炮口)
+				var tv: Vector3 = _coop_tank.pos
+				var tdir := Utils.safe_norm(objective.pos - tv, Vector3.BACK)
+				var tside := Vector3(-tdir.z, 0, tdir.x)
+				var slot: float = 1.0 if (id % 2 == 0) else -1.0
+				var cgoal := tv + tdir * 11.0 + tside * slot * 4.0
+				var tg := Vector2(cgoal.x - pos.x, cgoal.z - pos.z)
+				var td2 := tg.length()
+				if td2 > 1.6:
+					move_x = tg.x / td2
+					move_z = tg.y / td2
+				speed = 4.9
 			elif objective != null:
 				goal_x = objective.pos.x + obj_offset.x
 				goal_z = objective.pos.z + obj_offset.z
@@ -2100,12 +2256,15 @@ func update_bot(dt: float) -> void:
 	if G.ground_h.is_valid():
 		pos.y = G.ground_h.call(pos.x, pos.z)
 
-	# ---- 朝向 ----
+	# ---- 朝向(平滑分档限速 + 上下半身分离:身体朝目标,腿朝移动方向) ----
 	var want_yaw := yaw
+	var facing_target := false
 	if target != null:
 		want_yaw = atan2(-(last_seen_pos.x - pos.x), -(last_seen_pos.z - pos.z))
+		facing_target = true
 	elif _is_following():
 		want_yaw = atan2(-(follow.pos.x - pos.x), -(follow.pos.z - pos.z))
+		facing_target = true
 	elif Vector2(vel.x, vel.z).length() > 0.5:
 		want_yaw = atan2(-vel.x, -vel.z)
 	var dy = want_yaw - yaw
@@ -2113,7 +2272,22 @@ func update_bot(dt: float) -> void:
 		dy -= TAU
 	while dy < -PI:
 		dy += TAU
-	yaw += clampf(dy, -3.2 * dt, 3.2 * dt)
+	# 分档限速:小幅转向快、大角度转身慢(带惯性);静止对枪快速对准;移动中稍缓
+	var turn_k := 3.0 if absf(dy) > 2.1 else (4.5 if absf(dy) > 1.05 else 7.0)
+	if facing_target and Vector2(vel.x, vel.z).length() < 0.8:
+		turn_k = maxf(turn_k, 6.5)
+	elif Vector2(vel.x, vel.z).length() > 1.2:
+		turn_k *= 0.75
+	yaw += clampf(dy, -turn_k * dt, turn_k * dt)
+	# 腿部朝向:移动时腿先向移动方向转,身体随后跟上;静止时腿随身体(消除腿僵)
+	var move_yaw := atan2(-vel.x, -vel.z)
+	var legs_want: float = move_yaw if (Vector2(vel.x, vel.z).length() > 1.1 and not facing_target) else yaw
+	var ld = legs_want - _legs_yaw
+	while ld > PI:
+		ld -= TAU
+	while ld < -PI:
+		ld += TAU
+	_legs_yaw += clampf(ld, -6.0 * dt, 6.0 * dt)
 
 	# ---- 射击(人化开火模型) ----
 	var h_speed := Vector2(vel.x, vel.z).length()
@@ -2182,37 +2356,72 @@ func update_bot(dt: float) -> void:
 				if burst_left <= 0:
 					fire_t = maxf(fire_t, _next_pause())
 
-	# ---- 同步模型 ----
+	# ==================== 程序化动画(第三人称动作) ====================
+	# ---- 速度数据链:动画速度平滑跟随实际速度(减速更快,急停收敛;禁止滑步/跳变) ----
+	h_speed = Vector2(vel.x, vel.z).length()
+	_anim_speed = Utils.damp(_anim_speed, h_speed, 5.0 if h_speed > _anim_speed else 7.5, dt)
+	# 步态相位:总步频 1.9~3.4Hz(慢走→冲刺),相位一圈 = 两步(左右各一步)
+	var f_step := 1.9 + clampf(_anim_speed / 4.6, 0.0, 1.0) * 1.5
+	_ik_phase += f_step * TAU * 0.5 * dt
+	_anim_cad = Utils.damp(_anim_cad, f_step, 6.0, dt)
+	# ---- 姿态混合:举枪度 / 警觉度 / 奔跑前倾(全部平滑过渡,状态切换无跳变) ----
+	var moving_anim: bool = h_speed > 0.6
+	var want_raise := 1.0 if (engaging or (state == "chase" and target_visible)) \
+		else (0.55 if moving_anim else 0.3)
+	_raise = Utils.damp(_raise, want_raise, 6.0, dt)
+	var want_alert := 1.0 if engaging else (0.7 if (target != null or state == "flee" or state == "chase") else 0.4)
+	_alert = Utils.damp(_alert, want_alert, 4.0, dt)
+	var want_lean := 0.0
+	if _anim_speed > 4.6:
+		want_lean = 0.18
+	elif _anim_speed > 2.8:
+		want_lean = 0.1
+	if h_speed < 0.5 and _anim_speed > 2.0:
+		want_lean = 0.14  # 急停:重心前冲
+	_lean = Utils.damp(_lean, want_lean, 4.5, dt)
+	# 姿态:趴/蹲/站(保持原语义)
+	prone_amt = Utils.damp(prone_amt, 1.0 if prone else 0.0, 7, dt)
+	crouch_amt = Utils.damp(crouch_amt, 1.0 if (crouch and not prone) else 0.0, 9, dt)
+	var pk := 1.0 - prone_amt
+	# ---- 模型整体(朝向由 yaw 平滑驱动) ----
 	mesh.rotation_order = EULER_ORDER_YXZ
 	mesh.position = pos
 	mesh.rotation.y = yaw
-	# 趴下:身体伏地,交战时上半身抬起举枪射击;蹲姿:整体压低
-	prone_amt = Utils.damp(prone_amt, 1.0 if prone else 0.0, 7, dt)
-	crouch_amt = Utils.damp(crouch_amt, 1.0 if (crouch and not prone) else 0.0, 9, dt)
 	mesh.rotation.x = -1.5 * prone_amt
-	var upper: Node3D = mesh.get_meta("upper")
-	if upper != null:
-		var raise := 0.82 if (prone and engaging) else 0.1
-		upper.rotation.x = Utils.damp(upper.rotation.x, raise * prone_amt, 8, dt)
-		upper.rotation.y = Utils.damp(upper.rotation.y, 0, 8, dt)
-	# ---- 腿部行走动画(膝关节) ----
-	h_speed = Vector2(vel.x, vel.z).length()
-	walk_t += h_speed * dt * 1.9
-	var speed_k := minf(h_speed / 4.0, 1.0)
-	var swing := sin(walk_t) * speed_k * 0.62
-	var pk := 1 - prone_amt
+	# ---- 下半身转向(腿朝移动方向,身体朝目标;夹角自然过渡) ----
+	var legs: Node3D = mesh.get_meta("legs", null) as Node3D
+	if legs != null:
+		var rel := _legs_yaw - yaw
+		while rel > PI:
+			rel -= TAU
+		while rel < -PI:
+			rel += TAU
+		legs.rotation.y = rel
+	# ---- 脚步 IK:两段求解(髋-膝-脚)贴合地面/斜坡(蹲伏自然屈膝;趴下走贴地简化) ----
 	var leg_l: Node3D = mesh.get_meta("leg_l")
 	var leg_l_knee: Node3D = mesh.get_meta("leg_l_knee")
 	var leg_r: Node3D = mesh.get_meta("leg_r")
 	var leg_r_knee: Node3D = mesh.get_meta("leg_r_knee")
-	if leg_l != null:
-		leg_l.rotation.x = Utils.damp(leg_l.rotation.x, swing * pk + 0.1 * prone_amt, 14, dt)
-		leg_r.rotation.x = Utils.damp(leg_r.rotation.x, -swing * pk + 0.1 * prone_amt, 14, dt)
-		leg_l_knee.rotation.x = Utils.damp(leg_l_knee.rotation.x, -maxf(0, sin(walk_t - 2.0)) * speed_k * 1.05 * pk, 12, dt)
-		leg_r_knee.rotation.x = Utils.damp(leg_r_knee.rotation.x, -maxf(0, sin(walk_t - 2.0 + PI)) * speed_k * 1.05 * pk, 12, dt)
-	# ---- 战术持枪姿态 ----
+	if leg_l != null and leg_l_knee != null and leg_r != null and leg_r_knee != null and prone_amt < 0.5 and _anim_lod == 0:
+		_anim_foot_ik(dt, leg_l, leg_l_knee, -0.11, 1.0)
+		_anim_foot_ik(dt, leg_r, leg_r_knee, 0.11, -1.0)
+	else:
+		# 简化动画(远距 LOD / 趴下):腿部正弦摆动,跳过两段 IK
+		var swing_p := sin(_ik_phase) * 0.4 * pk
+		leg_l.rotation.x = Utils.damp(leg_l.rotation.x, swing_p + 0.1 * prone_amt, 14, dt)
+		leg_r.rotation.x = Utils.damp(leg_r.rotation.x, -swing_p + 0.1 * prone_amt, 14, dt)
+		leg_l_knee.rotation.x = Utils.damp(leg_l_knee.rotation.x, -0.3 * pk, 12, dt)
+		leg_r_knee.rotation.x = Utils.damp(leg_r_knee.rotation.x, -0.3 * pk, 12, dt)
+	# ---- 上半身(躯干姿态:蹲/趴/奔跑前倾/急停前倾) ----
+	var upper: Node3D = mesh.get_meta("upper")
+	if upper != null and _anim_lod < 2:
+		var raise_up := 0.82 if (prone and engaging) else 0.1
+		var want_upx: float = raise_up * prone_amt + _lean * pk
+		upper.rotation.x = Utils.damp(upper.rotation.x, want_upx, 8, dt)
+		upper.rotation.y = Utils.damp(upper.rotation.y, 0, 8, dt)
+	# ---- 持枪姿态(rig:瞄准仰角/举枪度/后坐/换弹脉冲/步频摆动/肘部) ----
 	var rig: Node3D = mesh.get_meta("rig")
-	if rig != null:
+	if rig != null and _anim_lod < 2:
 		var want := 0.0
 		if prone_amt > 0.4:
 			want = -0.12
@@ -2222,30 +2431,84 @@ func update_bot(dt: float) -> void:
 			var dyy := (last_seen_pos.y + 1.2) - (pos.y + 1.35)
 			var dh := Vector2(last_seen_pos.x - pos.x, last_seen_pos.z - pos.z).length()
 			want = clampf(-atan2(dyy, dh), -0.35, 0.35)
-		elif h_speed > 2.5:
-			want = 0.52  # 奔跑低姿持枪
 		else:
-			want = 0.16  # 警戒持枪
+			# 非交战:举枪度驱动(奔跑低姿、警戒低垂、停步端枪),平滑过渡
+			want = 0.52 * _raise if h_speed > 2.5 else (0.3 * _raise if moving_anim else 0.16 * _raise)
 		rig_pitch = Utils.damp(rig_pitch, want, 8, dt)
-		# 开火后坐(耸肩 + 枪口上抬,快速衰减)
 		_shot_kick = maxf(0.0, _shot_kick - dt * 9.0)
-		rig.rotation.x = rig_pitch + _shot_kick * 0.14
-		# 移动摆动:枪随步幅左右摆(奔跑明显)
-		var sway := sin(walk_t * 1.15) * speed_k * 0.16
+		# 换弹脉冲:下压回抬(与换弹进度同步,不破坏腿部移动)
+		var pulse := 0.0
+		if reloading:
+			pulse = sin(clampf(1.0 - reload_t / 2.2, 0.0, 1.0) * PI * 2.0) * 0.16 * _alert
+		rig.rotation.x = rig_pitch + _shot_kick * 0.14 + pulse * pk
+		# 移动摆动:与步频同步(速度相关,幅度随举枪度)
+		var sway := sin(_ik_phase * 0.5) * _anim_cad * 0.045 * (0.5 + _raise * 0.5)
 		rig.rotation.z = Utils.damp(rig.rotation.z, sway, 10, dt)
 		# 肘关节弯曲(持枪姿态 + 后坐 + 蹲/趴加深)
-		var elbow_k := 0.55 + crouch_amt * 0.3 + prone_amt * 0.9 + _shot_kick * 0.5
+		var elbow_k := 0.55 + crouch_amt * 0.3 + prone_amt * 0.9 + _shot_kick * 0.5 + _raise * 0.15
 		var el_l: Node3D = mesh.get_meta("arm_l_elbow", null)
 		var el_r: Node3D = mesh.get_meta("arm_r_elbow", null)
 		if el_l != null:
 			el_l.rotation.x = Utils.damp(el_l.rotation.x, elbow_k, 12, dt)
 		if el_r != null:
 			el_r.rotation.x = Utils.damp(el_r.rotation.x, elbow_k * 0.92, 12, dt)
-	# 身体随步伐轻微起伏(趴下贴地,蹲姿压低)
-	mesh.position.y = pos.y + absf(sin(walk_t)) * 0.035 * speed_k * pk + 0.08 * prone_amt - 0.52 * crouch_amt
+	# ---- 重心起伏(与步频同步;趴贴地/蹲压低) ----
+	var bob := sin(_ik_phase) * 0.032 * clampf(_anim_cad / 3.0, 0.0, 1.0) * pk
+	mesh.position.y = pos.y + bob + 0.08 * prone_amt - 0.52 * crouch_amt
+
+
+## 两段脚部 IK(髋-膝-脚):步态相位推导落点,贴合地面/斜坡(蹲伏自然屈膝,脚不悬空不插地)
+## hip_x: 髋横向偏移(±0.11);leg_sign: +1 左腿 / -1 右腿(相位差 π,自然交替迈步)
+func _anim_foot_ik(dt: float, thigh: Node3D, knee: Node3D, hip_x: float, leg_sign: float) -> void:
+	var hip_y := 0.78
+	# 步长由速度与步频一致推出(无滑步):S = v/f
+	var f_step := 1.9 + clampf(_anim_speed / 4.6, 0.0, 1.0) * 1.5
+	var S := _anim_speed / maxf(f_step, 0.01)
+	var s := sin(_ik_phase + (PI if leg_sign > 0 else 0.0))
+	# ---- 大腿摆幅(运动学驱动,大步跨):走 ~22° / 跑 ~38° / 冲刺 ~41° ----
+	var hip_tgt := s * (0.25 + _anim_speed * 0.09)
+	# ---- 脚目标:前后 = 步长×0.4(步态相位), 上下 = 地面 + 摆动中段抬脚 ----
+	var fz := s * (S * 0.4)
+	var lift := maxf(0.0, absf(s) - 0.3) * 0.5 * clampf(_anim_speed / 3.0, 0.25, 1.0)
+	# 世界→腿部局部系(legs 组已旋转)
+	var fwd := Vector3(-sin(_legs_yaw), 0, -cos(_legs_yaw))
+	var right := Vector3(fwd.z, 0, -fwd.x)
+	var wx: float = mesh.position.x + right.x * hip_x + fwd.x * fz
+	var wz: float = mesh.position.z + right.z * hip_x + fwd.z * fz
+	var gy: float = G.ground_h.call(wx, wz) if G.ground_h.is_valid() else 0.0
+	# 脚目标:向下为正(髋原点);行走支撑相贴地,摆动中段抬脚
+	var yp: float = hip_y - (gy - mesh.position.y) - 0.02 - lift
+	# ---- 膝 IK:大腿端点(由 hip_tgt 决定)→ 脚目标;膝角 = 大腿方向与膝-脚方向夹角(后折为负) ----
+	var L1 := 0.4
+	var L2 := 0.36
+	var hx := sin(hip_tgt)
+	var hy := cos(hip_tgt)
+	var ex := hx * L1
+	var ey := hy * L1
+	var kx := fz - ex
+	var ky := yp - ey
+	var klen := maxf(sqrt(kx * kx + ky * ky), 0.05)
+	klen = minf(klen, L2)  # 脚够不到(大步腾空)时腿全伸,脚自然悬空
+	var knee_tgt := -acos(clampf((hx * kx + hy * ky) / klen, -1.0, 1.0))
+	# ---- 平滑应用:指数缓动 + 帧限幅(防目标跳变;限幅放宽以免削顶大步摆腿) ----
+	var kk := 20.0
+	var rate := 0.25
+	if leg_sign > 0:
+		_ik_hip_l = clampf(Utils.damp(_ik_hip_l, hip_tgt, kk, dt), _ik_hip_l - rate, _ik_hip_l + rate)
+		_ik_knee_l = clampf(Utils.damp(_ik_knee_l, knee_tgt, kk, dt), _ik_knee_l - rate, _ik_knee_l + rate)
+		thigh.rotation.x = _ik_hip_l
+		knee.rotation.x = _ik_knee_l
+	else:
+		_ik_hip_r = clampf(Utils.damp(_ik_hip_r, hip_tgt, kk, dt), _ik_hip_r - rate, _ik_hip_r + rate)
+		_ik_knee_r = clampf(Utils.damp(_ik_knee_r, knee_tgt, kk, dt), _ik_knee_r - rate, _ik_knee_r + rate)
+		thigh.rotation.x = _ik_hip_r
+		knee.rotation.x = _ik_knee_r
 
 
 func shoot_at(p_target) -> void:
+	var _bt := 0
+	if _bbot_on:
+		_bt = Time.get_ticks_usec()
 	var tdef = p_target.get("def")
 	var is_veh: bool = tdef is Dictionary and tdef.get("radius") != null
 	var is_air: bool = p_target.get("air") == true
@@ -2263,7 +2526,8 @@ func shoot_at(p_target) -> void:
 	var err := aim_err * (1.0 + dist / 60.0)
 	var h_speed2 := Vector2(vel.x, vel.z).length()
 	if h_speed2 > 1.2:
-		err *= 2.4  # 移动射击精度惩罚
+		# [BALANCE] 移动射击惩罚 2.4→1.7(突破进攻方 1.45):鼓励交火走位,移动中仍能命中
+		err *= 1.7 if not (G.mode == "breakthrough" and team == "us") else 1.45
 	if suppress_t > 0:
 		err *= 1.6  # 被压制抬不起枪
 	if crouch:
@@ -2286,8 +2550,20 @@ func shoot_at(p_target) -> void:
 	# 弹道:下坠补偿瞄准 + 穿透链 + 部位倍率(内部结算到 fire_hitscan)
 	Utils.ballistic_fire(self, def, origin, dir, origin)
 	_shot_kick = 1.0   # 开火后坐动画(耸肩/枪口上抬)
+	var _au0 := 0
+	if _bbot_on:
+		_au0 = Time.get_ticks_usec()
 	AudioSys.shoot_weapon(weapon_id, def.kind, pos, false)
+	if _bbot_on:
+		_bbot_tick("audio", _au0)
+	var _mz0 := 0
+	if _bbot_on:
+		_mz0 = Time.get_ticks_usec()
 	G.effects.muzzle(origin, dir, def.kind == "sniper")
+	if _bbot_on:
+		_bbot_tick("muzzle", _mz0)
+	if _bbot_on:
+		_bbot_tick("shoot", _bt)
 
 
 ## ==================== 兵种职责(各司其职) ====================
@@ -2298,16 +2574,18 @@ func apply_loadout(p_class: String, p_weapon: String) -> void:
 	def = WeaponsData.W()[weapon_id]
 	var spr := hb["sprite"] as Sprite3D
 	var mk_spr: Sprite3D = mk["sprite"] as Sprite3D if mk.has("sprite") else null
-	mesh.remove_child(spr)
-	if mk_spr != null:
-		mesh.remove_child(mk_spr)
 	var old := mesh
+	if old != null:
+		old.remove_child(spr)
+		if mk_spr != null:
+			old.remove_child(mk_spr)
 	mesh = SoldierModel.build_soldier(team, weapon_id, class_id)
 	mesh.add_child(spr)
 	if mk_spr != null:
 		mesh.add_child(mk_spr)
 	add_child(mesh)
-	old.queue_free()
+	if old != null:
+		old.queue_free()
 	_set_aim_base()
 
 

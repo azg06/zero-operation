@@ -6,9 +6,11 @@ extends Node
 enum Level { LOW, MEDIUM, HIGH, ULTRA }
 
 ## 各级与游戏字段的映射(仅游戏支持的项)
-## [3A 画质升级 8/9] ULTRA=阴影 8192 + SSR + SSIL + MSAA 4x + 增强泛光;
+## [3A 画质升级 8/9] ULTRA=阴影 4096 + SSR + SSIL + MSAA + 增强泛光;
 ## SDFGI 已移除(8/10 用户反馈:开启后阴影过黑、对比度过高,永久关闭)
-## HIGH=SSR+MSAA 4x;LOW/MEDIUM 保持收敛。BR 保护档/GPU 保护档不受影响(自动降回收敛值防驱动崩溃)。
+## HIGH=阴影 4096+SSR;LOW/MEDIUM 保持收敛。BR 保护档/GPU 保护档不受影响(自动降回收敛值防驱动崩溃)。
+## 阴影锯齿:方向光阴影图集分辨率最高 4096,保留 PCF 软阴影质量=3,
+## 配合 main 里 G.sun.shadow_blur 柔化边缘,显著减少阴影边缘锯齿/闪烁。
 const PRESETS := {
 	Level.LOW: {
 		"shadows": 1024, "ssao": false, "fxaa": true, "taa": false, "scale": 0.75, "aniso": 2,
@@ -26,7 +28,7 @@ const PRESETS := {
 		"fog": 1.0, "particles": 1.0, "fx_scale": 1.0, "vfog": 32,
 	},
 	Level.ULTRA: {
-		"shadows": 8192, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 8,
+		"shadows": 4096, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 8,
 		"ssil": false, "ssr": true, "sdfgi": false, "glow": true, "msaa": 2, "cinema": true,
 		"fog": 1.1, "particles": 1.0, "fx_scale": 1.0, "vfog": 32,
 	},
@@ -96,7 +98,7 @@ func _apply_dict(p: Dictionary, lv: int, label: String) -> void:
 		env.ssil_enabled = p["ssil"]
 		env.ssr_enabled = p["ssr"]
 		if p["ssr"]:
-			env.ssr_max_steps = 40
+			env.ssr_max_steps = 24
 			env.ssr_fade_out = 2.0
 			env.ssr_depth_tolerance = 0.25
 		# [8/10] SDFGI 全局光照已移除:开启后阴影过黑、对比度过高(用户反馈),永久关闭
@@ -273,6 +275,9 @@ func load_config(path := "user://graphics.cfg") -> void:
 			_custom_settings = true
 			for k in s:
 				G.settings[k] = s[k]
+			# 旧存档可能含 8192/16384 阴影,统一钳制到优化后的最高 4096
+			if G.settings.has("shadows"):
+				G.settings.shadows = mini(int(G.settings.shadows), 4096)
 
 
 func has_custom_settings() -> bool:

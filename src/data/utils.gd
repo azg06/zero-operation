@@ -90,6 +90,37 @@ static var _bench_veh_n := 0
 static var _bench_fh_t := 0.0
 static var _bench_fh_n := 0
 
+# ---- [BENCH-FIRE] 弹道热点计时(--bench-fire:aim/ray/actor 分项,定位 shoot 尖峰) ----
+static var _bfire_on := false
+static var _bfire := {}          # name -> { t(累计µs), max(单次µs), n }
+static var _bfire_n := 0
+
+static func _bfire_tick(name: String, t0: int) -> void:
+	if not _bfire_on:
+		return
+	var d: Dictionary = _bfire.get(name, {})
+	if d.is_empty():
+		d = { "t": 0.0, "max": 0.0, "n": 0 }
+	var us := float(Time.get_ticks_usec() - t0)
+	d["t"] += us
+	d["max"] = maxf(float(d["max"]), us)
+	d["n"] = int(d["n"]) + 1
+	_bfire[name] = d
+
+static func _bfire_report() -> void:
+	if not _bfire_on:
+		return
+	_bfire_n += 1
+	if _bfire_n < 900:
+		return
+	var parts: Array = []
+	for name in _bfire:
+		var d: Dictionary = _bfire[name]
+		parts.append("%s=%.0f/%.0fus" % [name, d["t"] / maxf(float(d["n"]), 1.0), d["max"]])
+	print("[BENCH-FIRE] " + "  ".join(parts))
+	_bfire.clear()
+	_bfire_n = 0
+
 
 static func bench_init() -> void:
 	if _bench_init:
@@ -98,6 +129,7 @@ static func bench_init() -> void:
 	var ua := OS.get_cmdline_user_args()
 	_bench = ua.has("--bench-collide")
 	_bench_linear = ua.has("--bench-linear")
+	_bfire_on = ua.has("--bench-fire")
 	if _bench:
 		Engine.max_fps = 0  # 基准:解除 144 帧封顶,测真实 CPU 帧时间
 		print("[BENCH] max_fps=0 已生效(当前 %d)" % Engine.max_fps)
@@ -133,6 +165,88 @@ static func rebuild_collider_grid() -> void:
 				if not _grid.has(key):
 					_grid[key] = []
 				(_grid[key] as Array).append(i)
+
+
+## [PERF] 非平地地图地形高度快速查询:2m 烘焙网格最近邻(0.1~0.2m 精度,对子弹/LOS 无感)
+## 平地地图不经过此路径(raycast_world 走封闭解);网格未烘焙时回退 Callable
+static func _ground_h_fast(x: float, z: float) -> float:
+	if _hg_n == 0:
+		return G.ground_h.call(x, z)
+	var ix := int(clampf(floor((x - _hg_x0) / _hg_res), 0.0, float(_hg_n - 1)))
+	var iz := int(clampf(floor((z - _hg_z0) / _hg_res), 0.0, float(_hg_n - 1)))
+	return _hg_h[iz * _hg_n + ix]
+
+
+# ---- [PERF] 动态实体空间网格(每帧重建;ballistic_fire 命中扫描从 O(n) 降到 O(近邻)) ----
+static var _ag_cell := 16.0
+static var _ag_bots: Dictionary = {}
+static var _ag_veh: Dictionary = {}
+static var _ag_air: Dictionary = {}
+static var _ag_ds: Dictionary = {}
+
+# 地形高度网格静态缓存(免每调用字典查找)
+static var _hg_n := 0
+static var _hg_res := 2.0
+static var _hg_x0 := 0.0
+static var _hg_z0 := 0.0
+static var _hg_h: PackedFloat32Array = PackedFloat32Array()
+
+static func _cache_ground_grid() -> void:
+	var hg: Dictionary = G.ground_grid
+	if hg.is_empty():
+		_hg_n = 0
+		return
+	_hg_res = hg["res"]
+	_hg_n = hg["n"]
+	_hg_x0 = hg["x0"]
+	_hg_z0 = hg["z0"]
+	_hg_h = hg["h"]
+
+static func rebuild_actor_grid() -> void:
+	_cache_ground_grid()
+	_ag_bots.clear()
+	_ag_veh.clear()
+	_ag_air.clear()
+	_ag_ds.clear()
+	for b in G.bots:
+		if b.alive:
+			_actor_ins(_ag_bots, b.pos.x, b.pos.z, b)
+	for v in G.vehicles:
+		if not v.dead:
+			_actor_ins(_ag_veh, v.pos.x, v.pos.z, v)
+	for a in G.aircraft:
+		if not a.dead:
+			_actor_ins(_ag_air, a.pos.x, a.pos.z, a)
+	for ds in G.destructibles:
+		if not ds.dead:
+			var _c: Vector3 = ds.collider.get_center()
+			_actor_ins(_ag_ds, _c.x, _c.z, ds)
+
+static func _actor_ins(grid: Dictionary, x: float, z: float, a) -> void:
+	var key := Vector2i(int(floor(x / _ag_cell)), int(floor(z / _ag_cell)))
+	var lst = grid.get(key)
+	if lst == null:
+		lst = []
+		grid[key] = lst
+	lst.append(a)
+
+## 沿射线段包围盒收集网格内实体(超集;细筛仍用径向/垂直距离)
+static func _actor_cells(grid: Dictionary, origin: Vector3, dir: Vector3, max_dist: float) -> Array:
+	var out: Array = []
+	var cell := _ag_cell
+	var ex := origin.x + dir.x * max_dist
+	var ez := origin.z + dir.z * max_dist
+	var margin := 8.0
+	var c0x := int(floor((minf(origin.x, ex) - margin) / cell))
+	var c1x := int(floor((maxf(origin.x, ex) + margin) / cell))
+	var c0z := int(floor((minf(origin.z, ez) - margin) / cell))
+	var c1z := int(floor((maxf(origin.z, ez) + margin) / cell))
+	for cx in range(c0x, c1x + 1):
+		for cz in range(c0z, c1z + 1):
+			var lst: Array = grid.get(Vector2i(cx, cz), [])
+			for e in lst:
+				out.append(e)
+	return out
 
 
 ## 射线 vs 世界(沿线格子内的静态碰撞体 + 地形),返回 { dist, point, normal } 或 null
@@ -192,25 +306,25 @@ static func raycast_world(origin: Vector3, dir: Vector3, max_dist: float) -> Var
 				best = d
 				hit_box = G.colliders[i]
 	# 地形高度场(步进 + 二分)
-	if G.ground_h.is_valid() and not (origin.y > 4.0 and dir.y >= 0.0):
+	if G.ground_h.is_valid() and not G.ground_flat and not (origin.y > 4.0 and dir.y >= 0.0):
 		var t_end := best
 		if dir.y < -1e-6:
 			t_end = minf(best, (origin.y + 4.0) / -dir.y)
 		var prev_t := 0.0
-		var prev_dy: float = origin.y - G.ground_h.call(origin.x, origin.z)
+		var prev_dy: float = origin.y - _ground_h_fast(origin.x, origin.z)
 		if prev_dy > 0.0:
-			var t := 1.5
+			var t := 4.0
 			while t <= t_end:
 				var px: float = origin.x + dir.x * t
 				var py: float = origin.y + dir.y * t
 				var pz: float = origin.z + dir.z * t
-				var dy: float = py - G.ground_h.call(px, pz)
+				var dy: float = py - _ground_h_fast(px, pz)
 				if dy <= 0.0:
 					var lo := prev_t
 					var hi := t
 					for j in 5:
 						var mid := (lo + hi) * 0.5
-						if origin.y + dir.y * mid - G.ground_h.call(origin.x + dir.x * mid, origin.z + dir.z * mid) <= 0.0:
+						if origin.y + dir.y * mid - _ground_h_fast(origin.x + dir.x * mid, origin.z + dir.z * mid) <= 0.0:
 							hi = mid
 						else:
 							lo = mid
@@ -219,7 +333,13 @@ static func raycast_world(origin: Vector3, dir: Vector3, max_dist: float) -> Var
 						hit_box = "ground"
 					break
 				prev_t = t
-				t += 1.5
+				t += 4.0
+	elif G.ground_h.is_valid() and G.ground_flat and dir.y < -1e-6 and origin.y > 0.0:
+		# [PERF] 平地(y=0)封闭解:高频射线(射击/LOS)免 1.5m 步进采样(征服/突破/TDM 恒平地图)
+		var tg := -origin.y / dir.y
+		if tg > 0.0 and tg < best:
+			best = tg
+			hit_box = "ground"
 	elif not G.ground_h.is_valid() and dir.y < -1e-6:
 		var t2 := -origin.y / dir.y
 		if t2 > 0.0 and t2 < best:
@@ -437,13 +557,13 @@ static func ballistic_drop(dist: float, speed: float, drop_scale: float) -> floa
 	return 0.5 * BULLET_G * t * t * drop_scale
 
 
-## 下坠补偿瞄准:快速射线 + 两轮中间点迭代,返回 {dir, dist}
-## 不需要完整物理弹丸,但命中点精确落在下坠抛物线上
+## 下坠补偿瞄准:快速射线 + 单轮中间点迭代,返回 {dir, dist}
+## [PERF] 迭代 2→1 轮:下坠量(≤~1m@300m)远小于 bot 瞄准散布(0.45~9m),二次迭代残差 ~0.001m 可忽略
 static func ballistic_aim(origin: Vector3, dir: Vector3, speed: float, drop_scale: float, max_dist: float) -> Dictionary:
 	var d := dir
 	var hit = raycast_world(origin, d, max_dist)
 	var dist: float = hit["dist"] if hit != null else max_dist
-	for i in 2:
+	for i in 1:
 		var target: Vector3 = origin + d * dist
 		target.y -= ballistic_drop(dist, speed, drop_scale)
 		var delta: Vector3 = target - origin
@@ -554,7 +674,12 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 	var spd := bullet_speed_of(def)
 	var drop := bullet_drop_of(def)
 	var pen := bullet_pen_of(def)
+	var _abt := 0
+	if _bfire_on:
+		_abt = Time.get_ticks_usec()
 	var ba := ballistic_aim(origin, dir, spd, drop, 300.0)
+	if _bfire_on:
+		_bfire_tick("aim", _abt)
 	var fdir: Vector3 = ba["dir"]
 	var o := origin
 	var mult := 1.0                 # 穿透累计衰减系数
@@ -562,14 +687,27 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 	var s_team = shooter.get("team") if shooter != null else null
 	var tracer_c: Color = def.get("tracer") if def.get("tracer") != null else Color(1, 0.85, 0.63)
 	for attempt in 6:
+		var _rbt := 0
+		if _bfire_on:
+			_rbt = Time.get_ticks_usec()
 		var wall = raycast_world(o, fdir, 300.0)
+		if _bfire_on:
+			_bfire_tick("ray", _rbt)
 		var best: float = wall["dist"] if wall != null else 300.0
 		# 最近敌方角色(部位探针)
 		var probe: Dictionary = {}
 		var probe_max := best
 		# [PERF] P0-3:XZ 投影预过滤(与 game.gd fire_hitscan 同构,纯几何只剔必不中者)
 		var thr := 0.43 * 0.43  # 最大探针半径 0.42(胸)+FP 余量
-		for b in G.bots:
+		var _at := 0
+		if _bfire_on:
+			_at = Time.get_ticks_usec()
+		for b in (G.bots if _bench_linear else _actor_cells(_ag_bots, o, fdir, probe_max)):
+			# [PERF] 径向粗筛:径向≥墙距必被墙/更近命中遮挡,免 ray_xz_miss 静态调用
+			var _bx: float = b.pos.x - o.x
+			var _bz: float = b.pos.z - o.z
+			if _bx * _bx + _bz * _bz >= probe_max * probe_max:
+				continue
 			var pm := -1.0 if _bench_linear else ray_xz_miss(o, fdir, b.pos.x, b.pos.z, probe_max)
 			if pm < 0.0 or pm <= thr:
 				var pr := probe_actor(b, shooter, s_team, o, fdir, probe_max)
@@ -583,12 +721,16 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 			best = probe["dist"]
 		# 载具 / 空中载具 / 可破坏物(与 game.gd 相同优先级与几何)
 		var hit_veh = null
-		for v in G.vehicles:
+		for v in (G.vehicles if _bench_linear else _actor_cells(_ag_veh, o, fdir, best)):
 			if v.dead:
 				continue
 			if v.driver != null and s_team != null and v.driver.team == s_team:
 				continue
 			var rv: float = v.def["radius"] + 0.35
+			var _vx: float = v.pos.x - o.x
+			var _vz: float = v.pos.z - o.z
+			if _vx * _vx + _vz * _vz >= best * best:
+				continue
 			var mv := -1.0 if _bench_linear else ray_xz_miss(o, fdir, v.pos.x, v.pos.z, best)
 			if mv < 0.0 or mv <= rv * rv:
 				var dv := ray_sphere(o, fdir, Vector3(v.pos.x, v.pos.y + 1.2, v.pos.z), rv, best)
@@ -596,10 +738,14 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 					best = dv
 					hit_veh = v
 		var hit_air = null
-		for a in G.aircraft:
+		for a in (G.aircraft if _bench_linear else _actor_cells(_ag_air, o, fdir, best)):
 			if a.dead:
 				continue
 			if s_team != null and a.team == s_team:
+				continue
+			var _ax2: float = a.pos.x - o.x
+			var _az2: float = a.pos.z - o.z
+			if _ax2 * _ax2 + _az2 * _az2 >= best * best:
 				continue
 			var ma := -1.0 if _bench_linear else ray_xz_miss(o, fdir, a.pos.x, a.pos.z, best)
 			if ma < 0.0 or ma <= a.radius * a.radius:
@@ -608,18 +754,26 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 					best = da
 					hit_air = a
 		var hit_ds = null
-		for ds in G.destructibles:
+		for ds in (G.destructibles if _bench_linear else _actor_cells(_ag_ds, o, fdir, best)):
 			if ds.dead:
 				continue
 			# 粗筛参考点用盒近面(中心投影 > 盒面 best 会被误杀——油箱打不坏回归)
 			var _cc2: Vector3 = ds.collider.get_center()
-			var md := -1.0 if _bench_linear else ray_xz_miss(o, fdir, _cc2.x - fdir.x * ds.collider.size.x * 0.5, _cc2.z - fdir.z * ds.collider.size.z * 0.5, best)
+			var _nfx: float = _cc2.x - fdir.x * ds.collider.size.x * 0.5
+			var _nfz: float = _cc2.z - fdir.z * ds.collider.size.z * 0.5
+			var _dx: float = _nfx - o.x
+			var _dz: float = _nfz - o.z
+			if _dx * _dx + _dz * _dz >= best * best:
+				continue
+			var md := -1.0 if _bench_linear else ray_xz_miss(o, fdir, _nfx, _nfz, best)
 			if md < 0.0 or md <= ds.radius * ds.radius:
 				# 真实碰撞盒判定(球面判定对球在盒内的目标会漏——战役油箱等)
 				var dd := ray_box(o, fdir, ds.collider, best)
 				if dd >= 0:
 					best = dd
 					hit_ds = ds
+		if _bfire_on:
+			_bfire_tick("actor", _at)
 		# ---- 结算 ----
 		if not probe.is_empty() and probe["dist"] <= best + 0.001:
 			var part: String = probe["part"]
@@ -628,12 +782,12 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 			else:
 				var dc = def_copy(def)
 				dc.damage = (dc.damage as float) * part_mult(part) * mult
-				G.game.fire_hitscan(shooter, dc, o, fdir, muzzle_pos)
+				G.game.fire_hitscan(shooter, dc, o, fdir, muzzle_pos, { "dist": probe["dist"], "actor": probe["actor"], "head": part == "head" })
 			return
 		if hit_veh != null or hit_air != null or hit_ds != null:
 			var dc2 = def_copy(def)
 			dc2.damage = (dc2.damage as float) * mult
-			G.game.fire_hitscan(shooter, dc2, o, fdir, muzzle_pos)
+			G.game.fire_hitscan(shooter, dc2, o, fdir, muzzle_pos, { "dist": best, "vehicle": hit_veh if hit_veh != null else hit_air, "ds": hit_ds })
 			return
 		# 轻型(木)掩体:穿透,继续追踪
 		if wall != null and pen_left > 0 and is_light_cover(wall["box"]):
@@ -646,7 +800,7 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 			mult *= 0.65
 			o = wall["point"] + fdir * (thick + 0.06)
 			continue
-		G.game.fire_hitscan(shooter, def, o, fdir, muzzle_pos)
+		G.game.fire_hitscan(shooter, def, o, fdir, muzzle_pos, { "dist": best, "wall": wall })
 		return
 	G.game.fire_hitscan(shooter, def, o, fdir, muzzle_pos)
 

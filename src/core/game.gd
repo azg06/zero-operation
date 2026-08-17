@@ -1,4 +1,4 @@
-﻿class_name Game extends Node
+class_name Game extends Node
 ## 征服/突破模式核心逻辑(对应 game.js):命中判定 / 爆炸 / 旗帜占领 / 兵力值 / 击杀
 
 var drain_t := 0.0
@@ -130,7 +130,50 @@ func setup_map(map_id: String) -> void:
 
 
 ## ============ 开局/部署 ============
+## 普通玩家流程走异步加载体验;命令行测试/验证流程保持同步,保证自动化结果可复现。
 func start_match(mode := "conquest") -> void:
+	if OS.get_cmdline_user_args().is_empty():
+		_start_match_async(mode)
+	else:
+		_start_match_sync(mode)
+
+
+## 异步开局:先展示战术加载/简报层,让 UI 渲染一帧后再执行重型构建,
+## 构建完成后不做多余停留,立即交给部署界面。
+func _start_match_async(mode := "conquest") -> void:
+	var map_id := _pick_match_map(mode)
+	if map_id == "":
+		return
+	if G.menus != null and G.menus.has_method("briefing_setup"):
+		G.menus.briefing_setup(map_id, mode)
+	await get_tree().process_frame
+	_start_match_sync(mode)
+	if G.menus != null and G.menus.has_method("finish_loading"):
+		G.menus.finish_loading()
+
+
+## 选出本模式可用地图;返回 "" 表示中止。
+func _pick_match_map(mode: String) -> String:
+	var pool := []
+	for id in MapsData.M():
+		var m = MapsData.M()[id]
+		if mode == "tdm":
+			if m.mode == "tdm" or m.tdm_ok:
+				pool.append(id)
+		elif (m.mode if m.mode != "" else "conquest") == mode:
+			pool.append(id)
+	if pool.is_empty():
+		push_error("[GAME] 无可用地图(mode=%s),已中止开局" % mode)
+		return ""
+	var sel: String = G.sel_maps.get(mode, "random")
+	var map_id: String = Utils.choice(pool) if sel == "random" else sel
+	if not MapsData.M().has(map_id):
+		push_error("[GAME] 未知地图 id \"%s\",已中止开局" % map_id)
+		return ""
+	return map_id
+
+
+func _start_match_sync(mode := "conquest") -> void:
 	var cm = G.get("campaign")
 	if cm != null:
 		cm.abort()  # 切回任意模式前终止战役残留状态
@@ -147,42 +190,42 @@ func start_match(mode := "conquest") -> void:
 		_start_portal(mode)
 		return
 	G.mode = mode
-	var pool := []
-	for id in MapsData.M():
-		var m = MapsData.M()[id]
-		if (m.mode if m.mode != "" else "conquest") == mode:
-			pool.append(id)
-	var sel: String = G.sel_maps.get(mode, "random")
-	# 防御:地图池为空(非法模式/无匹配地图)时中止开局,防 Utils.choice 返回 Nil 赋给 String
-	if pool.is_empty():
-		push_error("[GAME] 无可用地图(mode=%s),已中止开局" % mode)
+	var map_id := _pick_match_map(mode)
+	if map_id == "":
 		return
-	var map_id: String = Utils.choice(pool) if sel == "random" else sel
-	# 防御:选中的地图 id 不存在时中止开局,防 MapsData.M()[id] 键访问错误
-	if not MapsData.M().has(map_id):
-		push_error("[GAME] 未知地图 id \"%s\",已中止开局" % map_id)
-		return
+	if G.menus != null and G.menus.has_method("set_loading_stage"):
+		G.menus.set_loading_stage("正在加载地图", 0.18, map_id.to_upper() + " · 地形与区块构建")
 	setup_map(map_id)
+	if G.menus != null and G.menus.has_method("set_loading_stage"):
+		G.menus.set_loading_stage("正在加载场景", 0.40, "载具、旗帜与战场环境已挂载")
 	G.time = 0
 	G.stats = { "kills": 0, "deaths": 0 }
 	G.streak = 0
 	if mode == "breakthrough":
 		# 突破模式:进攻方(玩家方)兵力有限,防守方无限
 		# 新对局默认玩家为进攻方(世界攻防方向固定 us=进攻 / ru=防守,玩家只选自己的阵营)
+		# [BALANCE] 进攻方初始兵力 250→320(+28%):进攻方伤亡天然高于防守方,加码弥补
 		G.bt_player_side = "att"
 		G.player.team = "us"
-		G.tickets = { "us": 250, "ru": INF }
+		G.tickets = { "us": 320, "ru": INF }
 	else:
 		G.tickets = { "us": 400, "ru": 400 }
 		G.bt = null
 	G.state = "deploy"
 	# [BALANCE 8/10] 突破模式:防守方(ru)兵力 11→8(削弱 25%),进攻方 11 保持;
 	# 地图拉大(360→420)后出生区外推,配合封锁线 45m 出生点保护,消除"出门团灭"
-	G.bot_manager.reset(23, -3 if mode == "breakthrough" else 1)
+	# [BALANCE] 进攻方人数 23→25,防守方 20→19:进攻方多两人,弥补攻方推进损耗
+	if G.menus != null and G.menus.has_method("set_loading_stage"):
+		G.menus.set_loading_stage("正在加载作战单位", 0.62, "步兵小队与战场 AI 正在部署")
+	G.bot_manager.reset(25, -6 if mode == "breakthrough" else 1)
+	if G.menus != null and G.menus.has_method("set_loading_stage"):
+		G.menus.set_loading_stage("正在配发武器", 0.78, "玩家装备与小队配置同步")
 	G.hud.spawn_point = null
 	G.hud.spawn_mate = null
 	G.hud.hide_screen("death")
 	# 开局即进入实时 3D 战场部署(兵种/武器栏与战场同屏一体);异常兜底退回旧式部署屏
+	if G.menus != null and G.menus.has_method("set_loading_stage"):
+		G.menus.set_loading_stage("正在初始化战场", 0.92, "实时战术部署镜头就绪")
 	if G.deployment == null or not G.deployment.enter_match_deploy():
 		G.hud.show_deploy(false)
 	AudioSys.start_ambient()
@@ -216,7 +259,11 @@ func _start_portal(mode: String) -> void:
 	if not MapsData.M().has(map_id):
 		push_error("[GAME] 未知地图 id \"%s\",已中止开局" % map_id)
 		return
+	if G.menus != null and G.menus.has_method("set_loading_stage"):
+		G.menus.set_loading_stage("正在加载地图", 0.25, map_id.to_upper() + " · 门户模式区域构建")
 	setup_map(map_id)
+	if G.menus != null and G.menus.has_method("set_loading_stage"):
+		G.menus.set_loading_stage("正在加载作战单位", 0.62, "小队与模式规则同步")
 	G.time = 0
 	G.stats = { "kills": 0, "deaths": 0 }
 	G.streak = 0
@@ -254,7 +301,11 @@ func _start_campaign() -> void:
 		cm = Campaign.new()
 		G.main.add_child(cm)
 		G.set("campaign", cm)
+	if G.menus != null and G.menus.has_method("set_loading_stage"):
+		G.menus.set_loading_stage("正在加载地图", 0.30, String(ch["map"]).to_upper() + " · 战役区域构建")
 	setup_map(ch["map"])
+	if G.menus != null and G.menus.has_method("set_loading_stage"):
+		G.menus.set_loading_stage("正在初始化战场", 0.75, "战役目标与过场状态同步")
 	G.time = 0
 	G.stats = { "kills": 0, "deaths": 0 }
 	G.streak = 0
@@ -425,83 +476,20 @@ func spawn_actor(actor) -> void:
 
 ## ============ 命中判定(射击游戏核心) ============
 ## [PERF] P0-3:球探针前先做射线 XZ 投影预过滤(命中段外/侧偏必不中者直接跳过)
-func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vector3) -> void:
-	var _bt0 := Time.get_ticks_usec() if Utils._bench else 0
-	var max_dist := 300.0
-	# 1. 墙体
-	var wall = Utils.raycast_world(origin, dir, max_dist)
-	var best_dist: float = wall["dist"] if wall != null else max_dist
-	# 2. 角色(敌方)
-	var hit_actor = null
-	var hit_head := false
-	var s_team = dget(shooter, "team")
-	var thr := 0.43 * 0.43  # 最大探针半径 0.42(胸)+FP 余量
-	for b in G.bots:
-		var miss := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, b.pos.x, b.pos.z, best_dist)
-		if miss < 0.0 or miss <= thr:
-			var hit: Dictionary = _hitscan_actor(b, shooter, s_team, origin, dir, best_dist)
-			if not hit.is_empty():
-				best_dist = hit["dist"]
-				hit_actor = hit["actor"]
-				hit_head = hit["head"]
+func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vector3, pre: Dictionary = {}) -> void:
+	var _bt0 := Time.get_ticks_usec() if (Utils._bench or Utils._bfire_on) else 0
+	# [PERF] pre 非空→复用 ballistic_fire 已算出的命中(免二次全量扫描);空→完整扫描
+	var hit: Dictionary = pre if not pre.is_empty() else _scan_hitscan(shooter, origin, dir)
+	var best_dist: float = hit["dist"]
+	var hit_actor = hit.get("actor")
+	var hit_head: bool = hit.get("head", false)
+	var hit_vehicle = hit.get("vehicle")
+	var hit_ds = hit.get("ds")
+	var wall = hit.get("wall")
 	# BR 下玩家可被任何非队友攻击(team 字段不参与判定);常规模式按阵营
-	var can_hit_player: bool = s_team != G.player.team
+	var can_hit_player: bool = dget(shooter, "team") != G.player.team
 	if G.mode == "br":
 		can_hit_player = not Bot.br_same_squad(shooter, G.player)
-	if G.player != null and can_hit_player:
-		var phit: Dictionary = _hitscan_actor(G.player, shooter, s_team, origin, dir, best_dist)
-		if not phit.is_empty():
-			best_dist = phit["dist"]
-			hit_actor = phit["actor"]
-			hit_head = phit["head"]
-
-	# 3. 载具(可被子弹/机炮击伤;不打己方有人载具)
-	var hit_vehicle = null
-	for v in G.vehicles:
-		if v.dead:
-			continue
-		if v.driver != null and s_team != null and v.driver.team == s_team:
-			continue
-		var rv: float = v.def["radius"] + 0.35
-		var mv := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, v.pos.x, v.pos.z, best_dist)
-		if mv < 0.0 or mv <= rv * rv:
-			var v_pos := Vector3(v.pos.x, v.pos.y + 1.2, v.pos.z)
-			var d := Utils.ray_sphere(origin, dir, v_pos, rv, best_dist)
-			if d >= 0:
-				best_dist = d
-				hit_vehicle = v
-				hit_actor = null
-	# 4. 空中载具(直升机/战斗机)
-	for a in G.aircraft:
-		if a.dead:
-			continue
-		if s_team != null and a.team == s_team:
-			continue
-		var ma := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, a.pos.x, a.pos.z, best_dist)
-		if ma < 0.0 or ma <= a.radius * a.radius:
-			var d2 := Utils.ray_sphere(origin, dir, a.pos, a.radius, best_dist)
-			if d2 >= 0:
-				best_dist = d2
-				hit_vehicle = a
-				hit_actor = null
-	# 5. 可破坏物(油桶/木箱/棚屋,子弹可击毁)
-	var hit_ds = null
-	for ds in G.destructibles:
-		if ds.dead:
-			continue
-		# 粗筛参考点用盒近面:ds.pos 是盒中心(沿射线投影 > 盒面 best 会被误杀——油箱打不坏回归)
-		var _cc: Vector3 = ds.collider.get_center()
-		var _hx: float = ds.collider.size.x * 0.5
-		var _hz: float = ds.collider.size.z * 0.5
-		var md := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, _cc.x - dir.x * _hx, _cc.z - dir.z * _hz, best_dist)
-		if md < 0.0 or md <= ds.radius * ds.radius:
-			# 用真实碰撞盒判定(球半径可能小于盒半对角,球面判定会漏——战役油箱等打不坏)
-			var d3 := Utils.ray_box(origin, dir, ds.collider, best_dist)
-			if d3 >= 0:
-				best_dist = d3
-				hit_ds = ds
-				hit_actor = null
-				hit_vehicle = null
 
 	var end: Vector3 = origin + dir * best_dist
 	# 曳光弹(从枪口出发)
@@ -576,6 +564,108 @@ func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vecto
 	if Utils._bench:
 		Utils._bench_fh_t += Time.get_ticks_usec() - _bt0
 		Utils._bench_fh_n += 1
+	if Utils._bfire_on:
+		Utils._bfire_tick("hit", _bt0)
+
+
+## [PERF] hitscan 几何扫描(从 fire_hitscan 拆出):返回 {dist, actor, head, vehicle, ds, wall}
+## 供 fire_hitscan 与 ballistic_fire 复用,消除每发子弹的双重全量扫描
+func _scan_hitscan(shooter, origin: Vector3, dir: Vector3) -> Dictionary:
+	var max_dist := 300.0
+	# 1. 墙体
+	var wall = Utils.raycast_world(origin, dir, max_dist)
+	var best_dist: float = wall["dist"] if wall != null else max_dist
+	# 2. 角色(敌方)
+	var hit_actor = null
+	var hit_head := false
+	var hit_vehicle = null
+	var hit_ds = null
+	var s_team = dget(shooter, "team")
+	var thr := 0.43 * 0.43  # 最大探针半径 0.42(胸)+FP 余量
+	for b in G.bots:
+		# [PERF] 径向粗筛:径向≥当前最近命中距必被遮挡,免 ray_xz_miss 静态调用
+		var _bx: float = b.pos.x - origin.x
+		var _bz: float = b.pos.z - origin.z
+		if _bx * _bx + _bz * _bz >= best_dist * best_dist:
+			continue
+		var miss := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, b.pos.x, b.pos.z, best_dist)
+		if miss < 0.0 or miss <= thr:
+			var h: Dictionary = _hitscan_actor(b, shooter, s_team, origin, dir, best_dist)
+			if not h.is_empty():
+				best_dist = h["dist"]
+				hit_actor = h["actor"]
+				hit_head = h["head"]
+	# BR 下玩家可被任何非队友攻击(team 字段不参与判定);常规模式按阵营
+	var can_hit_player: bool = s_team != G.player.team
+	if G.mode == "br":
+		can_hit_player = not Bot.br_same_squad(shooter, G.player)
+	if G.player != null and can_hit_player:
+		var phit: Dictionary = _hitscan_actor(G.player, shooter, s_team, origin, dir, best_dist)
+		if not phit.is_empty():
+			best_dist = phit["dist"]
+			hit_actor = phit["actor"]
+			hit_head = phit["head"]
+
+	# 3. 载具(可被子弹/机炮击伤;不打己方有人载具)
+	for v in G.vehicles:
+		if v.dead:
+			continue
+		if v.driver != null and s_team != null and v.driver.team == s_team:
+			continue
+		var rv: float = v.def["radius"] + 0.35
+		var _vx: float = v.pos.x - origin.x
+		var _vz: float = v.pos.z - origin.z
+		if _vx * _vx + _vz * _vz >= best_dist * best_dist:
+			continue
+		var mv := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, v.pos.x, v.pos.z, best_dist)
+		if mv < 0.0 or mv <= rv * rv:
+			var v_pos := Vector3(v.pos.x, v.pos.y + 1.2, v.pos.z)
+			var d := Utils.ray_sphere(origin, dir, v_pos, rv, best_dist)
+			if d >= 0:
+				best_dist = d
+				hit_vehicle = v
+				hit_actor = null
+	# 4. 空中载具(直升机/战斗机)
+	for a in G.aircraft:
+		if a.dead:
+			continue
+		if s_team != null and a.team == s_team:
+			continue
+		var _ax2: float = a.pos.x - origin.x
+		var _az2: float = a.pos.z - origin.z
+		if _ax2 * _ax2 + _az2 * _az2 >= best_dist * best_dist:
+			continue
+		var ma := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, a.pos.x, a.pos.z, best_dist)
+		if ma < 0.0 or ma <= a.radius * a.radius:
+			var d2 := Utils.ray_sphere(origin, dir, a.pos, a.radius, best_dist)
+			if d2 >= 0:
+				best_dist = d2
+				hit_vehicle = a
+				hit_actor = null
+	# 5. 可破坏物(油桶/木箱/棚屋,子弹可击毁)
+	for ds in G.destructibles:
+		if ds.dead:
+			continue
+		# 粗筛参考点用盒近面:ds.pos 是盒中心(沿射线投影 > 盒面 best 会被误杀——油箱打不坏回归)
+		var _cc: Vector3 = ds.collider.get_center()
+		var _hx: float = ds.collider.size.x * 0.5
+		var _hz: float = ds.collider.size.z * 0.5
+		var _nfx: float = _cc.x - dir.x * _hx
+		var _nfz: float = _cc.z - dir.z * _hz
+		var _dx: float = _nfx - origin.x
+		var _dz: float = _nfz - origin.z
+		if _dx * _dx + _dz * _dz >= best_dist * best_dist:
+			continue
+		var md := -1.0 if Utils._bench_linear else Utils.ray_xz_miss(origin, dir, _nfx, _nfz, best_dist)
+		if md < 0.0 or md <= ds.radius * ds.radius:
+			# 用真实碰撞盒判定(球半径可能小于盒半对角,球面判定会漏——战役油箱等打不坏)
+			var d3 := Utils.ray_box(origin, dir, ds.collider, best_dist)
+			if d3 >= 0:
+				best_dist = d3
+				hit_ds = ds
+				hit_actor = null
+				hit_vehicle = null
+	return { "dist": best_dist, "actor": hit_actor, "head": hit_head, "vehicle": hit_vehicle, "ds": hit_ds, "wall": wall }
 
 
 ## ============ 重生信标(侦察兵:小队隐蔽重生点,持续 90 秒) ============
@@ -1055,7 +1145,7 @@ func _update_conquest(dt: float) -> void:
 			G.tickets["us"] -= (ru_flags - us_flags)
 
 
-## 突破模式:仅当前区域可争夺;同时控制全区目标 → 突破,兵力 +100,推进下一区域
+## 突破模式:仅当前区域可争夺;同时控制全区目标 → 突破,兵力 +120,推进下一区域
 func _update_breakthrough(dt: float) -> void:
 	if G.mode == "campaign":
 		return  # 战役模式:由战役控制器推进
@@ -1076,7 +1166,7 @@ func _update_breakthrough(dt: float) -> void:
 			f.progress = 100
 			f.contested = false
 		G.bt["sector"] += 1
-		G.tickets["us"] += 100
+		G.tickets["us"] += 120  # [BALANCE] 区域突破奖励 100→120(进攻方持续投入的回报)
 		if G.bt["sector"] >= G.bt["total"]:
 			end_match(true)
 			return
@@ -1085,9 +1175,9 @@ func _update_breakthrough(dt: float) -> void:
 			if f.sector == G.bt["sector"]:
 				f.zone_locked = false
 				f.contested = false
-		G.hud.banner("区域已突破!兵力值 +100 — 向第 " + str(G.bt["sector"] + 1) + "/" + str(G.bt["total"]) + " 区域推进!")
+		G.hud.banner("区域已突破!兵力值 +120 — 向第 " + str(G.bt["sector"] + 1) + "/" + str(G.bt["total"]) + " 区域推进!")
 		G.hud.event("◈", "SECTOR BREACHED",
-			"区域 " + str(G.bt["sector"] + 1) + "/" + str(G.bt["total"]) + " 已突破 · 兵力 +100",
+			"区域 " + str(G.bt["sector"] + 1) + "/" + str(G.bt["total"]) + " 已突破 · 兵力 +120",
 			Color(0.05, 0.62, 0.6))
 		AudioSys.capture(true)
 		# 攻守双方重新规划目标
