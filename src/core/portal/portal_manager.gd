@@ -80,12 +80,12 @@ func start_mode(mode: String, map_id: String) -> void:
 	gm.round_ended.connect(_on_round_ended)
 	# round_started 转发(参照 round_ended):模式在 start() 内自行 emit 时经本节点统一广播;
 	# 未自行广播的模式由下方兜底补齐(标志位防双发)
-	var gm_broadcasted := false
+	var gm_broadcasted := [false]
 	gm.round_started.connect(func(m, mi, pc):
-		gm_broadcasted = true
+		gm_broadcasted[0] = true
 		round_started.emit(m, mi, pc))
 	gm.start(map_id)
-	if not gm_broadcasted:
+	if not gm_broadcasted[0]:
 		round_started.emit(mode, map_id, _player_count())
 
 

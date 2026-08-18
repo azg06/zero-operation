@@ -145,7 +145,7 @@ func _apply_dict(p: Dictionary, lv: int, label: String) -> void:
 	var vp := get_viewport()
 	if vp != null:
 		vp.anisotropic_filtering_level = p["aniso"]
-		vp.msaa_3d = int(p.get("msaa", 0))
+		vp.msaa_3d = (int(p.get("msaa", 0)) as Viewport.MSAA)
 		# 3b) 抗锯齿策略:高档用 TAA,低档用自定义 FXAA 层(与 main.apply_graphics 保持一致)
 		vp.use_taa = p["taa"]
 	# 4) 收尾:走游戏自己的画质应用(阴影图集/雾距/粒子质量)

@@ -327,12 +327,12 @@ func _draw_br(s: float, ws: float) -> void:
 		# 缩圈目标圈(正在缩圈/目标与当前不同时绘制;字段缺失则跳过)
 		if br != null and br.get("zone_target_c") is Vector3:
 			var tc: Vector3 = br.zone_target_c
-			var tr: float = float(br.get("zone_target_r"))
-			if tr > 0.0 and (not tc.is_equal_approx(zc) or not is_equal_approx(tr, zr)):
+			var target_radius: float = float(br.get("zone_target_r"))
+			if target_radius > 0.0 and (not tc.is_equal_approx(zc) or not is_equal_approx(target_radius, zr)):
 				var tp := _wm2(Vector2(tc.x, tc.z), ws, s)
-				var tpoly: Variant = _clip_circle_rect(tp, tr * sc, zone_rect)
+				var tpoly: Variant = _clip_circle_rect(tp, target_radius * sc, zone_rect)
 				if tpoly == null:
-					draw_arc(tp, tr * sc, 0, TAU, 48, ZONE_TARGET_COL, 1.4)
+					draw_arc(tp, target_radius * sc, 0, TAU, 48, ZONE_TARGET_COL, 1.4)
 				elif tpoly.size() >= 3:
 					var tclosed := PackedVector2Array(tpoly)
 					tclosed.append(tpoly[0])

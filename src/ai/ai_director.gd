@@ -1,4 +1,4 @@
-﻿class_name AIDirector extends Node
+class_name AIDirector extends Node
 ## 战场 AI 指挥层:定期(4s)分析全局局势 → 给每支小队分配战术任务。
 ## 任务种类:
 ##   capture    夺旗:前往占领敌方/中立据点
@@ -155,11 +155,11 @@ func _pick_task(s, team: String, stats: Array, assigned: Dictionary) -> Dictiona
 	return { "kind": "hold", "flag": null }
 
 
-func _assign_ok(st: Dictionary, team: String, assigned: Dictionary, limit: int) -> bool:
+func _assign_ok(st: Dictionary, _team: String, assigned: Dictionary, limit: int) -> bool:
 	var key: String = str(st["flag"])
 	return not assigned.has(key) or int(assigned[key]) < limit
 
 
-func _mark(st: Dictionary, team: String, assigned: Dictionary) -> void:
+func _mark(st: Dictionary, _team: String, assigned: Dictionary) -> void:
 	var key: String = str(st["flag"])
 	assigned[key] = int(assigned.get(key, 0)) + 1

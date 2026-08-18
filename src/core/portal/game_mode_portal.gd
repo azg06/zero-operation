@@ -11,11 +11,18 @@ class_name GameMode_Portal extends Node
 ## UI 只读字段(hud.gd _update_portal_hud 读取):
 ##   br_alive / br_total / zone_center(Vector3) / zone_radius(float)
 
+# 信号为 PortalManager/UI 的接口契约,由子类(TDM/BR)emit;基类自身不 emit。
+@warning_ignore("unused_signal")
 signal score_changed(us_score: int, ru_score: int)
+@warning_ignore("unused_signal")
 signal player_eliminated(victim, killer, head: bool)
+@warning_ignore("unused_signal")
 signal mvp_changed(mvp: Dictionary)
+@warning_ignore("unused_signal")
 signal round_started(mode: String, map_id: String, player_count: int)
+@warning_ignore("unused_signal")
 signal round_ended(result: Dictionary)
+@warning_ignore("unused_signal")
 signal portal_hint(text: String)
 
 var mode_name := "portal"
@@ -30,21 +37,21 @@ var zone_center := Vector3.ZERO
 var zone_radius := 0.0
 
 
-func start(map_id: String = "") -> void:
+func start(_map_id: String = "") -> void:
 	pass
 
 
-func tick(dt: float) -> void:
+func tick(_dt: float) -> void:
 	pass
 
 
 ## 击杀注册(架构 Agent 接线到 game.gd on_kill → G.portal.active)
-func on_player_killed(killer, victim, head := false) -> void:
+func on_player_killed(_killer, _victim, _head := false) -> void:
 	pass
 
 
 ## 伤害登记(架构 Agent 接线到 game.gd _portal_damage,供助攻/统计)
-func on_damage(attacker, victim, amount: float) -> void:
+func on_damage(_attacker, _victim, _amount: float) -> void:
 	pass
 
 

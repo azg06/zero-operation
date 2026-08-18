@@ -16,7 +16,7 @@ const WEAPONS := {
 	"assault": { "us": ["m4", "ak", "scar", "aug", "g36c", "famas"], "ru": ["ak", "ak", "scar", "aug", "ak74", "g3"] },
 	"engineer": { "us": ["m249", "pkm", "rpd", "m60"], "ru": ["pkm", "rpd", "rpd", "mg42"] },
 	"support": { "us": ["mp5", "ump", "p90", "vector"], "ru": ["mp5", "ump", "p90", "pp19"] },
-	"recon": { "us": ["awm", "m24", "m24", "m110"], "ru": ["svd", "svd", "m24", "m40"] },
+	"recon": { "us": ["awm", "m24", "m24", "l115"], "ru": ["svd", "svd", "m24", "m40"] },
 }
 
 

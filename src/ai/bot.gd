@@ -11,17 +11,17 @@ static var _bbot_on := false
 static var _bbot := {}          # name -> { t(累计µs), max(单次µs), n }
 static var _bbot_n := 0
 
-static func _bbot_tick(name: String, t0: int) -> void:
+static func _bbot_tick(metric: String, t0: int) -> void:
 	if not _bbot_on:
 		return
-	var d: Dictionary = _bbot.get(name, {})
+	var d: Dictionary = _bbot.get(metric, {})
 	if d.is_empty():
 		d = { "t": 0.0, "max": 0.0, "n": 0 }
 	var us := float(Time.get_ticks_usec() - t0)
 	d["t"] += us
 	d["max"] = maxf(float(d["max"]), us)
 	d["n"] = int(d["n"]) + 1
-	_bbot[name] = d
+	_bbot[metric] = d
 
 static func _bbot_report() -> void:
 	if not _bbot_on:
@@ -30,9 +30,9 @@ static func _bbot_report() -> void:
 	if _bbot_n < 900:
 		return
 	var parts: Array = []
-	for name in _bbot:
-		var d: Dictionary = _bbot[name]
-		parts.append("%s=%.0f/%.0fus" % [name, d["t"] / maxf(float(d["n"]), 1.0), d["max"]])
+	for key in _bbot:
+		var d: Dictionary = _bbot[key]
+		parts.append("%s=%.0f/%.0fus" % [key, d["t"] / maxf(float(d["n"]), 1.0), d["max"]])
 	print("[BENCH-BOT] " + "  ".join(parts))
 	_bbot.clear()
 	_bbot_n = 0
@@ -124,8 +124,6 @@ var _stuck_phase := 0
 var _stuck_phase_t := 0.0
 var _stuck_cd := 0.0             # 脱困后冷却(避免反复触发)
 var _repath_goal := Vector3.ZERO # 重寻路临时目标
-# ---- 互挤推开节流 ----
-var _push_t := 0.0
 # ---- 四人小队(战役队友) ----
 var follow: Node = null          # 跟随目标(战役为玩家);非战役模式保持 null
 var squad_slot := -1             # 编队槽位(0=左后 / 1=右后 / 2=正后)
@@ -621,11 +619,11 @@ func _update_br_marker(dt: float) -> void:
 				_br_mk_done = true
 				print("[BR-MK] 全量分类完成 已建=%d 敌方红=%d 队友绿=%d" % [
 					_br_mk_count, _br_mk_red, _br_mk_green])
-	var show := (alive or _br_redeploy_now()) and mesh.visible
-	if show and G.player != null:
-		show = pos.distance_to(G.player.pos) <= BR_MK_MAX_DIST
-	if spr.visible != show:
-		spr.visible = show
+	var marker_visible := (alive or _br_redeploy_now()) and mesh.visible
+	if marker_visible and G.player != null:
+		marker_visible = pos.distance_to(G.player.pos) <= BR_MK_MAX_DIST
+	if spr.visible != marker_visible:
+		spr.visible = marker_visible
 
 
 ## BR 重部署中(死亡等待 → 直升机 → 跳伞):跳伞红伞人可见,标记照常点亮
@@ -1103,18 +1101,18 @@ func _my_squad() -> Variant:
 
 
 ## 分散目标偏移(按小队成员 idx 扇形分配:前点/侧翼/后方支援位,防扎堆)
-func _slot_offset(f) -> Vector3:
+func _slot_offset(_f) -> Vector3:
 	var idx := 0
 	var n := 1
 	var sq = _my_squad()
 	if sq != null:
-		var alive := []
+		var alive_mates := []
 		for m in sq["members"]:
 			if m.alive:
-				alive.append(m)
-		n = maxi(alive.size(), 1)
-		for i in alive.size():
-			if is_same(alive[i], self):
+				alive_mates.append(m)
+		n = maxi(alive_mates.size(), 1)
+		for i in alive_mates.size():
+			if is_same(alive_mates[i], self):
 				idx = i
 	var ang: float = TAU * idx / n + Utils.rand(-0.4, 0.4)
 	var rad: float = 2.5 + (idx % 3) * 4.0
@@ -1122,18 +1120,18 @@ func _slot_offset(f) -> Vector3:
 
 
 ## 防守位偏移:围绕据点分散(半径 7-14m),防扎堆
-func _defend_offset(f) -> Vector3:
+func _defend_offset(_f) -> Vector3:
 	var idx := 0
 	var n := 1
 	var sq = _my_squad()
 	if sq != null:
-		var alive := []
+		var alive_mates := []
 		for m in sq["members"]:
 			if m.alive:
-				alive.append(m)
-		n = maxi(alive.size(), 1)
-		for i in alive.size():
-			if is_same(alive[i], self):
+				alive_mates.append(m)
+		n = maxi(alive_mates.size(), 1)
+		for i in alive_mates.size():
+			if is_same(alive_mates[i], self):
 				idx = i
 	var ang: float = TAU * idx / n + Utils.rand(-0.35, 0.35)
 	var rad: float = 8.0 + (idx % 3) * 3.0
@@ -2785,12 +2783,12 @@ func _br_choose_land_target() -> Vector3:
 	if squad_id >= 0 and br != null and is_instance_valid(br) and br.has_method("squad_anchor"):
 		var anchor: Vector3 = br.squad_anchor(squad_id)
 		if anchor != Vector3.ZERO:
-			var a := TAU * float(id % 4) / 4.0 + Utils.rand(-0.4, 0.4)
-			var r := Utils.rand(12.0, 30.0)
-			var p := anchor + Vector3(cos(a) * r, 0.0, sin(a) * r)
-			p.x = clampf(p.x, -G.bounds + 24, G.bounds - 24)
-			p.z = clampf(p.z, -G.bounds + 24, G.bounds - 24)
-			return p
+			var squad_ang := TAU * float(id % 4) / 4.0 + Utils.rand(-0.4, 0.4)
+			var squad_rad := Utils.rand(12.0, 30.0)
+			var squad_pos := anchor + Vector3(cos(squad_ang) * squad_rad, 0.0, sin(squad_ang) * squad_rad)
+			squad_pos.x = clampf(squad_pos.x, -G.bounds + 24, G.bounds - 24)
+			squad_pos.z = clampf(squad_pos.z, -G.bounds + 24, G.bounds - 24)
+			return squad_pos
 	var pts: Array = []
 	if br != null and is_instance_valid(br) and br.get("loot_points") is Array:
 		pts = br.loot_points

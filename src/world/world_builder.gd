@@ -50,7 +50,7 @@ static func make_br_ground_h(T) -> Callable:
 		return roll + ridge - dip
 
 
-static func make_snow_ground_h(T) -> Callable:
+static func make_snow_ground_h(_T) -> Callable:
 	# 雪山哨站:全图滚动起伏 ±2.5m + 东北角(+x,-z)雪山坡地抬升 4-8m。
 	# 抬升自 x>95 / z<-95 起平滑步进过渡(C¹,两端导数归零),哨站区/建筑带(|x|,|z| ≤ 90)保持平缓,
 	# 角部(边界墙 154m 内)叠加后约 4.5-7.5m;TDM 120m 圈定区域(|x|,|z|≤60)天然无抬升。
@@ -1751,7 +1751,6 @@ static func _desert_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects:
 	var hangar_mat := _std_tex(Color.html("#b8a880"), 0.7, "corrugated_iron", 0.3)
 	var rust_mat := _std_tex(Color.html("#b07050"), 0.75, "metal_plate", 0.35)
 	var rock_mat: Material = rock_photo_mat
-	var _roof_mat := _std(Color.html("#3a3c40"), 0.95)
 	var barracks := func(x: float, z: float, rot := 0.0) -> void:
 		var w := Utils.rand(10, 14)
 		var d := Utils.rand(7, 9)
@@ -2291,10 +2290,10 @@ static func _desert_industry(wg: Node3D, add_collider: Callable, minimap_rects: 
 		minimap_rects.append({ "x": x, "z": z, "w": w, "d": d })
 	# ---- 地面管线(储罐区连接管) ----
 	var pipe_mat := _std(Color.html("#8a7a5a"), 0.6, 0.6)
-	var pipe := func(x: float, z: float, len: float, rot: float) -> void:
+	var pipe := func(x: float, z: float, length: float, rot: float) -> void:
 		var g2 := Node3D.new()
 		var gy: float = ghf.call(x, z)
-		var p := _cyl(0.22, 0.22, len, 8, pipe_mat)
+		var p := _cyl(0.22, 0.22, length, 8, pipe_mat)
 		p.rotation.x = PI / 2.0
 		p.position.y = 0.35
 		g2.add_child(p)
@@ -2966,11 +2965,11 @@ static func _snow_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects: A
 	var _sn_slit_mat := _basic(Color.html("#1a1e22"), true)
 	var sm_buf := {}
 	var sm_veg := {}   # [PERF] 小体积植被(松树/岩石):关闭阴影投射,省 4 级 cascade
-	var sm_push := func(buf: Dictionary, mat: Material, mesh: Mesh, t: Transform3D) -> void:
-		var entry = buf.get(mat)
+	var sm_push := func(bucket: Dictionary, mat: Material, mesh: Mesh, t: Transform3D) -> void:
+		var entry = bucket.get(mat)
 		if entry == null:
 			entry = { "mesh": mesh, "t": [] }
-			buf[mat] = entry
+			bucket[mat] = entry
 		(entry["t"] as Array).append(t)
 	var bunker := func(x: float, z: float, rot := 0.0) -> void:
 		var w := Utils.rand(7, 10)
@@ -4853,7 +4852,7 @@ static func _bnd_st_box(st: SurfaceTool, c: Vector3, s: Vector3) -> void:
 ## 使用与主地面相同的地面材质 + 连续 UV(map_tex 越界 clamp 为边缘色 + 噪声细节层),消除贴图接缝
 ## [FIX] 滚动地形(雪山/丛林)上粗网格(24m)弦线会凸出主地面最高 0.4m(胸口穿地感),
 ##       接缝带(r<half+55)改用 10m 网格精确贴合;外环保持 24m 粗网格省开销
-static func _bnd_skirt(wg: Node3D, theme_id: String, T, half: float, is_bt: bool) -> void:
+static func _bnd_skirt(wg: Node3D, theme_id: String, T, half: float, _is_bt: bool) -> void:
 	# 裙长须覆盖最外圈远景底部(防止远景悬空);城市无雾需最长裙 + 楼群覆盖地平线
 	var skirt_len: float = 820.0 if theme_id == "city" else (400.0 if (theme_id == "desert" or theme_id == "snow") else 320.0)
 	var r_out := half + skirt_len
@@ -5017,22 +5016,22 @@ static func _build_base_camp(wg: Node3D, add_collider: Callable, half: float, si
 		wg.add_child(g)
 		add_collider.call(x, 0, z, 5.0, 2.2, 3.4)
 	# ---- 沙袋墙(长条) ----
-	var sandbag_wall := func(x: float, z: float, len: float, rot: float) -> void:
+	var sandbag_wall := func(x: float, z: float, length: float, rot: float) -> void:
 		var g := Node3D.new()
-		for s in int(len / 1.2):
+		for s in int(length / 1.2):
 			var b := _box(1.0, 0.5, 0.5, sand)
-			b.position = Vector3(-len / 2.0 + s * 1.2 + 0.6, 0.25, 0)
+			b.position = Vector3(-length / 2.0 + s * 1.2 + 0.6, 0.25, 0)
 			b.rotation.y = Utils.rand(-0.06, 0.06)
 			g.add_child(b)
-		for s in int(len / 2.4):
+		for s in int(length / 2.4):
 			var b2 := _box(1.0, 0.5, 0.5, sand)
-			b2.position = Vector3(-len / 2.0 + s * 2.4 + 1.2, 0.75, Utils.rand(-0.1, 0.1))
+			b2.position = Vector3(-length / 2.0 + s * 2.4 + 1.2, 0.75, Utils.rand(-0.1, 0.1))
 			b2.rotation.y = Utils.rand(-0.08, 0.08)
 			g.add_child(b2)
 		g.position = Vector3(x, gh.call(x, z), z)
 		g.rotation.y = rot
 		wg.add_child(g)
-		add_collider.call(x, 0, z, len, 1.0, 0.7)
+		add_collider.call(x, 0, z, length, 1.0, 0.7)
 	# ---- 电台天线(桅杆 + 十字天线) ----
 	var radio_mast := func(x: float, z: float) -> void:
 		var g := Node3D.new()
@@ -5138,7 +5137,7 @@ static func _build_base_camp(wg: Node3D, add_collider: Callable, half: float, si
 
 ## ==================== 主题化天然边界 + 远景(入口) ====================
 static func _build_natural_boundary(wg: Node3D, theme_id: String, T, size: float,
-		is_bt: bool, is_tdm: bool, lv: int, web: bool) -> void:
+		is_bt: bool, is_tdm: bool, _lv: int, _web: bool) -> void:
 	var half: float = size / 2.0
 	var bnd: float = G.bounds
 	var add_collider := func(x: float, y: float, z: float, w: float, h: float, d: float) -> AABB:
@@ -5459,7 +5458,7 @@ static func _bnd_snow(wg: Node3D, add_collider: Callable, bnd: float, half: floa
 	# 基地缺口:公路 + 检查站
 
 ## 丛林:密林环(MultiMesh)+ 丘陵 + 岩壁;河道已延伸出地图两侧(全部对齐地形)
-static func _bnd_jungle(wg: Node3D, add_collider: Callable, bnd: float, half: float) -> void:
+static func _bnd_jungle(wg: Node3D, _add_collider: Callable, bnd: float, half: float) -> void:
 	var leaf := _std(Color.html("#3a5a30"), 1.0)
 	var hill_j := _std_tex(Color.html("#5a6a44"), 1.0, "rock_04")
 	var rock_j := _std_tex(Color.html("#5a6256"), 1.0, "rock_04")

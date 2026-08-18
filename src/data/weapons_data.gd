@@ -1,4 +1,4 @@
-﻿class_name WeaponsData
+class_name WeaponsData
 ## 武器与兵种数据(对应 weapons.js 中的 WEAPONS / CLASSES)
 
 class WeaponDef extends RefCounted:
@@ -28,6 +28,7 @@ class WeaponDef extends RefCounted:
 	var tracer := Color(1.0, 0.85, 0.63)
 	var pellets := 1
 	var scope := false
+	var scope_mag := 0.0              # 高倍镜真实倍率(4/6/7/8×);0=按 zoom_fov 旧逻辑
 	var projectile := false
 	var splash := 6.5
 	var speed := 38.0
@@ -120,8 +121,9 @@ static func build_weapons() -> Dictionary:
 		{ "bullet_speed": 915, "bullet_drop": 0.9, "reload_tac": 4.3 })
 	WD["awm"] = _w("AWM", "AWM 狙击步枪", "sniper", false, 95, 2.5, 42, 5, 30, 3.6, 0.28, 12,
 		[120, 220, 0.85], 0.115, -0.15, [2.6, 0.5, 0.14], [5.0, 0.02, 3.0, 0, 0], Color(0.82, 0.91, 1),
-		{ "scope": true, "bullet_speed": 950, "bullet_drop": 0.55, "recoil_cam": 0.014, "reload_tac": 2.7 })
-	# 狙击 zoom_fov 12-14:镜内视野更窄、放大更强(目镜张角 35.7° / 镜内 FOV 12° ≈ 感知 2.9×)
+		{ "scope": true, "scope_mag": 8, "bullet_speed": 950, "bullet_drop": 0.55, "recoil_cam": 0.014, "reload_tac": 2.7 })
+	# 狙击镜独立 PIP:scope_mag 为真实倍率(4/6/7/8×),运行时按基础 FOV 换算镜内 FOV;
+	# zoom_fov 仍作为旧数据/非 PIP 路径兼容值保留。
 	WD["m1014"] = _w("M1014", "M1014 霰弹枪", "shotgun", false, 11, 1.5, 78, 7, 42, 4.9, 0.13, 62,
 		[10, 26, 0.25], 0.096, -0.24, [1.8, 0.4, 0.12], [3.2, 2.2, 0.8, 0, 0], Color(1, 0.75, 0.56),
 		{ "pellets": 9, "bullet_speed": 380, "bullet_drop": 1.35 })
@@ -148,11 +150,11 @@ static func build_weapons() -> Dictionary:
 		{ "bullet_speed": 740, "bullet_drop": 1.05, "reload_tac": 4.0 })
 	WD["m24"] = _w("M24", "M24 狙击步枪", "sniper", false, 80, 2.5, 55, 5, 35, 3.1, 0.24, 13,
 		[110, 200, 0.85], 0.112, -0.15, [2.2, 0.45, 0.12], [4.5, 0.02, 2.8, 0, 0], Color(0.82, 0.91, 1),
-		{ "scope": true, "bullet_speed": 800, "bullet_drop": 0.6, "recoil_cam": 0.012, "reload_tac": 2.3 })
+		{ "scope": true, "scope_mag": 6, "bullet_speed": 800, "bullet_drop": 0.6, "recoil_cam": 0.012, "reload_tac": 2.3 })
 	# 狙击 zoom_fov 12-14:镜内视野更窄、放大更强(m24 张角 35.7°/13° ≈ 感知 2.75×)
 	WD["svd"] = _w("SVD", "SVD 狙击步枪", "sniper", false, 55, 2.2, 200, 10, 50, 2.3, 0.26, 14,
 		[90, 180, 0.8], 0.115, -0.15, [1.4, 0.35, 0.09], [3.5, 0.05, 2.2, 0.5, 1.5], Color(1, 0.82, 0.63),
-		{ "scope": true, "bullet_speed": 830, "bullet_drop": 0.7, "recoil_cam": 0.01, "reload_tac": 1.7 })
+		{ "scope": true, "scope_mag": 4, "bullet_speed": 830, "bullet_drop": 0.7, "recoil_cam": 0.01, "reload_tac": 1.7 })
 	# 狙击 zoom_fov 12-14:镜内视野更窄、放大更强(svd 张角 35.7°/14° ≈ 感知 2.55×)
 	WD["rpg"] = _w("RPG-7", "RPG-7 火箭筒", "rpg", false, 120, 1.0, 30, 1, 4, 3.0, 0.2, 60,
 		[999, 999, 1], 0.0755, -0.24, [1.5, 0.3, 0.12], [0.5, 0.1, 0.5, 0, 0], Color(1, 0.88, 0.63),
@@ -209,7 +211,7 @@ static func build_weapons() -> Dictionary:
 	# 栓动狙击:中高伤快栓(AWM 与 M24 之间的折中)
 	WD["m40"] = _w("M40A3", "M40A3 狙击步枪", "sniper", false, 88, 2.5, 48, 5, 32, 3.3, 0.26, 13,
 		[115, 210, 0.85], 0.113, -0.15, [2.4, 0.48, 0.13], [4.8, 0.02, 2.9, 0, 0], Color(0.8, 0.9, 0.95),
-		{ "scope": true, "bullet_speed": 900, "bullet_drop": 0.58, "recoil_cam": 0.013, "reload_tac": 2.5 })
+		{ "scope": true, "scope_mag": 7, "bullet_speed": 900, "bullet_drop": 0.58, "recoil_cam": 0.013, "reload_tac": 2.5 })
 	# 战斗步枪:7.62 半自动重弹,单发高伤害
 	WD["g3"] = _w("G3", "G3 战斗步枪", "rifle", false, 38, 2.0, 400, 20, 100, 2.6, 0.16, 54,
 		[36, 82, 0.62], 0.112, -0.24, [0.9, 0.3, 0.08], [1.7, 0.13, 1.25, 0.3, 1.9], Color(0.9, 0.85, 0.7),
@@ -238,16 +240,16 @@ static func build_weapons() -> Dictionary:
 	# ---- 狙击步枪(×4,凑满 8)----
 	WD["m82a1"] = _w("M82A1", "巴雷特 M82A1 反器材步枪", "sniper", false, 105, 2.5, 36, 10, 30, 3.9, 0.3, 12,
 		[130, 240, 0.88], 0.116, -0.15, [2.8, 0.55, 0.16], [5.2, 0.02, 3.2, 0, 0], Color(0.85, 0.88, 0.92),
-		{ "scope": true, "bullet_speed": 900, "bullet_drop": 0.5, "penetration": 2, "recoil_cam": 0.016, "reload_tac": 2.9 })
+		{ "scope": true, "scope_mag": 8, "bullet_speed": 900, "bullet_drop": 0.5, "penetration": 2, "recoil_cam": 0.016, "reload_tac": 2.9 })
 	WD["l115"] = _w("L115A3", "L115A3 狙击步枪", "sniper", false, 92, 2.5, 45, 5, 30, 3.4, 0.27, 13,
 		[125, 230, 0.86], 0.114, -0.15, [2.5, 0.5, 0.14], [5.0, 0.02, 3.0, 0, 0], Color(0.8, 0.9, 0.95),
-		{ "scope": true, "bullet_speed": 930, "bullet_drop": 0.55, "recoil_cam": 0.014, "reload_tac": 2.6 })
+		{ "scope": true, "scope_mag": 8, "bullet_speed": 930, "bullet_drop": 0.55, "recoil_cam": 0.014, "reload_tac": 2.6 })
 	WD["sv98"] = _w("SV-98", "SV-98 狙击步枪", "sniper", false, 85, 2.5, 50, 10, 30, 3.2, 0.25, 13,
 		[120, 220, 0.85], 0.113, -0.15, [2.3, 0.47, 0.13], [4.8, 0.02, 2.9, 0, 0], Color(0.85, 0.87, 0.82),
-		{ "scope": true, "bullet_speed": 870, "bullet_drop": 0.6, "recoil_cam": 0.012, "reload_tac": 2.4 })
+		{ "scope": true, "scope_mag": 7, "bullet_speed": 870, "bullet_drop": 0.6, "recoil_cam": 0.012, "reload_tac": 2.4 })
 	WD["m2010"] = _w("M2010", "M2010 ESR 狙击步枪", "sniper", false, 90, 2.5, 46, 5, 30, 3.5, 0.26, 12,
 		[125, 235, 0.87], 0.115, -0.15, [2.4, 0.48, 0.135], [5.0, 0.02, 3.1, 0, 0], Color(0.8, 0.88, 0.9),
-		{ "scope": true, "bullet_speed": 920, "bullet_drop": 0.52, "recoil_cam": 0.013, "reload_tac": 2.7 })
+		{ "scope": true, "scope_mag": 8, "bullet_speed": 920, "bullet_drop": 0.52, "recoil_cam": 0.013, "reload_tac": 2.7 })
 	# ---- 精确射手步枪(DMR ×7,凑满 8)----
 	WD["sks"] = _w("SKS", "SKS 半自动步枪", "dmr", false, 52, 2.2, 380, 10, 60, 2.5, 0.18, 34,
 		[80, 170, 0.78], 0.108, -0.17, [0.8, 0.24, 0.065], [2.5, 0.06, 1.6, 0.25, 1.3], Color(0.9, 0.82, 0.62),
@@ -303,7 +305,7 @@ static func build_classes() -> Dictionary:
 	# 侦察兵:战场之眼(狙击 + 标记 + 重生信标)
 	var recon := ClassDef.new()
 	recon.cn = "侦察兵"; recon.en = "RECON"; recon.icon = "侦"; recon.color = Color(0.88, 0.63, 1.0)
-	recon.primary = "awm"; recon.weapons = ["awm", "m24", "svd", "m40", "m82a1", "m110", "l115", "sks"]
+	recon.primary = "awm"; recon.weapons = ["awm", "m24", "svd", "m40", "m82a1", "l115", "sv98", "m2010"]
 	recon.secondaries = secondaries
 	recon.gadget = "sensor"; recon.gadget_cn = "动态探测器"; recon.gadget_count = 2
 	recon.desc = "战场之眼。狙击与情报标记(Q 索敌),部署重生信标为小队提供隐蔽重生点(按 F)。"

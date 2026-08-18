@@ -151,7 +151,8 @@ func _draw() -> void:
 	if G.hud.spawn_point != null and G.hud.spawn_point is Flag:
 		if not is_instance_valid(G.hud.spawn_point) or G.hud.spawn_point.owner_team != G.player.team:
 			G.hud.spawn_point = null
-	if G.hud.spawn_mate != null and (not G.hud.spawn_mate.alive or G.hud.spawn_mate.vehicle != null):
+	if G.hud.spawn_mate != null and G.hud.spawn_mate is Object \
+			and (not is_instance_valid(G.hud.spawn_mate) or not G.hud.spawn_mate.alive or G.hud.spawn_mate.vehicle != null):
 		G.hud.spawn_mate = null
 	# 基地默认出生点(攻方顶部 / 守方底部)
 	var bx := _w2m(0, ws, s)
@@ -173,7 +174,7 @@ func _draw() -> void:
 			continue
 		var x := _w2m(f.pos.x, ws, s)
 		var y := _w2m(f.pos.z, ws, s)
-		var is_sel: bool = G.hud.spawn_point is Flag and G.hud.spawn_point == f
+		var is_sel: bool = G.hud.spawn_point is Flag and f is Flag and G.hud.spawn_point == f
 		draw_circle(Vector2(x, y), 12 if is_sel else 9, Color(UiTheme.FRIENDLY.r, UiTheme.FRIENDLY.g, UiTheme.FRIENDLY.b, 0.35))
 		draw_arc(Vector2(x, y), 12 if is_sel else 9, 0, TAU, 24,
 			Color.WHITE if is_sel else UiTheme.FRIENDLY, 3.0 if is_sel else 1.5)
@@ -190,7 +191,7 @@ func _draw() -> void:
 			continue
 		var dx2 := _w2m(d["pos"].x, ws, s)
 		var dy2 := _w2m(d["pos"].z, ws, s)
-		var is_bsel: bool = G.hud.spawn_point is Dictionary and G.hud.spawn_point == d
+		var is_bsel: bool = G.hud.spawn_point is Dictionary and d is Dictionary and G.hud.spawn_point == d
 		var rr := 7.0 if is_bsel else 5.0
 		var pts := PackedVector2Array([Vector2(dx2, dy2 - rr), Vector2(dx2 + rr, dy2), Vector2(dx2, dy2 + rr), Vector2(dx2 - rr, dy2)])
 		draw_colored_polygon(pts, Color(UiTheme.FRIENDLY.r, UiTheme.FRIENDLY.g, UiTheme.FRIENDLY.b, 0.7))
@@ -203,8 +204,9 @@ func _draw() -> void:
 				continue
 			var x2 := _w2m(m.pos.x, ws, s)
 			var y2 := _w2m(m.pos.z, ws, s)
-			draw_circle(Vector2(x2, y2), 7 if G.hud.spawn_mate == m else 5, UiTheme.FRIENDLY)
-			if G.hud.spawn_mate == m:
+			var mate_sel: bool = G.hud.spawn_mate is Object and m is Object and G.hud.spawn_mate == m
+			draw_circle(Vector2(x2, y2), 7 if mate_sel else 5, UiTheme.FRIENDLY)
+			if mate_sel:
 				draw_arc(Vector2(x2, y2), 7, 0, TAU, 20, Color.WHITE, 2)
 	draw_string(UiTheme.font(), Vector2(0, s - 24), "点击己方点位 / 绿点队友 / 菱形信标 部署到前线",
 		HORIZONTAL_ALIGNMENT_CENTER, s, 11, UiTheme.TXT_DIM)

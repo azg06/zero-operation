@@ -74,7 +74,7 @@ var _right_arm: Node3D = null
 var _left_arm: Node3D = null
 var _hand_l0 := Vector3.ZERO
 var _hand_l1 := Vector3.ZERO
-var _hand_l2 := Vector3(0.03, -0.34, 0.02)
+var hand_l2 := Vector3(0.03, -0.34, 0.02)
 var _hip_pos := Vector3.ZERO
 var _ads_pos := Vector3.ZERO
 var _right_hand_base := Vector3.ZERO
@@ -388,7 +388,7 @@ func try_fire() -> void:
 		var pellets = def.pellets
 		var spread := current_spread()
 		var mv := muzzle_world_main()
-		var cam_basis := G.camera.global_transform.basis
+		var cam_basis := aim_basis()
 		for i in pellets:
 			var dir: Vector3 = -cam_basis.z
 			# 圆锥散布
@@ -552,26 +552,27 @@ func update(dt: float) -> void:
 			reload_t = reload_ctl.time
 		g.position += reload_pose
 		g.rotation += reload_rot
-	# === 枪械自然晃动(原始备份数据:走路 Bob / 鼠标惯性 Sway / 开镜呼吸) ===
-	# 与已完成项目中的旧版 gun.gd 完全一致;这里只做枪身叠加,不再经过武器弹簧。
+	# === 枪械自然晃动(走路 Bob / 鼠标惯性 Sway / 呼吸) ===
+	# ADS 时枪身必须稳定:Bob/Sway/呼吸在满镜时收敛到 0,只保留开火后坐与换弹动画。
 	var speed := Vector2(p.vel.x, p.vel.z).length()
 	if p.on_ground and speed > 0.5:
 		bob_t += dt * speed * 1.6
-	var bob_amp := lerpf(0.008, 0.002, ads_amount) * clampf(speed / 5.0, 0, 1)
+	var bob_amp := lerpf(0.008, 0.0, ads_amount) * clampf(speed / 5.0, 0, 1)
 	g.position.x += sin(bob_t) * bob_amp
 	g.position.y += absf(cos(bob_t)) * bob_amp * 1.2
-	# 呼吸/惯性摇摆(sway,压制时加剧)
+	# 呼吸/惯性摇摆(sway,压制时加剧);ADS 满镜时完全消除
 	var sup_k = 1 + p.suppression * 2.5
 	sway_x = Utils.damp(sway_x, -p.look_vel_x * 0.00006 * sup_k, 10, dt)
 	sway_y = Utils.damp(sway_y, p.look_vel_y * 0.00006 * sup_k, 10, dt)
-	g.position.x += sway_x * (1 - ads_amount * 0.8)
-	g.position.y += sway_y * (1 - ads_amount * 0.8)
-	# 呼吸摆动(开镜时更明显;压制加剧手抖)
+	g.position.x += sway_x * (1.0 - ads_amount)
+	g.position.y += sway_y * (1.0 - ads_amount)
+	# 呼吸摆动:腰射与满镜均为 0,仅在 ADS 过渡中段有极轻微起伏
 	var br: float = 1.0 + p.suppression * 3.0
 	var tb: float = G.time
-	g.position.y += sin(tb * 1.55) * 0.0013 * ads_amount * br
-	g.position.x += sin(tb * 0.87 + 1.3) * 0.0010 * ads_amount * br
-	g.rotation.z += sin(tb * 0.7) * 0.0005 * ads_amount * br
+	var breath_k := ads_amount * (1.0 - ads_amount)
+	g.position.y += sin(tb * 1.55) * 0.0013 * breath_k * br
+	g.position.x += sin(tb * 0.87 + 1.3) * 0.0010 * breath_k * br
+	g.rotation.z += sin(tb * 0.7) * 0.0005 * breath_k * br
 	# 臂筒:手腕 → 屏外肘锚点连续定向(修复断臂)
 	_point_arm(_left_arm, _left_hand.position, ELBOW_L)
 	_point_arm(_right_arm, _right_hand.position, ELBOW_R)
@@ -611,17 +612,77 @@ func update(dt: float) -> void:
 			# 幅度 0.06 ≈ 护木长度一半,行程醒目
 			_pump.position.z = _pump_base.z - sin(pt * PI) * 0.06
 			g.rotation.x += sin(pt * PI) * 0.06
-	# === 镜罩武器(狙击 + SKS/M110 原厂镂空镜)满开镜隐藏枪身,2D 镜罩接管画面 ===
-	if scope_sight():
-		g.visible = ads_amount < 0.7 and draw_t > 0.1
-	# === 光学瞄具 3D 分划:开镜时隐藏,由 2D HUD 稳定准星接管(防贴目放大/模糊/双准星) ===
+	# 高倍率狙击镜 PIP:ADS 时隐藏镜筒实体/黑目镜,只留高透目镜、细分划与细镜口圈;
+	# 镜外完全透明(正常视野)。非 ADS 时恢复全黑镜筒,避免透明枪筒观感。
+	_update_pip_scope_visuals(g, ads_amount)
+	# === 光学瞄具 3D 分划:普通瞄具开镜时隐藏,由 2D HUD 稳定准星接管(防贴目放大/模糊/双准星) ===
 	if ret_style() != "":
 		_set_ret_visible(g, ads_amount < 0.5)
 
 
-## 是否使用全屏圆形镜罩(Sniper 及带原厂镂空镜的 SKS/M110)
+## 高倍镜内部可见性切换:非 ADS 全黑镜筒;ADS 只留透明目镜 + 分划。
+func _update_pip_scope_visuals(g: Node3D, ads: float) -> void:
+	if not def.scope:
+		return
+	var in_ads := ads >= 0.5
+	var body: Node3D = _meta_node(g, "scope_tube")
+	if body != null:
+		body.visible = not in_ads
+	var black: MeshInstance3D = _meta_node(g, "scope_lens_black") as MeshInstance3D
+	if black != null:
+		black.visible = not in_ads
+	var clear: MeshInstance3D = _meta_node(g, "scope_lens_clear") as MeshInstance3D
+	if clear != null:
+		clear.visible = in_ads
+	var reticle: Node3D = _meta_node(g, "scope_reticle")
+	if reticle != null:
+		reticle.visible = in_ads
+	# 部分狙击枪原厂导轨上仍有机瞄;ADS 时隐藏,避免共轴机瞄遮挡 PIP 镜内视野。
+	var irons: Node3D = g.get_node_or_null("StockIrons")
+	if irons != null:
+		irons.visible = not in_ads
+
+
+func _meta_node(g: Node3D, meta: String) -> Node3D:
+	if g == null or not g.has_meta(meta):
+		return null
+	var n: Node3D = g.get_meta(meta)
+	if n == null or not is_instance_valid(n):
+		return null
+	return n
+
+
+## 是否使用独立镜内渲染的高倍率狙击镜(仅 def.scope 武器)。
+## SKS/M110 原厂镂空镜为低倍率 DMR 镜,继续走普通 ADS + HUD 分划,不再误入全屏镜罩。
 func scope_sight() -> bool:
-	return def.scope or id in ["sks", "m110"]
+	if not def.scope:
+		return false
+	var eye: Node3D = group.get_meta("scope_eye") if group != null and group.has_meta("scope_eye") else null
+	return eye != null and is_instance_valid(eye) and eye.is_inside_tree() and eye.is_visible_in_tree()
+
+
+## 镜内实际 FOV:优先按真实倍率(scope_mag)和玩家基础 FOV 换算,
+## 保证 75/90/110 FOV 下都获得一致的 4×/6×/7×/8× 感知倍率;
+## 没有 scope_mag 的旧数据回退 def.zoom_fov。
+func scope_fov() -> float:
+	var mag := float(def.scope_mag)
+	if mag > 1.0:
+		var base := float(G.settings.get("fov", 75.0))
+		return rad_to_deg(2.0 * atan(tan(deg_to_rad(base) * 0.5) / mag))
+	return float(def.zoom_fov)
+
+
+## 镜内渲染是否已足够开启(供 OpticScopeSystem/射击弹道使用)
+func pip_scope_active() -> bool:
+	return scope_sight() and ads_amount > 0.35
+
+
+## 射击/索敌使用的实际瞄准轴:高倍镜满镜时跟随镜内 Optic Scope 相机,
+## 否则使用主相机轴。这样镜内 3D 分划中心与子弹落点严格一致。
+func aim_basis() -> Basis:
+	if pip_scope_active() and G.scope != null and G.scope.has_method("aim_basis"):
+		return (G.scope.aim_basis() as Basis).orthonormalized()
+	return G.camera.global_transform.basis.orthonormalized()
 
 
 ## 当前光学瞄具的准星样式(""=机械瞄具;reddot/holo/tac 由 HUD 2D 准星绘制)

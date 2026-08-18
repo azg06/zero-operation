@@ -92,15 +92,15 @@ class Crosshair extends Control:
 			var cc := Color(0.0, 0.0, 0.0, 0.5 * ch_opacity)
 			var cw := Color(1, 1, 1, 0.75 * ch_opacity)
 			for i in 2:
-				var w: float = 1.2 if i == 0 else 0.7
-				draw_line(c + Vector2(-gap - L2, 0), c + Vector2(-gap, 0), cw, w)
-				draw_line(c + Vector2(gap, 0), c + Vector2(gap + L2, 0), cw, w)
-				draw_line(c + Vector2(0, -gap - L2), c + Vector2(0, -gap), cw, w)
-				draw_line(c + Vector2(0, gap), c + Vector2(0, gap + L2), cw, w)
-				draw_line(c + Vector2(-gap - 1.2, 0), c + Vector2(-gap, 0), cc, w + 0.8)
-				draw_line(c + Vector2(gap, 0), c + Vector2(gap + 1.2, 0), cc, w + 0.8)
-				draw_line(c + Vector2(0, -gap - 1.2), c + Vector2(0, -gap), cc, w + 0.8)
-				draw_line(c + Vector2(0, gap), c + Vector2(0, gap + 1.2), cc, w + 0.8)
+				var tick_w: float = 1.2 if i == 0 else 0.7
+				draw_line(c + Vector2(-gap - L2, 0), c + Vector2(-gap, 0), cw, tick_w)
+				draw_line(c + Vector2(gap, 0), c + Vector2(gap + L2, 0), cw, tick_w)
+				draw_line(c + Vector2(0, -gap - L2), c + Vector2(0, -gap), cw, tick_w)
+				draw_line(c + Vector2(0, gap), c + Vector2(0, gap + L2), cw, tick_w)
+				draw_line(c + Vector2(-gap - 1.2, 0), c + Vector2(-gap, 0), cc, tick_w + 0.8)
+				draw_line(c + Vector2(gap, 0), c + Vector2(gap + 1.2, 0), cc, tick_w + 0.8)
+				draw_line(c + Vector2(0, -gap - 1.2), c + Vector2(0, -gap), cc, tick_w + 0.8)
+				draw_line(c + Vector2(0, gap), c + Vector2(0, gap + 1.2), cc, tick_w + 0.8)
 				L2 *= 0.62
 				gap *= 1.0
 			draw_circle(c, 1.3 * s, cw)
@@ -288,8 +288,8 @@ class WeaponIcon extends Control:
 		custom_minimum_size = Vector2(64, 40)
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	func set_weapon(kind: String, suppressed: bool) -> void:
-		self.kind = kind
+	func set_weapon(weapon_kind: String, suppressed: bool) -> void:
+		self.kind = weapon_kind
 		_sup = suppressed
 		queue_redraw()
 
@@ -352,7 +352,6 @@ class WeaponIcon extends Control:
 # ==================== 右下:工具行(投掷物 / 医疗包 / 工具,线稿图标 + 数量) ====================
 class ToolsRow extends Control:
 	var _items: Array = []       # [{kind, count}]
-	var _dirty := true
 
 	func _init() -> void:
 		custom_minimum_size = Vector2(0, 22)
@@ -538,7 +537,7 @@ class WorldOverlay extends Control:
 		_draw_teammates(cam, p)
 		_draw_enemies(cam, p)
 
-	func _occluded(cam: Camera3D, from: Vector3, wpos: Vector3, dist: float) -> bool:
+	func _occluded(_cam: Camera3D, from: Vector3, wpos: Vector3, dist: float) -> bool:
 		if dist < 1.5:
 			return false
 		var hit = Utils.raycast_world(from, (wpos - from) / dist, dist - 0.5)
@@ -565,20 +564,13 @@ class WorldOverlay extends Control:
 			var alpha: float = clampf(1.1 - dist / 400.0, 0.12, 1.0)
 			if _occluded(cam, cpos, wpos, dist):
 				alpha *= 0.4
-			var bc: Color
 			var fc: Color
 			if f.owner_team != null and f.owner_team == G.player.team:
-				bc = UiTheme.H_CYAN
 				fc = Color(0.72, 0.94, 0.98)
 			elif f.owner_team != null:
-				bc = UiTheme.H_ORANGE
 				fc = Color(1.0, 0.8, 0.62)
 			else:
-				bc = UiTheme.H_GRAY
 				fc = Color(0.75, 0.8, 0.85)
-			if f.contested:
-				var pu := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.012)
-				bc = Color(0.95, 0.34, 0.28, 0.4 + 0.5 * pu)
 			# 字母(大字)
 			draw_string(UiTheme.mono_font(), sp + Vector2(-40 * s, 12 * s), f.id,
 				HORIZONTAL_ALIGNMENT_CENTER, 80 * s, int(round(26 * s)), fc)
@@ -744,7 +736,7 @@ class WorldOverlay extends Control:
 			var alpha: float = clampf(1.1 - dist / 600.0, 0.15, 1.0)
 			_draw_enemy_marker(sp, s, alpha, dist, a.craft_name)
 
-	func _draw_enemy_marker(sp: Vector2, s: float, alpha: float, dist: float, name: String) -> void:
+	func _draw_enemy_marker(sp: Vector2, s: float, alpha: float, dist: float, label_text: String) -> void:
 		var col := Color(1.0, 0.55, 0.22, alpha)
 		var r: float = 6.0 * s
 		var pts := PackedVector2Array([
@@ -753,7 +745,7 @@ class WorldOverlay extends Control:
 		draw_polyline(PackedVector2Array([pts[0], pts[1], pts[2], pts[3], pts[0]]), col, 1.4)
 		draw_string(UiTheme.mono_font(), sp + Vector2(-24 * s, r + 13 * s), str(int(round(dist))) + "m",
 			HORIZONTAL_ALIGNMENT_CENTER, 48 * s, int(round(10 * s)), Color(1.0, 0.72, 0.55, alpha))
-		draw_string(UiTheme.font(), sp + Vector2(-40 * s, r + 26 * s), name,
+		draw_string(UiTheme.font(), sp + Vector2(-40 * s, r + 26 * s), label_text,
 			HORIZONTAL_ALIGNMENT_CENTER, 80 * s, int(round(11 * s)), Color(1.0, 0.62, 0.4, alpha))
 
 
@@ -769,7 +761,7 @@ class DeploymentOverlay extends Control:
 			_redraw_t = 0.04    # ~25Hz 重绘,标记平滑且省开销
 			queue_redraw()
 
-	func _occluded(cam: Camera3D, from: Vector3, wpos: Vector3, dist: float) -> bool:
+	func _occluded(_cam: Camera3D, from: Vector3, wpos: Vector3, dist: float) -> bool:
 		if dist < 2.0 or dist > 220.0:
 			return false
 		var hit = Utils.raycast_world(from, (wpos - from) / dist, dist - 0.5)
@@ -903,7 +895,7 @@ class DeploymentOverlay extends Control:
 			draw_string(UiTheme.font(), sp + Vector2(-30 * s, 34 * s), "未解锁",
 				HORIZONTAL_ALIGNMENT_CENTER, 60 * s, int(round(10 * s)), Color(0.62, 0.66, 0.7, alpha))
 
-	func _draw_beacon_marker(sp: Vector2, s: float, alpha: float, t: Dictionary, is_hover: bool) -> void:
+	func _draw_beacon_marker(sp: Vector2, s: float, alpha: float, _entry: Dictionary, is_hover: bool) -> void:
 		var col := Color(0.0, 1.0, 0.53, 0.9 * alpha)
 		var r: float = 6.0 * s
 		var pts := PackedVector2Array([
@@ -926,7 +918,7 @@ class DeploymentOverlay extends Control:
 		draw_string(UiTheme.font(), sp + Vector2(-60 * s, r + 16 * s), str(t.get("label", "载具")),
 			HORIZONTAL_ALIGNMENT_CENTER, 120 * s, int(round(11 * s)), Color(col.r, col.g, col.b, alpha))
 
-	func _draw_base_marker(sp: Vector2, s: float, alpha: float, t: Dictionary, is_hover: bool) -> void:
+	func _draw_base_marker(sp: Vector2, s: float, alpha: float, _entry: Dictionary, is_hover: bool) -> void:
 		var col := Color(0.0, 1.0, 0.53, 0.95 * alpha)
 		var r: float = 9.0 * s
 		draw_arc(sp, r, 0, TAU, 32, col, 2.0)
@@ -937,7 +929,7 @@ class DeploymentOverlay extends Control:
 			HORIZONTAL_ALIGNMENT_CENTER, 80 * s, int(round(11 * s)), Color(col.r, col.g, col.b, alpha))
 
 	## 侦察规则敌人:仅被标记(b.spotted)或暴露位置者显示,标记渐隐(信息不确定性)
-	func _draw_spotted_enemies(cam: Camera3D, p, center: Vector2) -> void:
+	func _draw_spotted_enemies(cam: Camera3D, p, _center: Vector2) -> void:
 		var cpos: Vector3 = cam.global_position
 		for b in G.bots:
 			if b == null or not b.alive or b.team == p.team:
@@ -1465,7 +1457,6 @@ var _pop_times: Dictionary = {}
 var _pop_tweens: Dictionary = {}
 var _weapon_ctx := ""
 var _veh_lock_tw: Tween
-var _last_veh_key := ""
 
 
 func _ready() -> void:
@@ -2718,7 +2709,8 @@ func update_hud(dt: float) -> void:
 			_crosshair.ch_opacity = ch_op
 			_crosshair.ret_style = ret_style
 			_crosshair.queue_redraw()
-		_scope.visible = gun != null and gun.scope_sight() and gun.ads_amount > 0.7
+		# 高倍率狙击镜由 OpticScopeSystem 的圆形 PIP 着色器渲染;旧的 2D 全屏镜罩彻底停用。
+		_scope.visible = false
 		if _scope.visible:
 			_scope.queue_redraw()
 		# 占领进度
@@ -3060,7 +3052,7 @@ func _p_val(p: Node, key: String, def_val):
 	return v if v != null else def_val
 
 
-func _on_portal_round_started(mode: String, map_id: String, player_count: int) -> void:
+func _on_portal_round_started(mode: String, _map_id: String, _player_count: int) -> void:
 	_portal_active = true
 	_portal_last_result = {}
 	if G.menus != null:

@@ -582,7 +582,7 @@ func load_progress() -> Dictionary:
 		out["wins"] = int(cf.get_value("stats", "wins", 0))
 		for wid in cf.get_section_keys("weapons"):
 			out["weapon_xp"][wid] = int(cf.get_value("weapons", wid, 0))
-	out["level"] = 1 + int(out["exp"] / 100)
+	out["level"] = 1 + int(float(out["exp"]) / 100.0)
 	out["level_xp"] = int(out["exp"]) % 100
 	return out
 
@@ -605,7 +605,7 @@ func _save_progress(exp_gain: int, weapon_xp: Dictionary, win: bool) -> Dictiona
 		cf.set_value("weapons", str(wid), int(merged[wid]))
 	cf.save(PROGRESS_PATH)
 	cur["exp"] = total
-	cur["level"] = 1 + int(total / 100)
+	cur["level"] = 1 + int(float(total) / 100.0)
 	cur["level_xp"] = total % 100
 	cur["matches"] = int(cur["matches"]) + 1
 	cur["wins"] = int(cur["wins"]) + (1 if win else 0)

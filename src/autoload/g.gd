@@ -6,6 +6,7 @@ var main: Node3D = null              # 根节点
 var camera: Camera3D = null          # 主相机
 var vm_camera: Camera3D = null       # 视角模型相机(独立世界)
 var vm_viewport: SubViewport = null
+var scope = null                     # OpticScopeSystem(高倍率狙击镜 PIP 渲染器)
 var world_root: Node3D = null        # 动态世界容器(换图时整体销毁)
 var world_group: Node3D = null       # 当前地图内容组
 var sun: DirectionalLight3D = null

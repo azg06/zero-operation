@@ -202,7 +202,6 @@ func _zones_text() -> String:
 			parts.append("  ALPHA-%s 战区 %d" % [",".join(ids), i + 1])
 	elif _map_def is Dictionary and _map_def.has("sectors"):
 		pass
-	var theme := "城市" if _map_def is Object and _map_def.get("cn") != null else "未知"
 	parts.append("[color=#9fb8c8]载具路线[/color]  主公路贯穿战区,侧翼道路可快速穿插")
 	parts.append("[color=#9fb8c8]推进方向[/color]  敌军将沿道路与建筑群向己方基地推进")
 	return "\n".join(parts)

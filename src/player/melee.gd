@@ -146,9 +146,9 @@ func try_swing() -> void:
 
 
 ## 判定辅助(纯函数,供隔离测试):target 是否位于 origin 前向 range 内 half 半角锥形中
-static func in_cone(origin: Vector3, fwd: Vector3, target: Vector3, range := RANGE, half := CONE_HALF) -> bool:
+static func in_cone(origin: Vector3, fwd: Vector3, target: Vector3, cone_range := RANGE, half := CONE_HALF) -> bool:
 	var to := target - origin
 	var d := to.length()
-	if d > range or d < 0.05:
+	if d > cone_range or d < 0.05:
 		return false
 	return fwd.angle_to(to / d) <= half

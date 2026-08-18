@@ -117,7 +117,6 @@ var _flight_t := 0.0
 # ---- 物资(池化) ----
 var _loot: Array = []                # { holder, kind, id, quality, used, pos, base_y }
 var _loot_pool: Array = []
-var _loot_refresh_i := 0
 var _loot_mats := {}
 
 # ---- 空投 ----
@@ -270,7 +269,7 @@ func start(p_map_id: String = "") -> void:
 	_create_ai_objectives()
 	# 四人队制:bot[0..2] 与玩家同队(队 0),其余 96 只每 4 人一队(队 1..24)
 	for i in G.bots.size():
-		G.bots[i].squad_id = 0 if i < 3 else 1 + (i - 3) / 4
+		G.bots[i].squad_id = 0 if i < 3 else 1 + int((i - 3) / 4.0)
 	# 25 队落点锚(同队跳伞落点相近;整图随机分布)
 	_build_squad_anchors()
 	var route_dir: Vector3 = Utils.safe_norm(_plane_route[1] - _plane_route[0], Vector3.FORWARD)
@@ -917,9 +916,9 @@ func _update_battle(dt: float) -> void:
 	else:
 		zone_shrink_t -= dt
 		var k := clampf(1.0 - maxf(0.0, zone_shrink_t) / ZONE_SHRINK, 0.0, 1.0)
-		var ease := 1.0 - pow(1.0 - k, 2.0)
-		zone_center = zone_center.lerp(zone_target_c, ease)
-		zone_radius = lerpf(zone_start_r, zone_target_r, ease)
+		var eased := 1.0 - pow(1.0 - k, 2.0)
+		zone_center = zone_center.lerp(zone_target_c, eased)
+		zone_radius = lerpf(zone_start_r, zone_target_r, eased)
 		if k >= 1.0:
 			zone_shrinking = false
 			zone_stage += 1
@@ -1297,16 +1296,16 @@ func _update_loot_anim(dt: float) -> void:
 
 func _refresh_loot_round() -> void:
 	# 已拾取物资在随机空闲物资点重刷一轮(中盘/空投后)
-	var free := []
+	var free_points := []
 	for i in loot_points.size():
 		if randf() < 0.55:
-			free.append(loot_points[i])
-	if free.is_empty():
+			free_points.append(loot_points[i])
+	if free_points.is_empty():
 		return
 	for l in _loot:
 		if not l["used"]:
 			continue
-		var pt: Vector3 = Utils.choice(free)
+		var pt: Vector3 = Utils.choice(free_points)
 		var kind: String = _roll_loot_kind()
 		var wid := _roll_weapon() if kind == "weapon" else ""
 		var gh: float = G.ground_h.call(pt.x, pt.z) if G.ground_h.is_valid() else 0.0
@@ -1974,16 +1973,16 @@ func _save_progress(win: bool, kills: int, rank: int) -> void:
 	var path := "user://player_progress.cfg"
 	var cfg := ConfigFile.new()
 	cfg.load(path)
-	var exp := int(cfg.get_value("progress", "exp", 0))
+	var total_exp := int(cfg.get_value("progress", "exp", 0))
 	var gain: int = (500 if win else 0) + kills * 15 + (100 if rank <= 10 else 0)
-	cfg.set_value("progress", "exp", exp + gain)
+	cfg.set_value("progress", "exp", total_exp + gain)
 	cfg.set_value("br", "games", int(cfg.get_value("br", "games", 0)) + 1)
 	cfg.set_value("br", "wins", int(cfg.get_value("br", "wins", 0)) + (1 if win else 0))
 	cfg.set_value("br", "kills", int(cfg.get_value("br", "kills", 0)) + kills)
 	cfg.set_value("br", "best_rank", mini(int(cfg.get_value("br", "best_rank", 999)), rank))
 	cfg.set_value("br", "last_gain", gain)
 	cfg.save(path)
-	print("[BR] 经验 +%d(吃鸡+500 / 击杀+15 / 前十+100) 累计=%d" % [gain, exp + gain])
+	print("[BR] 经验 +%d(吃鸡+500 / 击杀+15 / 前十+100) 累计=%d" % [gain, total_exp + gain])
 
 
 ## ==================== 观战(死亡回放 5s → 跟随最近存活者,Tab 切换) ====================
@@ -2168,9 +2167,9 @@ func _update_redeploy_helo(dt: float) -> void:
 		var rotor: Node3D = _helo.get_meta("rotor") if _helo.has_meta("rotor") else null
 		if rotor != null:
 			rotor.rotation.y += dt * 28.0
-		var tr: Node3D = _helo.get_meta("tail_rotor") if _helo.has_meta("tail_rotor") else null
-		if tr != null:
-			tr.rotation.x += dt * 40.0
+		var tail_rotor: Node3D = _helo.get_meta("tail_rotor") if _helo.has_meta("tail_rotor") else null
+		if tail_rotor != null:
+			tail_rotor.rotation.x += dt * 40.0
 		# 玩家乘机(第三人称在机内)
 		G.player.pos = _helo.position + Vector3(0, 0.35, 0)
 		G.player.vel = Vector3.ZERO
@@ -2314,13 +2313,13 @@ func _spawn_bot_helo(batch: Array) -> void:
 	if dir2.length_squared() < 0.001:
 		dir2 = Vector3(1.0, 0.0, 0.0)
 	var dist0 := minf(zone_radius + 120.0, maxf(40.0, G.bounds - 40.0))
-	var start := zone_center + dir2 * dist0
-	start.x = clampf(start.x, -G.bounds + 30.0, G.bounds - 30.0)
-	start.z = clampf(start.z, -G.bounds + 30.0, G.bounds - 30.0)
-	start.y = REDEPLOY_HELO_ALT
+	var helo_start := zone_center + dir2 * dist0
+	helo_start.x = clampf(helo_start.x, -G.bounds + 30.0, G.bounds - 30.0)
+	helo_start.z = clampf(helo_start.z, -G.bounds + 30.0, G.bounds - 30.0)
+	helo_start.y = REDEPLOY_HELO_ALT
 	var target := _bot_helo_target(batch[0])
 	var node := _build_helo_mesh()
-	node.position = start
+	node.position = helo_start
 	node.rotation = Vector3(0, atan2(-dir2.x, -dir2.z), 0)
 	G.main.add_child(node)
 	_br_helos.append({ "node": node, "bots": batch, "target": target })
@@ -2369,9 +2368,9 @@ func _update_bot_helo(h: Dictionary, dt: float, idx: int) -> void:
 		var rotor: Node3D = node.get_meta("rotor") if node.has_meta("rotor") else null
 		if rotor != null:
 			rotor.rotation.y += dt * 28.0
-		var tr: Node3D = node.get_meta("tail_rotor") if node.has_meta("tail_rotor") else null
-		if tr != null:
-			tr.rotation.x += dt * 40.0
+		var tail_rotor: Node3D = node.get_meta("tail_rotor") if node.has_meta("tail_rotor") else null
+		if tail_rotor != null:
+			tail_rotor.rotation.x += dt * 40.0
 		var seat_i := 0
 		for b in h["bots"]:
 			if not is_instance_valid(b):
@@ -2483,14 +2482,14 @@ func _build_helo_mesh() -> Node3D:
 	helo.add_child(rotor)
 	helo.set_meta("rotor", rotor)
 	# 尾旋翼(侧装,绕 X 旋转)
-	var tr := Node3D.new()
-	tr.position = Vector3(0.3, 0.85, 4.0)
+	var tail_rotor := Node3D.new()
+	tail_rotor.position = Vector3(0.3, 0.85, 4.0)
 	for k in 2:
 		var tb := _vis_box(0.05, 1.0, 0.1, dark)
 		tb.rotation.x = k * PI / 2.0
-		tr.add_child(tb)
-	helo.add_child(tr)
-	helo.set_meta("tail_rotor", tr)
+		tail_rotor.add_child(tb)
+	helo.add_child(tail_rotor)
+	helo.set_meta("tail_rotor", tail_rotor)
 	# 滑橇起落架
 	for s in [-1.0, 1.0]:
 		_vis_add(helo, _vis_box(0.08, 0.08, 2.6, dark), s * 0.7, -0.85, -0.2)
@@ -2623,13 +2622,13 @@ func _ensure_player_chute() -> Node3D:
 ## 玩家伞具跟随:飞机上(模型隐藏)整体隐藏;freefall 背伞包;chute 伞面打开;落地隐藏
 func _update_player_chute(p) -> void:
 	var n := _ensure_player_chute()
-	var show: bool = _player_jump == "freefall" or _player_jump == "chute"
-	if n.visible != show:
-		n.visible = show
-		if _player_chute_log != show:
-			_player_chute_log = show
-			print("[BR-M] t=%.0f 玩家伞具 visible=%s jump=%s" % [round_time, show, _player_jump])
-	if not show:
+	var chute_visible: bool = _player_jump == "freefall" or _player_jump == "chute"
+	if n.visible != chute_visible:
+		n.visible = chute_visible
+		if _player_chute_log != chute_visible:
+			_player_chute_log = chute_visible
+			print("[BR-M] t=%.0f 玩家伞具 visible=%s jump=%s" % [round_time, chute_visible, _player_jump])
+	if not chute_visible:
 		return
 	n.position = p.pos
 	n.rotation = Vector3.ZERO
@@ -2911,16 +2910,16 @@ func _parse_point(v) -> Vector3:
 	return Vector3.ZERO
 
 
-func _random_land_target(route_dir: Vector3, b = null) -> Vector3:
+func _random_land_target(_route_dir: Vector3, b = null) -> Vector3:
 	# 任务4:有队伍 → 队锚 + 每员 15~30m 错位(同队落点相近;bot.gd 落点决策同步此逻辑)
 	if b != null and b.squad_id >= 0 and _squad_anchors.size() > b.squad_id:
 		var anchor: Vector3 = _squad_anchors[b.squad_id]
-		var a := TAU * float(b.id % 4) / 4.0 + Utils.rand(-0.4, 0.4)
-		var r := Utils.rand(12.0, 30.0)
-		var p := anchor + Vector3(cos(a) * r, 0.0, sin(a) * r)
-		p.x = clampf(p.x, -G.bounds, G.bounds)
-		p.z = clampf(p.z, -G.bounds, G.bounds)
-		return p
+		var squad_ang := TAU * float(b.id % 4) / 4.0 + Utils.rand(-0.4, 0.4)
+		var squad_rad := Utils.rand(12.0, 30.0)
+		var squad_pos := anchor + Vector3(cos(squad_ang) * squad_rad, 0.0, sin(squad_ang) * squad_rad)
+		squad_pos.x = clampf(squad_pos.x, -G.bounds, G.bounds)
+		squad_pos.z = clampf(squad_pos.z, -G.bounds, G.bounds)
+		return squad_pos
 	var a := Utils.rand(TAU)
 	var r := Utils.rand(60.0, _zone_bounds * 0.85)
 	var p := drop_zone + Vector3(cos(a) * r, 0.0, sin(a) * r)

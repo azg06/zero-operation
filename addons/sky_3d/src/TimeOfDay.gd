@@ -305,7 +305,7 @@ enum CelestialMode { SIMPLE, REALISTIC }
 ## Selects between simple trigonometric approximations or full orbital mechanics for computing sun and moon positions.
 @export var celestials_calculations := CelestialMode.REALISTIC: 
 	set(value):
-		celestials_calculations = value
+		celestials_calculations = value as CelestialMode
 		_update_celestial_coords()
 		notify_property_list_changed()
 

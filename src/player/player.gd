@@ -83,7 +83,17 @@ func _ready() -> void:
 	name = "你"
 	motion = FirstPersonMotionSystem.new(self)
 	body = SoldierModel.build_player_body()
+	_set_fp_body_layers(body)   # 第一人称身体放入 layer 2:镜内 PIP 相机不渲染,主相机仍可见
 	G.main.add_child(body)
+
+
+## 把第一人称身体/乘员模型递归放入视觉 layer 2(镜内相机 cull_mask=1 排除;
+## 主相机默认 cull_mask 含全部 layer,不受影响)。
+func _set_fp_body_layers(n: Node) -> void:
+	if n is VisualInstance3D:
+		(n as VisualInstance3D).layers = 2
+	for c in n.get_children():
+		_set_fp_body_layers(c)
 
 
 ## 同步影子手持武器:重建 body 上的当前主武器投影(SHADOWS_ONLY,不渲染)
@@ -109,6 +119,7 @@ func _update_body_gun() -> void:
 		for ch in n.get_children():
 			so_stack.append(ch)
 	upper.add_child(gn)
+	_set_fp_body_layers(gn)
 
 
 func gun() -> Gun:
@@ -166,6 +177,7 @@ func give_class(p_class_id: String, p_loadout) -> void:
 		veh_body.queue_free()
 	veh_body = SoldierModel.build_soldier("us", loadout["primary"], class_id, SkinCfg.get_skin(class_id))
 	veh_body.visible = false
+	_set_fp_body_layers(veh_body)
 	G.main.add_child(veh_body)
 
 
@@ -219,7 +231,16 @@ func spawn(p_pos: Vector3) -> void:
 
 
 func apply_look(dx: float, dy: float) -> void:
-	var sens = 0.0022 * G.settings.sensitivity * lerpf(1.0, 0.6, gun().ads_amount if gun() != null else 0.0)
+	var g := gun()
+	var ads := g.ads_amount if g != null else 0.0
+	var aim_mult := 0.6
+	# 高倍率狙击镜:灵敏度按 镜内FOV/基础FOV 的比例缩放,基础 FOV 改变后仍保持一致的
+	# 镜内实际手感(12°镜 ≈ 0.16×);普通瞄具维持原 BF 手感曲线。
+	if g != null and g.def.scope:
+		var base_fov: float = float(G.settings.get("fov", 75.0))
+		var scope_fov: float = g.scope_fov()
+		aim_mult = clampf(tan(deg_to_rad(scope_fov) * 0.5) / maxf(tan(deg_to_rad(base_fov) * 0.5), 0.01), 0.08, 0.6)
+	var sens = 0.0022 * G.settings.sensitivity * lerpf(1.0, aim_mult, ads)
 	yaw -= dx * sens
 	pitch -= dy * sens
 	pitch = clampf(pitch, -1.45, 1.45)
@@ -305,7 +326,9 @@ func spot_enemy() -> void:
 	if spot_cd > 0:
 		return
 	spot_cd = 1.5
-	var dir: Vector3 = -G.camera.global_transform.basis.z
+	var g := gun()
+	var aim: Basis = g.aim_basis() if g != null else G.camera.global_transform.basis
+	var dir: Vector3 = -aim.z
 	var best = null
 	var best_ang := 0.06
 	for b in G.bots:
@@ -351,7 +374,6 @@ var _nade_arming := false
 var _nade_hold := 0.0
 var _nade_vm: Node3D = null      # 手雷视角模型(vm_camera 层)
 var _nade_vm_t := -1.0           # 抛掷动画计时(>=0 播放中)
-var _nade_vm_tw: Tween = null
 var _veh_recruit_t := 0.0          # 征召炮手节流计时
 var _veh_recruit_notified := false # 已提示过队友响应
 
@@ -360,7 +382,7 @@ func _ensure_nade_vm() -> void:
 	if _nade_vm != null and is_instance_valid(_nade_vm):
 		return
 	_nade_vm = Node3D.new()
-	var body := MeshInstance3D.new()
+	var nade_body := MeshInstance3D.new()
 	var bm := CylinderMesh.new()
 	bm.top_radius = 0.032
 	bm.bottom_radius = 0.032
@@ -369,10 +391,10 @@ func _ensure_nade_vm() -> void:
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(0.3, 0.35, 0.2)
 	mat.roughness = 0.6
-	body.mesh = bm
-	body.material_override = mat
-	body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_nade_vm.add_child(body)
+	nade_body.mesh = bm
+	nade_body.material_override = mat
+	nade_body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_nade_vm.add_child(nade_body)
 	var fuse := MeshInstance3D.new()
 	var fm := CylinderMesh.new()
 	fm.top_radius = 0.006
@@ -389,6 +411,15 @@ func _ensure_nade_vm() -> void:
 	G.vm_camera.add_child(_nade_vm)
 
 
+## 手雷视角模型没有自身透明度属性(Node3D),透明度统一写到子级 GeometryInstance3D.transparency。
+func _set_nade_vm_alpha(a: float) -> void:
+	if _nade_vm == null or not is_instance_valid(_nade_vm):
+		return
+	for ch in _nade_vm.get_children():
+		if ch is GeometryInstance3D:
+			(ch as GeometryInstance3D).transparency = 1.0 - a
+
+
 func _nade_force() -> float:
 	return 0.4 + 0.6 * clampf(_nade_hold / 1.6, 0.0, 1.0)
 
@@ -403,11 +434,11 @@ func _update_nade_vm(dt: float) -> void:
 		var k := clampf(_nade_vm_t / 0.32, 0.0, 1.0)
 		_nade_vm.position = Vector3(0.3 - 0.25 * k, -0.1 + 0.05 * k, -0.3 - 0.35 * k)
 		_nade_vm.rotation = Vector3(0.2, k * 4.5, 0.15)
-		_nade_vm.modulate.a = 1.0 - k
+		_set_nade_vm_alpha(1.0 - k)
 		if _nade_vm_t >= 0.32:
 			_nade_vm_t = -1.0
 			_nade_vm.visible = false
-			_nade_vm.modulate.a = 1.0
+			_set_nade_vm_alpha(1.0)
 			if g != null and g.group != null and is_instance_valid(g.group):
 				g.group.visible = true   # 枪收回恢复
 		return
@@ -419,7 +450,7 @@ func _update_nade_vm(dt: float) -> void:
 		_nade_vm.visible = true
 		_nade_vm.position = Vector3(0.3, -0.1 + 0.12 * t, -0.3)
 		_nade_vm.rotation = Vector3(0.2, -0.5, 0.1)
-		_nade_vm.modulate.a = 1.0
+		_set_nade_vm_alpha(1.0)
 	else:
 		if _nade_vm.visible:
 			_nade_vm.visible = false
@@ -747,12 +778,16 @@ func update_vehicle(dt: float) -> void:
 		if _veh_recruit_t <= 0:
 			_veh_recruit_t = 3.0
 			_call_gunner_crew(v)
-	# FOV:载具第一人称 86°,炮镜缩放 0.7×;吉普副驾驶持枪开镜按武器 zoom_fov 缩放
+	# FOV:载具第一人称 86°,炮镜缩放 0.7×;吉普副驾驶持枪开镜按武器 zoom_fov 缩放,
+	# 高倍率狙击镜例外:主相机保持正常 FOV,镜内倍率由 OpticScopeSystem 独立渲染。
 	var fov_target: float = VehicleCameraController.FP_FOV
 	if _veh_scope:
 		fov_target = VehicleCameraController.FP_FOV * 0.7
 	elif _passenger_gun and gun() != null:
-		fov_target = lerpf(VehicleCameraController.FP_FOV, gun().def.zoom_fov, gun().ads_amount)
+		if gun().scope_sight():
+			fov_target = VehicleCameraController.FP_FOV
+		else:
+			fov_target = lerpf(VehicleCameraController.FP_FOV, gun().def.zoom_fov, gun().ads_amount)
 	if absf(cam.fov - fov_target) > 0.05:
 		cam.fov = Utils.damp(cam.fov, fov_target, 10, dt)
 
@@ -1170,11 +1205,16 @@ func update_player(dt: float) -> void:
 	# 位置 = 眼位 + 相机局部空间偏移;偏移随相机 basis 旋转,保证与屏幕上下左右一致
 	var cam_base := Vector3(pos.x, pos.y + eye_height, pos.z)
 	cam.global_position = cam_base + cam.global_transform.basis * motion_pos
-	# FOV:冲刺 +,滑铲瞬时冲击(随滑铲进程衰减),开镜全屏向 zoom_fov 缩小放大
-	# 所有武器统一:主相机 FOV 从 base_fov 向 def.zoom_fov 过渡(狙击 awm 12/m24 13/svd 14
-	# 全屏放大,2D 镜罩接管画面;普通武器 55 机瞄略缩),红点/全息改装近无放大(78)
+	# FOV:冲刺 +,滑铲瞬时冲击(随滑铲进程衰减)。
+	# 普通武器继续原有全屏 ADS 缩放(55 机瞄 / 50 红点 / 28 低倍镜);
+	# 高倍率狙击镜主相机只做轻微镜外缩放(约 -8°),避免夸张数字放大,
+	# 镜内高倍率视野由 OpticScopeSystem 独立相机渲染。
 	var base_fov: float = G.settings.fov + sprint_amount * 6 + (4 if tac_sprint > 0 else 0) + 7.0 * clampf(slide_t / 0.7, 0.0, 1.0)
-	var target_fov := lerpf(base_fov, g.def.zoom_fov, g.ads_amount)
+	var target_fov: float
+	if g.scope_sight():
+		target_fov = lerpf(base_fov, maxf(base_fov - 8.0, 55.0), g.ads_amount)
+	else:
+		target_fov = lerpf(base_fov, g.def.zoom_fov, g.ads_amount)
 	if absf(cam.fov - target_fov) > 0.05:
 		cam.fov = Utils.damp(cam.fov, target_fov, 18, dt)
 

@@ -143,7 +143,7 @@ func _capture_rig() -> void:
 	if right_hand != null:
 		right_base = right_hand.position
 		right_rot_base = right_hand.rotation
-	hand_pocket = _g()._hand_l2
+	hand_pocket = _g().hand_l2
 	hand_grip_anchor = _mag_grip_pos(mag_base)
 	# 插入路径起点必须在首次换弹前就绪:FETCH 阶段会先读取 insert_start,
 	# 若等 INSERT 阶段才赋值,首轮换弹会从原点附近瞬移到弹匣井下方(弹匣/手抽搐)。
@@ -343,15 +343,15 @@ func _start_mag() -> void:
 	var weights := weights_raw.duplicate()
 	if weights.is_empty():
 		weights = [0.16, 0.2, 0.32, 0.18, 0.14]
-	var phase_names: Array = ["prepare", "remove", "fetch", "insert", "recover"]
+	var names: Array = ["prepare", "remove", "fetch", "insert", "recover"]
 	if not tac and String(cfg.get("chamber_style", "pull")) != "none":
-		phase_names.insert(4, "chamber")
+		names.insert(4, "chamber")
 	# 防御:配置错误时补权重
-	while weights.size() < phase_names.size():
+	while weights.size() < names.size():
 		weights.append(0.1)
-	while weights.size() > phase_names.size():
+	while weights.size() > names.size():
 		weights.remove_at(weights.size() - 1)
-	_build_phases(phase_names, weights, base_time)
+	_build_phases(names, weights, base_time)
 	# 栓动狙刚开火后的拉栓循环先收尾,再开始卸弹;右手跟栓,左手保持护木
 	if String(cfg.get("chamber_style", "pull")) == "bolt_cycle" and _g().bolt_t > 0.0:
 		_bolt_wait = maxf(0.0, 0.85 - _g().bolt_t)
@@ -431,7 +431,7 @@ func _next_stage() -> void:
 	if _g().def.pellets > 1:
 		var tube_idx := stage + 1
 		if tube_idx < phase_names.size():
-			stage = tube_idx
+			stage = (tube_idx as Stage)
 			stage_time = 0.0
 			stage_dur = float(phase_durs[tube_idx])
 			stage_p = 0.0
@@ -443,7 +443,7 @@ func _next_stage() -> void:
 	if idx >= phase_names.size():
 		_finish_reload()
 		return
-	stage = idx
+	stage = (idx as Stage)
 	stage_time = 0.0
 	stage_dur = float(phase_durs[idx])
 	stage_p = 0.0
@@ -486,7 +486,7 @@ func _on_stage_enter(idx: int) -> void:
 			pass
 
 
-func _update_mag_reload(dt: float, env: float) -> void:
+func _update_mag_reload(dt: float, _env: float) -> void:
 	# 注意:战术换弹的 phase_names 没有 chamber,阶段索引不能直接当 Stage 枚举用,
 	# 必须按阶段名分发,否则战术换弹会把第 4 阶段误判成 CHAMBER 并触发拉栓。
 	if stage >= phase_names.size():
@@ -521,7 +521,7 @@ func _tube_stage_from_idx(idx: int) -> void:
 		tube_stage = TubeStage.RETURN
 
 
-func _update_tube(dt: float, env: float) -> void:
+func _update_tube(dt: float, _env: float) -> void:
 	_tube_stage_from_idx(stage)
 	_update_tube_hand(dt)
 	if shell_mesh != null:
@@ -536,7 +536,7 @@ func _update_tube(dt: float, env: float) -> void:
 
 
 func _tube_next_cycle() -> void:
-	stage = 0
+	stage = (0 as Stage)
 	stage_time = 0.0
 	stage_p = 0.0
 	stage_dur = float(phase_durs[0]) if phase_durs.size() > 0 else 0.2
@@ -547,7 +547,7 @@ func _tube_next_cycle() -> void:
 		shell_mesh.visible = false
 
 
-func _update_tube_hand(dt: float) -> void:
+func _update_tube_hand(_dt: float) -> void:
 	if left_hand == null:
 		return
 	var port: Vector3 = _g()._hand_l1 if _g()._hand_l1 != Vector3.ZERO else Vector3(0.0, -0.05, 0.14)
@@ -687,12 +687,12 @@ func _update_mag_fetch() -> void:
 		return
 	var p := stage_p
 	var pocket: Vector3 = _chest_pocket()
-	var start := hand_after_remove
+	var fetch_start := hand_after_remove
 	if p < 0.42:
 		# 旧弹匣脱手后手收回胸口/屏外,随后从胸口取出新弹匣
 		var e := _ez(p / 0.42)
 		var arc := sin(e * PI) * 0.07
-		left_hand.position = start.lerp(pocket, e) + Vector3(-arc, 0.0, -arc * 0.5)
+		left_hand.position = fetch_start.lerp(pocket, e) + Vector3(-arc, 0.0, -arc * 0.5)
 		if mag != null:
 			mag.visible = false
 	else:
@@ -1039,10 +1039,10 @@ func _update_camera(env: float, dt: float) -> void:
 	# 持续目标接近 0:换弹期间镜头有极轻微呼吸式跟随,结束后自动归零
 	var tp := sin(time * freq * TAU) * sway * env
 	var ty := cos(time * freq * 0.61 * TAU + 0.5) * sway * 0.7 * env
-	var tr := sin(time * freq * 0.43 * TAU + 1.1) * sway * 0.35 * env
+	var roll_target := sin(time * freq * 0.43 * TAU + 1.1) * sway * 0.35 * env
 	player.reload_cam_pitch = Utils.damp(player.reload_cam_pitch, tp, damp, dt)
 	player.reload_cam_yaw = Utils.damp(player.reload_cam_yaw, ty, damp, dt)
-	player.reload_cam_roll = Utils.damp(player.reload_cam_roll, tr, damp, dt)
+	player.reload_cam_roll = Utils.damp(player.reload_cam_roll, roll_target, damp, dt)
 
 
 func _camera_kick(amount: float, yaw_amount: float) -> void:
@@ -1152,10 +1152,10 @@ func _mag_insert_start() -> Dictionary:
 
 
 func _mag_insert_pose(p: float) -> Dictionary:
-	var start := _mag_insert_start()
+	var insert_pose := _mag_insert_start()
 	var e := _ez(p)
-	var pos: Vector3 = start.get("pos", mag_base)
-	var rot: Vector3 = start.get("rot", Vector3.ZERO)
+	var pos: Vector3 = insert_pose.get("pos", mag_base)
+	var rot: Vector3 = insert_pose.get("rot", Vector3.ZERO)
 	pos = pos.lerp(mag_base, e)
 	rot *= 1.0 - e
 	return { "pos": pos, "rot": rot }
