@@ -147,6 +147,7 @@ func _ready() -> void:
 	_camera.fov = G.settings.fov
 	_camera.near = 0.08
 	_camera.far = 900
+	_camera.cull_mask = 0xFFFFF   # 主相机渲染全部视觉层(第一人称身体在 layer 2)
 	_camera.current = true
 	add_child(_camera)
 	G.camera = _camera
@@ -217,7 +218,7 @@ func _ready() -> void:
 	fxaa_layer.add_child(_fxaa_rect)
 	# ---- PCSS 阴影软化(自写后处理:屏幕空间 PCF 边缘软化,层 3.5,在 FXAA 之下) ----
 	var pcss_layer := CanvasLayer.new()
-	pcss_layer.layer = 3.5
+	pcss_layer.layer = int(3.5)
 	add_child(pcss_layer)
 	var pcss_rect := ColorRect.new()
 	pcss_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -233,7 +234,7 @@ func _ready() -> void:
 		RenderingServer.directional_shadow_atlas_set_size(4096, false)
 	# ---- 电影级后期(自定义着色器;层 4.5:3D/FXAA 之上,HUD(5) 之下,设置可开关) ----
 	var cine_layer := CanvasLayer.new()
-	cine_layer.layer = 4.5
+	cine_layer.layer = int(4.5)
 	add_child(cine_layer)
 	_cine_rect = ColorRect.new()
 	_cine_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -266,6 +267,10 @@ func _ready() -> void:
 	var pl := Player.new()
 	add_child(pl)
 	G.player = pl
+	# ---- 高倍率狙击镜 PIP 渲染器(独立 Optic Scope Camera + 圆形 Render Target 合成) ----
+	var scope_sys = load("res://src/player/optic_scope.gd").new()
+	add_child(scope_sys)
+	G.scope = scope_sys
 	# ---- 实时 3D 战场部署系统(死亡后高空观察部署;征服/突破启用) ----
 	var dep := BattleDeploymentManager.new()
 	add_child(dep)
@@ -433,6 +438,65 @@ func _ready() -> void:
 			G.player.gun_index = 0
 			G.player.gun().equip()
 		print("[TEST] 已切换武器: ", gid)
+	# 全武器 ADS 互斥冒烟测试:--test-scope-all(配合 --test-play)
+	# 逐把装配所有武器并强制满 ADS,验证:高倍镜启用 PIP 且不隐藏枪身/主相机不缩放,
+	# 普通枪/红点/全息/低倍镜绝不误启 PIP,各枪 ScopeEye/Reticle 构建无缺件。
+	if ua.has("--test-scope-all"):
+		await get_tree().create_timer(1.0).timeout
+		var wids: Array = WeaponsData.W().keys()
+		var fails: Array = []
+		var scope_ok := 0
+		var normal_ok := 0
+		for wid in wids:
+			var old = G.player.gun()
+			var ng = Gun.new(String(wid), G.player)
+			ng.draw_t = 1.0
+			if old != null and old.group != null and is_instance_valid(old.group):
+				G.vm_camera.remove_child(old.group)
+				old.group.queue_free()
+			G.player.guns[G.player.gun_index] = ng
+			G.vm_camera.add_child(ng.group)
+			ng.equip()
+			G.player.gun_index = clampi(G.player.gun_index, 0, G.player.guns.size() - 1)
+			Input.action_press("ads")
+			ng.ads_amount = 1.0
+			await get_tree().create_timer(0.18).timeout
+			await get_tree().process_frame
+			var ng2 = G.player.gun()
+			var ok := true
+			var reason := ""
+			if ng2.def.scope:
+				if G.scope == null or not G.scope.active:
+					ok = false
+					reason = "scope_pip_inactive"
+				elif not ng2.group.visible:
+					ok = false
+					reason = "gun_hidden"
+				else:
+					var eye: Node3D = ng2.group.get_meta("scope_eye", null)
+					if eye == null or not is_instance_valid(eye) or not eye.is_visible_in_tree():
+						ok = false
+						reason = "missing_scope_eye"
+				if ok:
+					scope_ok += 1
+			else:
+				if G.scope != null and G.scope.active:
+					ok = false
+					reason = "pip_should_be_off"
+				else:
+					normal_ok += 1
+			if not ok:
+				fails.append(String(wid) + ":" + reason)
+				push_error("[SCOPE-ALL] %s failed: %s" % [wid, reason])
+			else:
+				print("[SCOPE-ALL] ok %s scope=%s fov=%.1f" % [wid, ng2.def.scope, G.camera.fov])
+			Input.action_release("ads")
+			ng2.ads_amount = 0.0
+			await get_tree().process_frame
+		print("[SCOPE-ALL] done weapons=%d scope_ok=%d normal_ok=%d fails=%d %s" % [
+			wids.size(), scope_ok, normal_ok, fails.size(), str(fails)])
+		get_tree().quit()
+		return
 	# [8/10] 车内视角诊断:--test-tank [gunner|driver] 自动进入最近坦克(验证内构/乘员位/炮镜)
 	if ua.has("--test-tank"):
 		var tt_crew: int = 1 if (ua.size() > ua.find("--test-tank") + 1 and ua[ua.find("--test-tank") + 1] == "gunner") else 0
@@ -509,6 +573,11 @@ func _ready() -> void:
 			print("[ADS-CAP] gun=%s optic=%s scope=%s zoom_fov=%.1f fov=%.1f ads=%.3f base_fov=%.1f" % [
 				gid, opt_arg, g2.def.scope, g2.def.zoom_fov, G.camera.fov, g2.ads_amount,
 				G.settings.fov + G.player.sprint_amount * 6 + (4 if G.player.tac_sprint > 0 else 0) + 7.0 * clampf(G.player.slide_t / 0.7, 0.0, 1.0)])
+			if g2.def.scope:
+				print("[ADS-CAP] scope_fov=%.2f scope_mag=%.2f" % [g2.scope_fov(), float(g2.def.scope_mag)])
+			print("[ADS-CAP] viewport=root_rect=%s vm_viewport_size=%s vm_visible_rect=%s root_tex=%s" % [get_viewport().get_visible_rect().size, G.vm_viewport.size, G.vm_viewport.get_visible_rect().size, get_viewport().get_texture().get_size()])
+			if G.scope != null and G.scope.has_method("debug_state"):
+				print("[ADS-CAP] scope_pip=", G.scope.debug_state())
 			# 曝光诊断:主世界/主相机的自动曝光状态与曝光参数
 			var wa: CameraAttributes = G.world_env.camera_attributes if G.world_env != null else null
 			var ma: CameraAttributes = G.camera.attributes if G.camera != null else null
@@ -523,6 +592,10 @@ func _ready() -> void:
 				var cap_path := "user://ads_%s.png" % opt_arg
 				G.vm_viewport.get_texture().get_image().save_png(cap_path)
 				print("[ADS-CAP] saved ", cap_path)
+				if G.scope != null and G.scope.active:
+					var scope_cap := "user://ads_%s_scopeview.png" % opt_arg
+					G.scope.vp.get_texture().get_image().save_png(scope_cap)
+					print("[ADS-CAP] saved ", scope_cap)
 				var cap_full := "user://ads_%s_full.png" % opt_arg
 				# 强制刷新 HUD 准星后截图(红点/全息镜内准星状态最新)
 				if G.hud != null:
@@ -872,7 +945,7 @@ func _ready() -> void:
 		G.player.spawn_protect = 999.0
 		G.player.sprint_toggled = false
 		var mot := G.player.motion as FirstPersonMotionSystem
-		var log := func(tag: String) -> void:
+		var log_motion := func(tag: String) -> void:
 			if mot == null:
 				print("[MOTION] ", tag, " motion=null")
 				return
@@ -897,49 +970,49 @@ func _ready() -> void:
 			Input.parse_input_event(ev2)
 			await get_tree().process_frame
 		await get_tree().create_timer(1.2).timeout
-		log.call("idle")
+		log_motion.call("idle")
 		# 1) Walk:不切 sprint,按住 W 0.9s
 		Input.action_press("move_forward")
 		await get_tree().create_timer(0.9).timeout
-		log.call("walk")
+		log_motion.call("walk")
 		# 2) Run -> Sprint:sprint 切换为 toggle,速度平滑爬升期间经过 run 状态
 		await tap.call("sprint")
 		await get_tree().create_timer(0.12).timeout
-		log.call("run")
+		log_motion.call("run")
 		await get_tree().create_timer(0.78).timeout
-		log.call("sprint")
+		log_motion.call("sprint")
 		# 3) Hard Stop:释放 W,让武器前冲并回弹;采样停止瞬间与稳定后
 		Input.action_release("move_forward")
 		await get_tree().create_timer(0.10).timeout
-		log.call("stop")
+		log_motion.call("stop")
 		await get_tree().create_timer(0.75).timeout
-		log.call("stop_settle")
+		log_motion.call("stop_settle")
 		# 4) Turn:注入快速鼠标 Delta(等价于快速右转),Sway 应按速度非线性增大
 		G.input_sys.mouse_dx += 420.0
 		G.input_sys.mouse_dy -= 30.0
 		await get_tree().create_timer(0.08).timeout
-		log.call("turn_peak")
+		log_motion.call("turn_peak")
 		await get_tree().create_timer(0.55).timeout
-		log.call("turn_settle")
+		log_motion.call("turn_settle")
 		# 5) ADS:开镜后 Bob/Sway 大幅降低,呼吸保留
 		Input.action_press("ads")
 		await get_tree().create_timer(0.85).timeout
-		log.call("ads")
+		log_motion.call("ads")
 		# 6) Aim Walk:开镜中移动,程序层必须仍保留轻微节奏
 		Input.action_press("move_forward")
 		await get_tree().create_timer(0.8).timeout
-		log.call("aim_walk")
+		log_motion.call("aim_walk")
 		Input.action_release("move_forward")
 		Input.action_release("ads")
 		await get_tree().create_timer(0.6).timeout
 		# 7) Jump -> Landing:真实跳跃输入,随后落地冲量衰减
 		await tap.call("jump")
 		await get_tree().create_timer(0.10).timeout
-		log.call("jump")
+		log_motion.call("jump")
 		await get_tree().create_timer(0.70).timeout
-		log.call("landing")
+		log_motion.call("landing")
 		await get_tree().create_timer(1.10).timeout
-		log.call("landing_settle")
+		log_motion.call("landing_settle")
 		print("[MOTION] 运动链路测试完成")
 	if ua.has("--test-end"):
 		await get_tree().create_timer(4.0).timeout
@@ -1039,8 +1112,8 @@ func _ready() -> void:
 				var mat := c.material_override as StandardMaterial3D
 				# material_override 可为空(地面网格走自身材质):此时仅报 UV,跳过贴图读取防 Nil 报错
 				print("[GC] UV范围: ", minuv, " → ", maxuv,
-					" | 贴图: ", mat.albedo_texture if mat != null else "(无 override 材质)",
-					" | 反照色: ", mat.albedo_color if mat != null else "N/A")
+					" | 贴图: ", str(mat.albedo_texture) if mat != null else "(无 override 材质)",
+					" | 反照色: ", str(mat.albedo_color) if mat != null else "N/A")
 				if mat != null and mat.albedo_texture != null:
 					var p := "user://dbg_runtime_groundtex.png"
 					mat.albedo_texture.get_image().save_png(p)
@@ -1394,7 +1467,7 @@ func apply_graphics() -> void:
 		G.world_env.environment.glow_enabled = false
 	# 3A 画质项(桌面):MSAA / SSR / SSIL / Glow / 电影后期
 	# [8/10] SDFGI 已移除(阴影过黑、对比度过高),恒关闭
-	vp.msaa_3d = int(s.get("msaa", 0))
+	vp.msaa_3d = (int(s.get("msaa", 0)) as Viewport.MSAA)
 	if not OS.has_feature("web") and G.world_env != null and G.world_env.environment != null:
 		var env: Environment = G.world_env.environment
 		env.sdfgi_enabled = false
@@ -1414,6 +1487,8 @@ func apply_graphics() -> void:
 	vp.use_taa = GraphicsQuality.current_level >= GraphicsQuality.Level.HIGH
 	if _fxaa_rect != null:
 		_fxaa_rect.visible = s.fxaa
+	if G.scope != null and G.scope.has_method("apply_graphics"):
+		G.scope.apply_graphics()
 	# 垂直同步(0=关 1=开 2=自适应;headless/Web 无操作窗口时跳过)
 	if not OS.has_feature("web") and DisplayServer.get_name() != "headless":
 		var vsync: int = int(s.get("vsync", 1))
@@ -1440,7 +1515,7 @@ func _apply_dq() -> void:
 			GraphicsQuality.apply_level_strengths()
 		return
 	if vp != null:
-		vp.msaa_3d = int(s.get("msaa", 0)) if _dq_level < 2 else 0
+		vp.msaa_3d = ((int(s.get("msaa", 0)) if _dq_level < 2 else 0) as Viewport.MSAA)
 	if G.world_env != null and G.world_env.environment != null:
 		var env: Environment = G.world_env.environment
 		env.ssr_enabled = bool(s.get("ssr", false)) if _dq_level < 1 else false
@@ -1775,7 +1850,7 @@ func _process(dt_raw: float) -> void:
 		_bench_dc.append(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME))
 		_bench_prims.append(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME))
 		_bench_objs.append(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_OBJECTS_IN_FRAME))
-		_bench_nodes.append(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+		_bench_nodes.append(int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT)))
 		_bench_mem.append(OS.get_static_memory_usage() / 1048576.0)
 		_bench_n += 1
 		if _bench_n % 300 == 0:
@@ -1827,17 +1902,17 @@ func _build_perf_monitor() -> void:
 
 
 ## [PERF] 子系统计时累加(--bench-sys)
-func _bsys_tick(name: String, t0: int) -> void:
+func _bsys_tick(sys_name: String, t0: int) -> void:
 	if not _bsys_on:
 		return
-	var d: Dictionary = _bsys.get(name, {})
+	var d: Dictionary = _bsys.get(sys_name, {})
 	if d.is_empty():
 		d = { "t": 0.0, "max": 0.0, "n": 0 }
 	var us := float(Time.get_ticks_usec() - t0)
 	d["t"] += us
 	d["max"] = maxf(float(d["max"]), us)
 	d["n"] = int(d["n"]) + 1
-	_bsys[name] = d
+	_bsys[sys_name] = d
 
 
 ## [PERF] 子系统计时汇报(--bench-sys;每 900 帧打印 avg/max)
@@ -1848,9 +1923,9 @@ func _bsys_report() -> void:
 	if _bsys_n < 900:
 		return
 	var parts: Array = []
-	for name in _bsys:
-		var d: Dictionary = _bsys[name]
-		parts.append("%s=%.0f/%.0fus" % [name, d["t"] / maxf(float(d["n"]), 1.0), d["max"]])
+	for key in _bsys:
+		var d: Dictionary = _bsys[key]
+		parts.append("%s=%.0f/%.0fus" % [key, d["t"] / maxf(float(d["n"]), 1.0), d["max"]])
 	print("[BENCH-SYS] " + "  ".join(parts))
 	_bsys.clear()
 	_bsys_n = 0

@@ -327,6 +327,9 @@ func _shoot_at(p_target, dt: float, w: Dictionary, rate_mul := 1.0) -> void:
 	fire_t -= dt
 	if fire_t > 0:
 		return
+	# 目标可能在开火瞬间被摧毁/清空;空引用保护,避免 Nil.get("pos") 崩溃。
+	if p_target == null or (p_target is Object and not is_instance_valid(p_target)):
+		return
 	fire_t = (0.16 + randf() * 0.08) * rate_mul
 	var tpos: Vector3 = p_target.get("pos")
 	var aim := Vector3(tpos.x, tpos.y + 1.1, tpos.z)
@@ -675,11 +678,12 @@ func update_aircraft(dt: float) -> void:
 	pos.x = clampf(pos.x, -B, B)
 	pos.z = clampf(pos.z, -B, B)
 	# 开火:攻击窗口制(50-140m 且朝向目标),受伤时攻击间隔×2;火箭弹保持
-	if can_engage:
+	if can_engage and target != null:
 		_shoot_at(target, dt, { "name": "机载机炮", "cn": "机载机炮", "kind": "lmg", "damage": 8.0,
 			"head_mult": 1.2, "rpm": 600.0, "rng": [80.0, 160.0, 0.5], "tracer": Color.html("#ffe8a0") },
 			2.0 if injured else 1.0)
-		if rocket_t <= 0:
+		if rocket_t <= 0 and target != null and target is Object and is_instance_valid(target) \
+				and target.get("alive") != false:
 			rocket_t = 5.5
 			_fire_rockets(tpos_e, 2)
 	# 同步模型(转弯滚转 + 失速抖动;俯仰随升降/空速)

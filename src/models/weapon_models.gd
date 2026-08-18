@@ -65,6 +65,21 @@ static func MAT() -> Dictionary:
 		lamp.emission = Color(0.8, 0.85, 0.95)
 		lamp.emission_energy_multiplier = 1.6
 		_mat["lamp_white"] = lamp
+		# 狙击镜 3D 玻璃分划:非受光纯色,黑线 + 白描边,开镜时始终可见
+		var ret_dark := StandardMaterial3D.new()
+		ret_dark.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		ret_dark.albedo_color = Color(0.025, 0.03, 0.035, 1.0)
+		_mat["ret_dark"] = ret_dark
+		var ret_light := StandardMaterial3D.new()
+		ret_light.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		ret_light.albedo_color = Color(0.82, 0.85, 0.88, 1.0)
+		_mat["ret_light"] = ret_light
+		# 高倍镜镜筒/目镜圈:非 ADS 时全黑实体;ADS 时镜筒体隐藏,只保留细分划与 PIP 圆窗
+		var scope_black := StandardMaterial3D.new()
+		scope_black.albedo_color = Color(0.018, 0.02, 0.024, 1.0)
+		scope_black.roughness = 0.55
+		scope_black.metallic = 0.35
+		_mat["scope_black"] = scope_black
 	return _mat
 
 
@@ -106,6 +121,28 @@ static func cyl(r1: float, r2: float, length: float, x: float, y: float, z: floa
 	elif axis == "x":
 		mi.rotation.z = PI / 2.0
 	# axis == "y":CylinderMesh 默认沿 y 轴,无需旋转
+	mi.position = Vector3(x, y, z)
+	return mi
+
+
+## 两端开口的镜筒圆柱(无顶/底盖):保证开镜时视线能真正穿过镜筒看到目镜/PIP 画面,
+## 而不是被 CylinderMesh 的端盖挡成一块实心圆片。
+static func cyl_open(r1: float, r2: float, length: float, x: float, y: float, z: float,
+		mat_name := "dark", axis := "z") -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = r1
+	cm.bottom_radius = r2
+	cm.height = length
+	cm.radial_segments = 20
+	cm.cap_top = false
+	cm.cap_bottom = false
+	mi.mesh = cm
+	mi.material_override = MAT()[mat_name]
+	if axis == "z":
+		mi.rotation.x = PI / 2.0
+	elif axis == "x":
+		mi.rotation.z = PI / 2.0
 	mi.position = Vector3(x, y, z)
 	return mi
 
@@ -254,21 +291,122 @@ static func _irons(g: Node3D, sy: float, fz: float, rz: float, ph: float, barrel
 	ir.add_child(er)
 
 
+## 狙击镜 3D 分划(绑定在镜体目镜节点下,随枪械 Sway/呼吸/后坐同步运动)。
+## 采用黑线+白描边两层薄片,保证明亮天空与暗色目标前都清晰可见。
+static func _scope_reticle(eye: Node3D) -> void:
+	var ret := Node3D.new()
+	ret.name = "RetCross"
+	var half_len := 0.0165
+	var t := 0.00024                              # 细分划:约 4~5px @1080p,不再遮挡目标
+	var dark_mat: StandardMaterial3D = MAT()["ret_dark"]
+	var light_mat: StandardMaterial3D = MAT()["ret_light"]
+	# 完整连续十字:横/竖两条细线直接穿过中心,不留缺口,便于精确瞄准。
+	var lh := box(half_len * 2.0, t * 1.8, t * 1.8, 0, 0, 0.00018, "ret_light")
+	lh.material_override = light_mat
+	ret.add_child(lh)
+	var dh := box(half_len * 2.0, t, t, 0, 0, 0, "ret_dark")
+	dh.material_override = dark_mat
+	ret.add_child(dh)
+	var lv := box(t * 1.8, half_len * 2.0, t * 1.8, 0, 0, 0.00018, "ret_light")
+	lv.material_override = light_mat
+	ret.add_child(lv)
+	var dv := box(t, half_len * 2.0, t, 0, 0, 0, "ret_dark")
+	dv.material_override = dark_mat
+	ret.add_child(dv)
+	eye.add_child(ret)
+
+
 ## 狙击镜:镜筒 + 前后支架(自机匣顶 base_y 托起)+ 半透物镜/目镜;视轴 = y
+## 目镜/3D 分划固定位于枪械局部 z=0.06:ADS 时距眼点约 0.09m,
+## 在 vm_camera 60° FOV 下投影直径约 54% 屏高,镜体边界真实包围镜内 PIP 画面。
 static func _scope(g: Node3D, y: float, z: float, base_y: float) -> void:
 	var s := Node3D.new()
 	s.name = "StockOptic"
 	g.add_child(s)
-	s.add_child(cyl(0.021, 0.024, 0.22, 0, y, z - 0.03, "dark"))      # 镜筒
+	var body := Node3D.new()
+	body.name = "ScopeTubeBody"
+	s.add_child(body)
+	body.add_child(cyl(0.024, 0.030, 0.22, 0, y, z - 0.03, "scope_black"))      # 镜筒(后粗前细,两端封口,非 ADS 完整实体)
 	var mh := (y - 0.021) - base_y
 	if mh < 0.004:
 		mh = 0.004
-	s.add_child(cyl(0.019, 0.019, mh, 0, base_y + mh * 0.5, z + 0.05, "dark"))   # 前支架
-	s.add_child(cyl(0.019, 0.019, mh, 0, base_y + mh * 0.5, z - 0.11, "dark"))   # 后支架
-	s.add_child(cyl(0.03, 0.027, 0.03, 0, y, z - 0.14, "lens"))      # 物镜
-	s.add_child(cyl(0.019, 0.019, 0.01, 0, y, z + 0.085, "lens"))    # 目镜
-	s.add_child(cyl(0.005, 0.005, 0.02, 0, y + 0.03, z - 0.03, "dark", "y"))  # 调节钮
+	body.add_child(cyl(0.019, 0.019, mh, 0, base_y + mh * 0.5, z + 0.05, "dark"))   # 前支架
+	body.add_child(cyl(0.019, 0.019, mh, 0, base_y + mh * 0.5, z - 0.11, "dark"))   # 后支架
+	body.add_child(cyl(0.030, 0.027, 0.03, 0, y, z - 0.14, "scope_black"))    # 物镜(非 ADS 黑实体)
+	body.add_child(cyl(0.005, 0.005, 0.02, 0, y + 0.03, z - 0.03, "dark", "y"))  # 调节钮
+	# 目镜:黑玻璃(非 ADS)/ 高透玻璃(ADS)/ 细黑镜口圈 / 连续细十字分划
+	var eye := Node3D.new()
+	eye.name = "ScopeEye"
+	eye.position = Vector3(0, y, 0.06)
+	s.add_child(eye)
+	eye.add_child(ring(0.0280, 0.0296, 0, 0, -0.0035, "scope_black"))            # 目镜外圈(细)
+	var black_lens := cyl(0.028, 0.028, 0.012, 0, 0, 0, "scope_black")
+	black_lens.name = "ScopeLensBlack"
+	black_lens.position.z = 0.0005
+	eye.add_child(black_lens)
+	var clear_lens := cyl(0.028, 0.028, 0.012, 0, 0, 0, "lens_clear")
+	clear_lens.name = "ScopeLensClear"
+	clear_lens.position.z = -0.0005
+	clear_lens.visible = false
+	eye.add_child(clear_lens)
+	_scope_reticle(eye)
+	var reticle: Node3D = eye.get_node_or_null("RetCross")
+	if reticle != null:
+		reticle.visible = false
+	g.set_meta("scope_eye", eye)
+	g.set_meta("scope_eye_radius", 0.028)
+	g.set_meta("scope_tube", body)
+	g.set_meta("scope_lens_black", black_lens)
+	g.set_meta("scope_lens_clear", clear_lens)
+	g.set_meta("scope_reticle", reticle)
 
+static func _simple_scope(g: Node3D, y: float, zc: float, length: float, base_y: float, tube_r := 0.019) -> void:
+	var s := Node3D.new()
+	s.name = "StockOptic"
+	g.add_child(s)
+	var body := Node3D.new()
+	body.name = "ScopeTubeBody"
+	s.add_child(body)
+	body.add_child(cyl(tube_r, tube_r * 1.35, length, 0, y, zc, "scope_black"))
+	var z_front := zc - length * 0.5
+	var z_rear := zc + length * 0.5
+	# 物镜端收口
+	body.add_child(cyl(tube_r * 1.55, tube_r * 1.2, 0.028, 0, y, z_front - 0.01, "scope_black"))
+	body.add_child(cyl(tube_r * 1.15, tube_r * 1.15, 0.006, 0, y, z_front - 0.024, "scope_black"))
+	# 镜座(与机匣顶 base_y 连接)
+	var mh := (y - tube_r * 1.35) - base_y
+	if mh < 0.004:
+		mh = 0.004
+	body.add_child(cyl(0.018, 0.018, mh, 0, base_y + mh * 0.5, zc + 0.06, "dark"))
+	body.add_child(cyl(0.018, 0.018, mh, 0, base_y + mh * 0.5, zc - 0.10, "dark"))
+	# 目镜端:开口收口喇叭 + 玻璃 + 3D 分划
+	var eye_z := 0.06
+	var cup_len := maxf(0.018, absf(eye_z - z_rear) + 0.018)
+	body.add_child(cyl(tube_r * 1.35, 0.028, cup_len, 0, y, (z_rear + eye_z) * 0.5, "scope_black"))
+	var eye := Node3D.new()
+	eye.name = "ScopeEye"
+	eye.position = Vector3(0, y, eye_z)
+	s.add_child(eye)
+	eye.add_child(ring(0.0280, 0.0296, 0, 0, -0.0035, "scope_black"))
+	var black_lens := cyl(0.028, 0.028, 0.012, 0, 0, 0, "scope_black")
+	black_lens.name = "ScopeLensBlack"
+	black_lens.position.z = 0.0005
+	eye.add_child(black_lens)
+	var clear_lens := cyl(0.028, 0.028, 0.012, 0, 0, 0, "lens_clear")
+	clear_lens.name = "ScopeLensClear"
+	clear_lens.position.z = -0.0005
+	clear_lens.visible = false
+	eye.add_child(clear_lens)
+	_scope_reticle(eye)
+	var reticle: Node3D = eye.get_node_or_null("RetCross")
+	if reticle != null:
+		reticle.visible = false
+	g.set_meta("scope_eye", eye)
+	g.set_meta("scope_eye_radius", 0.028)
+	g.set_meta("scope_tube", body)
+	g.set_meta("scope_lens_black", black_lens)
+	g.set_meta("scope_lens_clear", clear_lens)
+	g.set_meta("scope_reticle", reticle)
 
 ## ============ 各武器构建 ============
 static func _build(id: String, g: Node3D) -> void:
@@ -783,9 +921,7 @@ static func _build(id: String, g: Node3D) -> void:
 			g.add_child(cyl(0.014, 0.016, 0.05, 0, 0.028, -0.72, "dark"))
 			g.add_child(box(0.048, 0.07, 0.3, 0, 0.015, -0.1, "wood"))
 			g.add_child(box(0.04, 0.04, 0.18, 0, 0.05, -0.16, "wood"))
-			var scope_m := cyl(0.018, 0.018, 0.26, 0, 0.094, -0.14, "dark", "z")
-			g.add_child(scope_m)
-			g.add_child(cyl(0.012, 0.012, 0.02, 0, 0.07, -0.14, "dark"))
+			_simple_scope(g, 0.113, -0.14, 0.26, 0.07)
 			g.add_child(_grip(0.04, 0.085, 0.2, 0, -0.003, 0.16, "wood", 0.1))
 			g.add_child(box(0.044, 0.085, 0.02, 0, 0.0, 0.26, "wood"))
 			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.024, 0.04, "wood", 0.4))
@@ -902,9 +1038,7 @@ static func _build(id: String, g: Node3D) -> void:
 			g.add_child(cyl(0.02, 0.022, 0.08, 0, 0.03, -1.0, "dark"))
 			g.add_child(box(0.06, 0.1, 0.42, 0, 0.02, -0.06))
 			g.add_child(box(0.05, 0.035, 0.36, 0, 0.078, -0.14, "dark"))
-			var scope_b := cyl(0.022, 0.022, 0.3, 0, 0.098, -0.12, "dark", "z")
-			g.add_child(scope_b)
-			g.add_child(cyl(0.014, 0.014, 0.02, 0, 0.074, -0.12, "dark"))
+			_simple_scope(g, 0.116, -0.12, 0.3, 0.074, 0.022)
 			g.add_child(_grip(0.048, 0.11, 0.24, 0, -0.008, 0.2, "dark", 0.14))
 			g.add_child(box(0.052, 0.11, 0.02, 0, 0.0, 0.32, "dark"))
 			g.add_child(_grip(0.038, 0.11, 0.05, 0, -0.025, 0.04, "dark", 0.4))
@@ -918,9 +1052,7 @@ static func _build(id: String, g: Node3D) -> void:
 			g.add_child(cyl(0.015, 0.017, 0.05, 0, 0.028, -0.88, "dark"))
 			g.add_child(box(0.048, 0.07, 0.32, 0, 0.015, -0.1, "dark"))
 			g.add_child(box(0.04, 0.045, 0.2, 0, 0.052, -0.18, "dark"))
-			var scope_l := cyl(0.019, 0.019, 0.3, 0, 0.096, -0.15, "dark", "z")
-			g.add_child(scope_l)
-			g.add_child(cyl(0.013, 0.013, 0.02, 0, 0.072, -0.15, "dark"))
+			_simple_scope(g, 0.114, -0.15, 0.3, 0.072)
 			g.add_child(_grip(0.04, 0.085, 0.2, 0, -0.003, 0.16, "dark", 0.1))
 			g.add_child(box(0.044, 0.085, 0.02, 0, 0.0, 0.26, "dark"))
 			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.024, 0.04, "dark", 0.4))
@@ -934,9 +1066,7 @@ static func _build(id: String, g: Node3D) -> void:
 			g.add_child(cyl(0.015, 0.017, 0.05, 0, 0.028, -0.815, "dark"))
 			g.add_child(box(0.05, 0.075, 0.3, 0, 0.015, -0.08, "wood"))
 			g.add_child(box(0.04, 0.05, 0.2, 0, 0.055, -0.16, "wood"))
-			var scope_s := cyl(0.018, 0.018, 0.28, 0, 0.094, -0.13, "dark", "z")
-			g.add_child(scope_s)
-			g.add_child(cyl(0.012, 0.012, 0.02, 0, 0.07, -0.13, "dark"))
+			_simple_scope(g, 0.113, -0.13, 0.28, 0.07)
 			g.add_child(_grip(0.042, 0.09, 0.2, 0, -0.003, 0.16, "wood", 0.1))
 			g.add_child(box(0.046, 0.09, 0.02, 0, 0.0, 0.26, "wood"))
 			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.024, 0.04, "wood", 0.4))
@@ -950,9 +1080,7 @@ static func _build(id: String, g: Node3D) -> void:
 			g.add_child(cyl(0.015, 0.017, 0.05, 0, 0.028, -0.895, "dark"))
 			g.add_child(box(0.048, 0.072, 0.3, 0, 0.015, -0.1, "dark"))
 			g.add_child(box(0.04, 0.042, 0.2, 0, 0.05, -0.18, "dark"))
-			var scope_2 := cyl(0.019, 0.019, 0.3, 0, 0.094, -0.15, "dark", "z")
-			g.add_child(scope_2)
-			g.add_child(cyl(0.013, 0.013, 0.02, 0, 0.07, -0.15, "dark"))
+			_simple_scope(g, 0.115, -0.15, 0.3, 0.07)
 			g.add_child(_grip(0.04, 0.085, 0.2, 0, -0.003, 0.16, "dark", 0.1))
 			g.add_child(box(0.044, 0.085, 0.02, 0, 0.0, 0.26, "dark"))
 			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.024, 0.04, "dark", 0.4))
@@ -1630,9 +1758,9 @@ static func _apply_mods(g: Node3D, id: String, mods: Dictionary) -> void:
 				var st := g.get_node_or_null("StockTrigger")
 				if st != null:
 					st.visible = false
-				var tr := build_mod_trigger(mod_id)
-				tr.position = a
-				g.add_child(tr)
+				var trigger_part := build_mod_trigger(mod_id)
+				trigger_part.position = a
+				g.add_child(trigger_part)
 			"optic":
 				var so := g.get_node_or_null("StockOptic")
 				if so != null:

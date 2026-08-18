@@ -377,7 +377,7 @@ func _input(event: InputEvent) -> void:
 
 
 ## 指针是否悬停于交互 UI 之上(底部装备栏等,交给 GUI 处理)
-func _over_ui(screen_pos: Vector2) -> bool:
+func _over_ui(_screen_pos: Vector2) -> bool:
 	var vp := get_viewport()
 	if vp == null:
 		return false
@@ -400,7 +400,7 @@ func update(dt: float) -> void:
 			c.rotation_order = EULER_ORDER_YXZ
 			c.global_position = cam.pos
 			c.rotation = Vector3(-0.15, _death_yaw, minf(0.5, k * 0.55))
-			c.fov = G.settings.fov if G.settings.has("fov") else 75.0
+			c.fov = float(G.settings.fov) if G.settings.has("fov") else 75.0
 			if k >= 1.0:
 				phase = "rise"
 				_phase_t = 0.0
@@ -416,7 +416,7 @@ func update(dt: float) -> void:
 			c.rotation_order = EULER_ORDER_YXZ
 			c.rotation = Vector3(cam.pitch, cam.yaw, 0)
 			c.rotation.z = lerpf(0.5, 0.0, k)
-			c.fov = G.settings.fov if G.settings.has("fov") else 75.0
+			c.fov = float(G.settings.fov) if G.settings.has("fov") else 75.0
 			if k >= 1.0:
 				phase = "free"
 				_show_ui()
@@ -438,7 +438,7 @@ func update(dt: float) -> void:
 			c.global_position = cam.pos
 			c.rotation_order = EULER_ORDER_YXZ
 			c.rotation = Vector3(cam.pitch, cam.yaw, 0)
-			c.fov = G.settings.fov if G.settings.has("fov") else 75.0
+			c.fov = float(G.settings.fov) if G.settings.has("fov") else 75.0
 			if k >= 0.62 and not _fade_started:
 				_fade_started = true
 				G.hud.fade_to_black(0.42)
@@ -456,7 +456,7 @@ func _apply_camera() -> void:
 	c.global_position = cam.pos
 	c.rotation_order = EULER_ORDER_YXZ
 	c.rotation = Vector3(cam.pitch, cam.yaw, 0)
-	c.fov = G.settings.fov if G.settings.has("fov") else 75.0
+	c.fov = float(G.settings.fov) if G.settings.has("fov") else 75.0
 
 
 ## 悬停检测:鼠标指针最近的部署目标(屏幕空间命中,无需 LOS)

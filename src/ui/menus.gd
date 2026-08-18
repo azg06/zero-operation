@@ -1174,8 +1174,8 @@ func show_end(win: bool) -> void:
 	var kd := "%.2f" % (float(G.stats["kills"]) / maxf(1, float(G.stats["deaths"])))
 	var line2 := ""
 	if is_bt:
-		var sec_done: int = mini(G.bt["sector"], G.bt["total"]) if G.bt != null else 0
-		var total: int = G.bt["total"] if G.bt != null else 3
+		var sec_done: int = int(mini(G.bt["sector"], G.bt["total"])) if G.bt != null else 0
+		var total: int = int(G.bt["total"]) if G.bt != null else 3
 		var att_left: int = maxi(0, int(ceil(G.tickets["us"])))
 		if G.bt_player_side == "att":
 			line2 = "攻陷区域 [b]" + str(sec_done) + "/" + str(total) + "[/b] · 剩余兵力 [b]" + str(att_left) + "[/b] · 用时 [b]" + Utils.fmt_time(G.time) + "[/b]"
@@ -3455,7 +3455,7 @@ func _build_profile() -> void:
 		col.add_child(spacer)
 		var bar := ColorRect.new()
 		bar.color = UiTheme.FRIENDLY if r[0] else UiTheme.ENEMY
-		bar.custom_minimum_size = Vector2(38, maxi(14, int(r[1]) / 2))
+		bar.custom_minimum_size = Vector2(38, maxi(14, int(float(r[1]) / 2.0)))
 		col.add_child(bar)
 	var list_panel := UiTheme.make_panel(0.7)
 	list_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL

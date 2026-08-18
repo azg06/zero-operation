@@ -63,11 +63,11 @@ func _build_ui() -> void:
 	_hint.modulate.a = 0.0
 
 
-func _make_label(text: String, size: int, color: Color) -> Label:
+func _make_label(text: String, font_size: int, color: Color) -> Label:
 	var l := Label.new()
 	l.text = text
 	l.add_theme_font_override("font", _font)
-	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_font_size_override("font_size", font_size)
 	l.add_theme_color_override("font_color", color)
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -82,10 +82,10 @@ func _process(delta: float) -> void:
 	match _phase:
 		0:
 			var k := clampf(_t / FADE_IN, 0.0, 1.0)
-			var ease := 1.0 - pow(1.0 - k, 3.0)
-			_title.modulate.a = ease
-			_title.scale = Vector2.ONE * lerpf(1.08, 1.0, ease)
-			_divider.scale.x = ease
+			var eased := 1.0 - pow(1.0 - k, 3.0)
+			_title.modulate.a = eased
+			_title.scale = Vector2.ONE * lerpf(1.08, 1.0, eased)
+			_divider.scale.x = eased
 			_sub.modulate.a = clampf((_t - 0.25) / 0.55, 0.0, 1.0)
 			_hint.modulate.a = clampf((_t - 0.45) / 0.35, 0.0, 1.0)
 			if _t >= FADE_IN:
@@ -122,3 +122,4 @@ func _go_main() -> void:
 	# 延迟切场景:change_scene_to_file 会 remove_child 当前节点,若在 _ready 阶段
 	# (树仍在挂载子节点)直接调用会报 "Parent node is busy adding/removing children"
 	get_tree().change_scene_to_file.call_deferred(MAIN_SCENE)
+
