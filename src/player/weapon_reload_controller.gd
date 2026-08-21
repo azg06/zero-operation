@@ -570,7 +570,7 @@ func _next_stage() -> void:
 	if _g().def.pellets > 1:
 		var tube_idx := stage + 1
 		if tube_idx < phase_names.size():
-			stage = tube_idx
+			stage = (tube_idx as Stage)
 			stage_time = 0.0
 			stage_dur = float(phase_durs[tube_idx])
 			stage_p = 0.0
@@ -582,7 +582,7 @@ func _next_stage() -> void:
 	if idx >= phase_names.size():
 		_finish_reload()
 		return
-	stage = idx
+	stage = (idx as Stage)
 	stage_time = 0.0
 	stage_dur = float(phase_durs[idx])
 	stage_p = 0.0
@@ -776,7 +776,7 @@ func _update_tube(dt: float, _env: float) -> void:
 
 
 func _tube_next_cycle() -> void:
-	stage = 0
+	stage = (0 as Stage)
 	stage_time = 0.0
 	stage_p = 0.0
 	stage_dur = float(phase_durs[0]) if phase_durs.size() > 0 else 0.2
