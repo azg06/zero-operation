@@ -5122,7 +5122,9 @@ static func _build_base_camp(wg: Node3D, add_collider: Callable, half: float, si
 		wg.add_child(g)
 		add_collider.call(x, 0, z, 0.6, 4.5, 0.6)
 	# ---- 布局(北/南基地:帐篷两侧、后墙贴地图边缘、载具出生簇(x∈[-32..18])保持清空) ----
-	var back_z: float = bz - 7.0    # 靠地图边缘一侧(后墙多在地图钳制线外,纯视觉)
+	# 后墙必须放在“出生点靠地图边界的一侧”,不能放在出生点与战场之间,
+	# 否则会把整队 NPC 卡在墙与地图边缘之间(敌人全部堆在出生点)。
+	var back_z: float = bz + 7.0 if side > 0 else bz - 7.0
 	tent.call(-24.0, bz - 3.0, PI if side < 0 else 0.0)
 	tent.call(24.0, bz - 3.0, PI if side < 0 else 0.0)
 	sandbag_wall.call(0.0, back_z, 44.0, 0.0)            # 后墙(背靠地图边缘)

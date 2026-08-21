@@ -14,10 +14,10 @@ var selected_class := "assault"
 var br_selected_class := "assault"   # 任务1:BR 兵种选择屏所选兵种(GameMode_BR 开局读取)
 var _br_class_cards: Dictionary = {} # 任务1:cid -> PanelContainer(选中高亮)
 var loadout := {
-	"assault": { "primary": "m4", "secondary": "m1911", "shotgun": "m1014" },
-	"engineer": { "primary": "m249", "secondary": "m1911" },
-	"support": { "primary": "mp5", "secondary": "m1911" },
-	"recon": { "primary": "awm", "secondary": "m1911" },
+	"assault": { "primary": "m4", "secondary": "m1911", "shotgun": "m1014", "gadget": "medkit" },
+	"engineer": { "primary": "m249", "secondary": "m1911", "gadget": "rpg" },
+	"support": { "primary": "mp5", "secondary": "m1911", "gadget": "medpack" },
+	"recon": { "primary": "awm", "secondary": "m1911", "gadget": "beacon" },
 }
 # TDM 装备屏选择(任意武器主副搭配,不限兵种;默认 M4 + M1911)
 var tdm_loadout := { "primary": "m4", "secondary": "m1911" }
@@ -449,7 +449,7 @@ Q 索敌标记 · G 手雷 · F 兵种装备 · E 驾驶/离开载具 · Tab 记
 
 [b][color=#7fd0ff]兵种[/color][/b]
 [color=#7fd0ff]突击兵[/color]:M4A1 / AK-47 / SCAR-H / AUG,可额外携带一把霰弹枪(按 2),医疗包。
-[color=#ffc46b]工程兵[/color]:M249 / PKM / RPD + RPG-7(按 3)。瞄准空中载具 1 秒自动锁定,发射防空导弹。
+[color=#ffc46b]工程兵[/color]:M249 / PKM / RPD + 反载具毒刺导弹(按 3)。瞄准空中载具 1 秒自动锁定,发射制导导弹。
 [color=#9fe08a]支援兵[/color]:MP5 / UMP45 / P90 + 弹药箱(按 F 部署,圈内友军持续补给弹药并恢复生命)。
 [color=#e0a0ff]侦察兵[/color]:AWM / M24 / SVD + 动态探测器。
 副武器(全兵种通用):M1911 均衡 / 格洛克17 速射 / P226 精准 / 沙漠之鹰 手炮 / M93R 冲锋手枪。
@@ -739,11 +739,10 @@ func _build_deploy() -> void:
 	bar.add_child(_slot_shotgun)
 	_slot_secondary = _make_slot("副武器", "", func(): _toggle_submenu("secondary"))
 	bar.add_child(_slot_secondary)
-	var gadget_slot := _make_slot("兵种装备", "", Callable())
+	var gadget_slot := _make_slot("兵种装备", "", func(): _toggle_submenu("gadget"))
 	bar.add_child(gadget_slot)
 	var nade_slot := _make_slot("投掷物", "", Callable())
 	bar.add_child(nade_slot)
-	gadget_slot.disabled = true
 	nade_slot.disabled = true
 	_gadget_slot_btn = gadget_slot
 	_nade_slot_btn = nade_slot
@@ -812,11 +811,17 @@ func show_deploy(is_redeploy := false) -> void:
 		info_panel.visible = not in_deploy
 	if _deploy_btn != null:
 		_deploy_btn.text = "部  署"
-	# 调试:--dbg-submenu <class|primary|shotgun|secondary> 自动打开兵种二级菜单
+	# 调试:--dbg-submenu <class|primary|shotgun|secondary|gadget> 自动打开兵种二级菜单
 	var ua := OS.get_cmdline_user_args()
 	var dbg_idx := ua.find("--dbg-submenu")
 	if dbg_idx != -1 and ua.size() > dbg_idx + 1:
 		_toggle_submenu(ua[dbg_idx + 1])
+		# QA:打印二级菜单实际生成的卡片首行,便于无头文本断言(不依赖截图)
+		var titles: PackedStringArray = PackedStringArray()
+		for node in _submenu.find_children("*", "Button", true, false):
+			titles.append(String((node as Button).text).split("\n")[0])
+		print("[SUBMENU] ", ua[dbg_idx + 1], " 槽位=", _gadget_slot_btn.text.replace("\n", " | "),
+			" 卡片=[", ", ".join(titles), "]")
 	_build_map_select()
 	_show_screen("deploy")
 
@@ -879,7 +884,8 @@ func _refresh_slots() -> void:
 	if not cls.shotguns.is_empty():
 		_set_slot(_slot_shotgun, "随身霰弹枪", WeaponsData.W()[lo.get("shotgun", cls.shotguns[0])].cn)
 	_set_slot(_slot_secondary, "副武器", WeaponsData.W()[lo["secondary"]].cn)
-	_set_slot(_gadget_slot_btn, "兵种装备", cls.gadget_cn + " ×" + str(cls.gadget_count))
+	var gopt: Dictionary = WeaponsData.gadget_option(selected_class, String(lo.get("gadget", "")))
+	_set_slot(_gadget_slot_btn, "兵种装备", String(gopt.get("cn", cls.gadget_cn)) + " ×" + str(int(gopt.get("count", cls.gadget_count))))
 	_set_slot(_nade_slot_btn, "投掷物", "手雷 ×2")
 
 
@@ -946,6 +952,16 @@ func _open_submenu(kind: String) -> void:
 			for wid in cls.secondaries:
 				grid.add_child(_make_weapon_card(wid, lo["secondary"] == wid,
 					func(): _select_weapon("secondary", wid)))
+		"gadget":
+			v.add_child(UiTheme.make_label(cls.cn + " — 选择兵种技能(二选一,按 F 使用 / 占武器槽者按 3 切换)", 14, UiTheme.PRIMARY))
+			var grid := GridContainer.new()
+			grid.columns = 2
+			grid.add_theme_constant_override("h_separation", 8)
+			grid.add_theme_constant_override("v_separation", 8)
+			v.add_child(grid)
+			var cur_g: String = String(WeaponsData.gadget_option(selected_class, String(lo.get("gadget", ""))).get("id", ""))
+			for opt in WeaponsData.gadget_options(selected_class):
+				grid.add_child(_make_gadget_card(opt, String(opt.get("id", "")) == cur_g, cls.color))
 	_submenu.visible = true
 
 
@@ -956,9 +972,11 @@ func _make_class_card(cid: String, selected: bool) -> Button:
 	card.toggle_mode = true
 	card.button_pressed = selected
 	card.custom_minimum_size = Vector2(240, 108)
-	var role_line: String = { "assault": "破阵 / 烟雾 / C5 / 自疗", "engineer": "反载具 / 维修 / RPG",
-		"support": "补给 / 医疗 / 烟雾", "recon": "狙击 / 标记 / 信标" }.get(cid, "")
-	card.text = cls.icon + " " + cls.cn + "  " + cls.en + "\n" + role_line + "\n" + cls.gadget_cn + " ×" + str(cls.gadget_count)
+	var role_line: String = { "assault": "破阵 / 烟雾 / C5 / 自疗或榴弹", "engineer": "反载具 / 维修 / 毒刺或掩体",
+		"support": "补给 / 医疗包或弹药包", "recon": "狙击 / 标记 / 信标或无人机" }.get(cid, "")
+	var gsel: Dictionary = WeaponsData.gadget_option(cid, String((loadout.get(cid, {}) as Dictionary).get("gadget", "")))
+	card.text = cls.icon + " " + cls.cn + "  " + cls.en + "\n" + role_line + "\n" \
+		+ String(gsel.get("cn", cls.gadget_cn)) + " ×" + str(int(gsel.get("count", cls.gadget_count)))
 	card.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	card.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	card.add_theme_font_size_override("font_size", 13)
@@ -980,6 +998,31 @@ func _style_card(card: Button, selected: bool, accent: Color) -> void:
 	card.add_theme_stylebox_override("hover", UiTheme.stylebox(Color(0.0, 0.18, 0.24, 0.95), border, 2, 3, 8))
 	card.add_theme_stylebox_override("pressed", UiTheme.stylebox(bg, border, 2, 3, 8))
 	card.add_theme_stylebox_override("focus", UiTheme.stylebox(bg, border, 2, 3, 8))
+
+
+## 兵种技能卡(第二技能二选一:名称 + 携带量 + 用法说明 + 占槽提示)
+func _make_gadget_card(opt: Dictionary, selected: bool, accent: Color) -> Button:
+	var gid := String(opt.get("id", ""))
+	var card := Button.new()
+	card.theme = UiTheme.theme()
+	card.toggle_mode = true
+	card.button_pressed = selected
+	card.custom_minimum_size = Vector2(372, 112)
+	var slot_line: String = "武器槽 · 按 3 切换" if bool(opt.get("weapon", false)) else "装备槽 · 按 F 使用"
+	card.text = String(opt.get("cn", gid)) + "  ×" + str(int(opt.get("count", 2))) + "\n" \
+		+ slot_line + "\n" + String(opt.get("desc", ""))
+	card.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	card.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	card.add_theme_font_size_override("font_size", 13)
+	card.add_theme_color_override("font_color", UiTheme.TXT)
+	_style_card(card, selected, accent)
+	UiTheme.wire_button(card)
+	card.pressed.connect(func():
+		AudioSys.ui()
+		loadout[selected_class]["gadget"] = gid
+		_refresh_slots()
+		_close_submenu())
+	return card
 
 
 func _make_weapon_card(wid: String, selected: bool, cb: Callable) -> Button:
@@ -2340,7 +2383,7 @@ const STAT_CN := {
 }
 const KIND_CN := {
 	"rifle": "突击步枪", "smg": "冲锋枪", "lmg": "轻机枪", "shotgun": "霰弹枪",
-	"sniper": "狙击步枪", "pistol": "手枪", "rpg": "火箭筒", "dmr": "精确射手步枪",
+	"sniper": "狙击步枪", "pistol": "手枪", "rpg": "反载具导弹", "dmr": "精确射手步枪",
 }
 var _arm_weapon := ""                # 记住上次选择的武器(切 Tab 回来不丢)
 var _arm_cfg: Dictionary = {}        # 工作配置 {槽位: 件id}(未保存)

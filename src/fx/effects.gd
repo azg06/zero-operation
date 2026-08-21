@@ -3,6 +3,12 @@ class_name Effects extends Node3D
 
 static var MAXP := 0                    # 每类粒子池大小(Web 端自动缩减)
 
+## 无制导抛射物的默认等效重力(m/s²):方向向量每秒下压 grav/弹速 后归一化,
+## 等效于半径 R = 弹速² / grav 的圆弧弹道(下压角 θ ≈ d / 2R)。
+## 火箭弹默认 12(偏平直),榴弹按 WeaponDef.proj_grav 给 9.8 真实抛物线;
+## HUD 的火箭筒弹道等高线按同一组数据换算刻度。
+const ROCKET_DROP_GRAV := 12.0
+
 
 func _init_maxp() -> void:
 	if MAXP == 0:
@@ -80,6 +86,8 @@ var _gh_owner: Callable = Callable()
 # ---- 弹壳/弹匣池 ----
 var _casings: Array = []
 var _mags: Array = []
+var _mag_meshes: Dictionary = {}
+var _mag_mats: Dictionary = {}
 # ---- 投射物 ----
 var _grenades: Array = []
 var _rockets: Array = []
@@ -434,19 +442,44 @@ func _build_casings() -> void:
 		holder.add_child(m)
 		add_child(holder)
 		_casings.append({ "holder": holder, "mesh": m, "vel": Vector3.ZERO, "rot": Vector3.ZERO, "life": 0.0, "bullet_type": -1 })
+	# 普通弹匣
 	var mg_geo := BoxMesh.new()
 	mg_geo.size = Vector3(0.035, 0.11, 0.055)
+	_mag_meshes["mag"] = mg_geo
 	var mg_mat := StandardMaterial3D.new()
 	mg_mat.albedo_color = Color.html("#22252a")
 	mg_mat.roughness = 0.7
 	mg_mat.metallic = 0.4
+	_mag_mats["mag"] = mg_mat
+	# 弹鼓(弹鼓轻机枪换弹掉落)
+	var drum_geo := CylinderMesh.new()
+	drum_geo.top_radius = 0.055
+	drum_geo.bottom_radius = 0.055
+	drum_geo.height = 0.055
+	drum_geo.radial_segments = 14
+	_mag_meshes["drum"] = drum_geo
+	var drum_mat := StandardMaterial3D.new()
+	drum_mat.albedo_color = Color.html("#8a7546")
+	drum_mat.roughness = 0.45
+	drum_mat.metallic = 0.55
+	_mag_mats["drum"] = drum_mat
+	# 弹链箱(弹链轻机枪换弹掉落)
+	var belt_geo := BoxMesh.new()
+	belt_geo.size = Vector3(0.075, 0.11, 0.13)
+	_mag_meshes["beltbox"] = belt_geo
+	var belt_mat := StandardMaterial3D.new()
+	belt_mat.albedo_color = Color.html("#59623f")
+	belt_mat.roughness = 0.7
+	belt_mat.metallic = 0.35
+	_mag_mats["beltbox"] = belt_mat
+	var drop_kinds: Array = ["mag", "mag", "mag", "mag", "drum", "drum", "beltbox", "beltbox"]
 	for i in 8:
 		var m := MeshInstance3D.new()
-		m.mesh = mg_geo
-		m.material_override = mg_mat
+		m.mesh = _mag_meshes[drop_kinds[i]] as Mesh
+		m.material_override = _mag_mats[drop_kinds[i]] as StandardMaterial3D
 		m.visible = false
 		add_child(m)
-		_mags.append({ "mesh": m, "vel": Vector3.ZERO, "rot": Vector3.ZERO, "life": 0.0 })
+		_mags.append({ "mesh": m, "vel": Vector3.ZERO, "rot": Vector3.ZERO, "life": 0.0, "kind": drop_kinds[i] })
 
 
 static func _casing_mesh(bullet_type: int) -> Mesh:
@@ -907,10 +940,12 @@ func casing(pos: Vector3, cam_basis: Basis, bullet_type := 0, power := 1.0) -> v
 	holder.visible = true
 
 
-## 换弹时掉落的弹匣
-## cam_basis:主相机朝向;弹匣速度在相机局部空间生成(向下 + 向前),再变换到世界,
-## 保证无论玩家面朝哪里,弹匣都是朝视线前方掉落,而不会按世界轴随机向左/右飞。
-func spawn_mag(pos: Vector3, cam_basis: Basis = Basis.IDENTITY) -> void:
+## 换弹时掉落的弹匣/弹鼓/弹链箱(kind: mag/drum/beltbox)
+## cam_basis:主相机朝向;掉落物速度在相机局部空间生成(向下 + 向前),再变换到世界,
+## 保证无论玩家面朝哪里,掉落物都是朝视线前方掉落,而不会按世界轴随机向左/右飞。
+func spawn_mag(pos: Vector3, cam_basis: Basis = Basis.IDENTITY, kind := "mag") -> void:
+	if not _mag_meshes.has(kind):
+		kind = "mag"
 	var mg = null
 	for m2 in _mags:
 		if m2["life"] <= 0:
@@ -919,13 +954,22 @@ func spawn_mag(pos: Vector3, cam_basis: Basis = Basis.IDENTITY) -> void:
 	if mg == null:
 		mg = _mags[0]
 	var m: MeshInstance3D = mg["mesh"]
+	if mg.get("kind", "mag") != kind:
+		mg["kind"] = kind
+		m.mesh = _mag_meshes[kind] as Mesh
+		m.material_override = _mag_mats[kind] as StandardMaterial3D
 	m.position = pos
+	m.rotation = Vector3.ZERO
+	if kind == "drum":
+		m.rotation.x = PI * 0.5  # 与 RPD 模型一致:鼓面横向
+	# 弹鼓/弹链箱更重:初速更低、旋转更慢
+	var mass_scale := 0.72 if kind == "drum" else (0.78 if kind == "beltbox" else 1.0)
 	var local_vel := Vector3(
-		Utils.rand(-0.12, 0.12),
-		Utils.rand(-0.5, -0.2),
-		Utils.rand(-0.5, -0.2))
+		Utils.rand(-0.12, 0.12) * mass_scale,
+		Utils.rand(-0.5, -0.2) * mass_scale,
+		Utils.rand(-0.5, -0.2) * mass_scale)
 	mg["vel"] = cam_basis * local_vel
-	mg["rot"] = Vector3(Utils.rand(-6, 6), Utils.rand(-6, 6), Utils.rand(-6, 6))
+	mg["rot"] = Vector3(Utils.rand(-6, 6), Utils.rand(-6, 6), Utils.rand(-6, 6)) * mass_scale
 	mg["life"] = 2.5
 	m.visible = true
 
@@ -1064,9 +1108,19 @@ func spawn_rocket(p_owner, def, pos: Vector3, dir: Vector3, target = null) -> vo
 		spd = float(def.get("speed", 38.0))
 	else:
 		spd = float(def.speed)
+	# 抛射物弹道参数:等效重力与解除保险距离(火箭 12/10m,榴弹 9.8/5m)
+	var grav := ROCKET_DROP_GRAV
+	var armd := 10.0
+	if def is Dictionary:
+		grav = float(def.get("proj_grav", ROCKET_DROP_GRAV))
+		armd = float(def.get("proj_arm", 10.0))
+	else:
+		grav = float(def.proj_grav)
+		armd = float(def.proj_arm)
 	_rockets.append({
 		"owner": p_owner, "def": def, "mesh": mesh, "pos": pos, "dir": dir,
 		"speed": spd, "life": 8.0, "smoke_t": 0.0, "target": target,
+		"travel": 0.0, "armed": false, "spawn_pos": pos, "grav": grav, "arm_dist": armd,
 	})
 
 
@@ -1619,6 +1673,11 @@ func _update_grenades(dt: float) -> void:
 				G.game.explode(pos, 6, 110, g["owner"])
 
 
+## QA 诊断:当前在飞的抛射物数量(供 --test-gadgets / --test-rpg 验证发射是否生效)
+func rocket_count() -> int:
+	return _rockets.size()
+
+
 func _update_rockets(dt: float) -> void:
 	for i in range(_rockets.size() - 1, -1, -1):
 		var r: Dictionary = _rockets[i]
@@ -1637,15 +1696,20 @@ func _update_rockets(dt: float) -> void:
 				r["speed"] = minf(r["speed"] + 55 * dt, 85)
 				var to: Vector3 = target.pos - pos
 				var d_t := to.length()
-				if d_t < 4.5:
-					boom = true  # 近炸引信
+				if d_t < 4.5 and bool(r["armed"]):
+					boom = true  # 近炸引信(保险已解除)
 				else:
 					to /= d_t
 					dir = Utils.safe_norm(dir.lerp(to, minf(1, 4.5 * dt)), to)
 		if r["target"] == null:
-			dir.y -= 0.25 * dt  # 无制导直射弹道:重力 0.25(较原 0.35 弹道更平直,显著提升射程)
+			# 无制导直射/抛射弹道:方向下压率 = 等效重力 / 弹速(圆弧弹道,HUD 等高线同源)
+			dir.y -= float(r.get("grav", ROCKET_DROP_GRAV)) / maxf(float(r["speed"]), 1.0) * dt
 			dir = Utils.safe_norm(dir, Vector3.UP)
 		var step_len: float = r["speed"] * dt
+		r["travel"] = float(r["travel"]) + step_len
+		# 最小解除保险距离:飞行不足该距离命中只销毁弹体,防近距自伤(火箭 10m/榴弹 5m)
+		if float(r["travel"]) >= float(r.get("arm_dist", 10.0)):
+			r["armed"] = true
 		var hit = Utils.raycast_world(pos, dir, step_len + 0.2)
 		if hit != null:
 			pos = hit["point"]
@@ -1672,6 +1736,10 @@ func _update_rockets(dt: float) -> void:
 		if boom or r["life"] <= 0:
 			mesh.queue_free()
 			_rockets.remove_at(i)
+			# 10 米保险:未解除保险时命中/落地/寿命耗尽都只销毁弹体,不产生爆炸
+			if not bool(r["armed"]):
+				spark_spawn(pos.x, pos.y, pos.z, 0, 0, 0, 0.08, 1, 0.7, 0.3, 0)
+				continue
 			var def = r["def"]
 			var splash: float = 6.5
 			var dmg: float = 100.0

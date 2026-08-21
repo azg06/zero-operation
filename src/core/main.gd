@@ -271,6 +271,10 @@ func _ready() -> void:
 	var scope_sys = load("res://src/player/optic_scope.gd").new()
 	add_child(scope_sys)
 	G.scope = scope_sys
+	# ---- 侦察兵无人侦察机(独立相机接管 + 150m 圆形侦察范围) ----
+	var drone_sys = load("res://src/player/recon_drone.gd").new()
+	add_child(drone_sys)
+	G.drone = drone_sys
 	# ---- 实时 3D 战场部署系统(死亡后高空观察部署;征服/突破启用) ----
 	var dep := BattleDeploymentManager.new()
 	add_child(dep)
@@ -497,6 +501,15 @@ func _ready() -> void:
 			wids.size(), scope_ok, normal_ok, fails.size(), str(fails)])
 		get_tree().quit()
 		return
+	# 出生点诊断:--test-spawns(配合 --test-play)
+	if ua.has("--test-spawns"):
+		await get_tree().create_timer(1.0).timeout
+		print("[SPAWNS] map=%s size=%s bounds=%.1f world_size=%.1f" % [G.current_map, MapsData.M()[G.current_map].size, G.bounds, G.world_size])
+		print("[SPAWNS] us=%s" % str(G.spawns["us"]))
+		print("[SPAWNS] ru=%s" % str(G.spawns["ru"]))
+		print("[SPAWNS] vehicle_spawns=%s" % str(G.vehicle_spawns))
+		get_tree().quit()
+		return
 	# [8/10] 车内视角诊断:--test-tank [gunner|driver] 自动进入最近坦克(验证内构/乘员位/炮镜)
 	if ua.has("--test-tank"):
 		var tt_crew: int = 1 if (ua.size() > ua.find("--test-tank") + 1 and ua[ua.find("--test-tank") + 1] == "gunner") else 0
@@ -578,6 +591,28 @@ func _ready() -> void:
 			print("[ADS-CAP] viewport=root_rect=%s vm_viewport_size=%s vm_visible_rect=%s root_tex=%s" % [get_viewport().get_visible_rect().size, G.vm_viewport.size, G.vm_viewport.get_visible_rect().size, get_viewport().get_texture().get_size()])
 			if G.scope != null and G.scope.has_method("debug_state"):
 				print("[ADS-CAP] scope_pip=", G.scope.debug_state())
+			# 火箭筒弹道等高线诊断:各档刻度像素位置必须全部落在可见画面内
+			if G.hud != null and G.hud._crosshair != null and G.hud._crosshair.has_method("bal_debug"):
+				print("[ADS-CAP] rpg_ballistic=", G.hud._crosshair.bal_debug())
+			# 火箭筒 CLU 三档倍率(0×/2×/4×):镜内 FOV 与弹道等高线刻度都必须随倍率重算
+			if gid == "rpg" and G.hud != null:
+				var keep_zoom: int = g2.zoom_idx
+				for zi in Gun.RPG_ZOOM_LEVELS.size():
+					g2.zoom_idx = zi
+					# 镜内 FOV → 镜片投影 → HUD 分划为逐帧链式采样,等其收敛再读数
+					await get_tree().create_timer(0.2).timeout
+					print("[ADS-CAP] rpg_zoom=%s scope_fov=%.1f %s" % [
+						g2.zoom_label(), g2.scope_fov(), G.hud._crosshair.bal_debug()])
+				g2.zoom_idx = keep_zoom
+				await get_tree().create_timer(0.2).timeout
+				# 滚轮通路验证:直接注入滚轮量(绕开指针锁定判定),
+				# 开镜时必须只改 CLU 倍率、不切换武器(gun_index 不变)
+				var zoom_before: String = g2.zoom_label()
+				var idx_before: int = G.player.gun_index
+				G.input_sys.wheel -= 1
+				await get_tree().create_timer(0.2).timeout
+				print("[ADS-CAP] rpg_wheel_down zoom %s→%s gun_index %d→%d" % [
+					zoom_before, G.player.gun().zoom_label(), idx_before, G.player.gun_index])
 			# 曝光诊断:主世界/主相机的自动曝光状态与曝光参数
 			var wa: CameraAttributes = G.world_env.camera_attributes if G.world_env != null else null
 			var ma: CameraAttributes = G.camera.attributes if G.camera != null else null
@@ -633,9 +668,15 @@ func _ready() -> void:
 		for k in 10:
 			await get_tree().create_timer(0.22).timeout
 			var g3 = G.player.gun()
-			print("[RELOAD] t=%.2f mag_visible=%s mag_y=%.3f" % [g3.reload_t,
+			var cover_x := 0.0
+			if g3.reload_ctl != null and g3.reload_ctl.cover != null:
+				cover_x = g3.reload_ctl.cover.rotation.x
+			print("[RELOAD] t=%.2f flow=%s stage=%s mag_visible=%s mag_y=%.3f cover_x=%.2f" % [g3.reload_t,
+				String(g3.reload_ctl.cfg.get("reload_flow", "mag")) if g3.reload_ctl != null else "?",
+				g3.reload_ctl.stage_name() if g3.reload_ctl != null else "?",
 				g3._mag.visible if g3._mag != null else false,
-				g3._mag.position.y if g3._mag != null else -999.0])
+				g3._mag.position.y if g3._mag != null else -999.0,
+				cover_x])
 	# 弹药包测试:--test-ammo
 	if ua.has("--test-ammo"):
 		await get_tree().create_timer(2.0).timeout
@@ -846,6 +887,107 @@ func _ready() -> void:
 			sm.rotation.y = G.player.yaw + PI  # 面向玩家
 			G.world_root.add_child(sm)
 		print("[CLASSES] 已生成四兵种模型合影")
+	# 兵种第二技能冒烟测试:--test-gadgets(配合 --test-play)
+	# 逐兵种切换到第二技能并真实调用 use_gadget,断言:武器槽/部署物/碰撞体/无人机接管全部生效
+	if ua.has("--test-gadgets"):
+		await get_tree().create_timer(1.5).timeout
+		var p2 = G.player
+		for pair in [["assault", "gl"], ["engineer", "rpg"], ["engineer", "coverkit"],
+				["support", "medpack"], ["support", "ammopack"], ["recon", "drone"]]:
+			var cid2: String = pair[0]
+			var gid2: String = pair[1]
+			var lo2: Dictionary = { "gadget": gid2 }
+			p2.give_class(cid2, lo2)
+			await get_tree().process_frame
+			var guns_txt := ""
+			for gg in p2.guns:
+				guns_txt += gg.id + "/"
+			print("[GADGET] %s → %s(×%d) guns=[%s]" % [cid2, p2.gadget_cn, p2.gadget_count, guns_txt])
+			var dep_before: int = G.deployables.size()
+			var coll_before: int = G.colliders.size()
+			p2.use_gadget()
+			await get_tree().create_timer(0.35).timeout
+			print("[GADGET]   use → count=%d deployables %d→%d colliders %d→%d drone_piloting=%s" % [
+				p2.gadget_count, dep_before, G.deployables.size(), coll_before, G.colliders.size(),
+				str(G.drone.piloting if G.drone != null else false)])
+			if gid2 == "drone" and G.drone != null and G.drone.piloting:
+				# 惯性验证:按住前进 → 速度应逐步爬升(不是瞬间满速),松开后滑停
+				var p0: Vector3 = G.drone.pos
+				Input.action_press("move_forward")
+				await get_tree().create_timer(0.15).timeout
+				var v_early: float = G.drone.speed_ms()
+				await get_tree().create_timer(1.0).timeout
+				var v_late: float = G.drone.speed_ms()
+				Input.action_release("move_forward")
+				await get_tree().create_timer(0.5).timeout
+				print("[GADGET]   drone 速度爬升 0.15s=%.1f → 1.15s=%.1f(上限 %.0f) 松开后=%.1f 位移=%.1fm" % [
+					v_early, v_late, G.drone.SPEED, G.drone.speed_ms(), p0.distance_to(G.drone.pos)])
+				var dh = G.hud._drone_hud if G.hud != null else null
+				print("[GADGET]   drone UAV-HUD visible=%s 类=%s 武器面板=%s" % [
+					str(dh != null and dh.visible), str(dh.get_class() if dh != null else "nil"),
+					str(G.hud._wpn_panel.visible if G.hud != null else true)])
+				# 云台相机检查:必须越过前旋翼叶尖(z≈-0.45),且 HUD 世界标记改用无人机相机投影
+				var cam_local: Vector3 = (G.drone.cam.global_position - G.drone.pos).rotated(Vector3.UP, -G.drone.yaw)
+				print("[GADGET]   drone view_cam_is_drone=%s cam_fwd=%.2f(叶尖0.45) cam_dy=%.2f alt=%.1f" % [
+					str(G.view_camera() == G.drone.cam), -cam_local.z, cam_local.y, G.drone.alt_agl()])
+				# 越界失联流程:飞出 100m → 灰白雪花 + 3s 倒计时 → 黑屏 → 自动交还本体视角
+				G.drone.pos += Vector3(400.0, 0.0, 0.0)
+				await get_tree().create_timer(0.4).timeout
+				print("[GADGET]   drone 越界 dist=%.0f/%.0f 信号丢失=%.2f 倒计时=%.1fs piloting=%s" % [
+					G.drone.dist_to_origin, G.drone.RADIUS, G.drone.signal_lost01(),
+					G.drone.lost_countdown(), str(G.drone.piloting)])
+				await get_tree().create_timer(2.0).timeout
+				print("[GADGET]   drone 失联中 信号丢失=%.2f 倒计时=%.1fs piloting=%s 黑屏=%.2f" % [
+					G.drone.signal_lost01(), G.drone.lost_countdown(), str(G.drone.piloting), G.drone.blackout_t])
+				await get_tree().create_timer(0.75).timeout
+				print("[GADGET]   drone 黑屏阶段 信号丢失=%.2f 黑屏剩余=%.2fs piloting=%s" % [
+					G.drone.signal_lost01(), G.drone.blackout_t, str(G.drone.piloting)])
+				await get_tree().create_timer(1.5).timeout
+				print("[GADGET]   drone 断链后 piloting=%s 主相机=%s UAV-HUD=%s 武器面板=%s" % [
+					str(G.drone.piloting), str(G.camera.current),
+					str(G.hud._drone_hud.visible if G.hud != null else false),
+					str(G.hud._wpn_panel.visible if G.hud != null else true)])
+			if gid2 == "gl" or gid2 == "rpg":
+				# 占武器槽的技能:切到技能槽 → 开火 → 换弹全流程(榴弹含中折开膛动画)
+				p2.switch_weapon(p2.guns.size() - 1)
+				await get_tree().process_frame
+				var glg = p2.gun()
+				print("[GADGET]   gl gun=%s ammo=%d/%d proj=%s grav=%.1f breech=%s" % [
+					glg.id, glg.ammo, glg.reserve, str(glg.def.projectile), glg.def.proj_grav,
+					str(glg.group.has_meta("breech"))])
+				glg.trigger_held = true
+				# 先等拔枪动画播完(draw_t≥0.6 才允许击发),再按真实输入路径开火
+				await get_tree().create_timer(0.45).timeout
+				Input.action_press("fire")
+				await get_tree().create_timer(0.3).timeout
+				Input.action_release("fire")
+				await get_tree().create_timer(0.2).timeout
+				print("[GADGET]   gl 开火后 ammo=%d/%d 火箭弹在飞=%s" % [
+					glg.ammo, glg.reserve, str(G.effects.rocket_count() > 0)])
+				glg.reload()
+				for si in 7:
+					await get_tree().create_timer(0.42).timeout
+					var bo: float = glg.reload_ctl.breech_open if glg.reload_ctl != null else -1.0
+					var bn: Node3D = glg.group.get_meta("breech") if glg.group.has_meta("breech") else null
+					var rn: Node3D = glg.group.get_meta("rocket") if glg.group.has_meta("rocket") else null
+					# 中折方向验证:枪口点(膛体空间 0,0.052,-0.29)在枪身空间的 y 必须随开膛「下降」
+					var tip_y := 0.0
+					var rd_g := Vector3.ZERO
+					if bn != null:
+						tip_y = (bn.transform * Vector3(0, 0.052, -0.29)).y
+						if rn != null:
+							rd_g = bn.transform * rn.position
+					# 榴弹必须始终"握在左手里"被带到装填口(不是在装填口凭空出现):
+					# 取弹后手与弹的世界距离应恒定在握持偏移(≈9cm)左右
+					var rc = glg.reload_ctl
+					var hand_gap := -1.0
+					if rc != null and rc.new_rocket != null and rc.new_rocket.visible and rc.left_hand != null:
+						hand_gap = rc.left_hand.global_position.distance_to(rc.new_rocket.global_position)
+					print("[GADGET]   gl reload t=%.2f 阶段=%s 开膛=%.2f 膛体rot.x=%.3f 枪口y=%.3f 手弹距=%.3f ammo=%d/%d" % [
+						glg.reload_t, glg.reload_ctl.phase_name() if glg.reload_ctl != null else "?",
+						bo, (bn.rotation.x if bn != null else -9.0), tip_y, hand_gap,
+						glg.ammo, glg.reserve])
+		print("[GADGET] 第二技能冒烟测试完成")
 	# Sky3D 调试:--test-sky
 	if ua.has("--test-sky"):
 		await get_tree().create_timer(2.0).timeout

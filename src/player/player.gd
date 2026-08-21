@@ -31,7 +31,9 @@ var grenades := 2
 var at_grenades := 2                # 反坦克手雷(X)
 var at_mines := 1                   # 反坦克地雷(V)
 var gadget := ""
+var gadget_cn := ""                 # 当前兵种技能中文名(第二技能可选,HUD/提示读它)
 var gadget_count := 0
+var gadget_max := 0                 # 所选技能满携带量(补给时按它回满,而非兵种默认技能量)
 var class_id := "assault"
 var loadout = null
 var step_t := 0.0
@@ -150,6 +152,12 @@ func give_class(p_class_id: String, p_loadout) -> void:
 		if p_loadout.has("shotgun"):
 			shotgun = p_loadout["shotgun"]
 	loadout = { "primary": primary, "secondary": secondary, "shotgun": shotgun }
+	# 兵种技能:第二技能可在部署界面「兵种装备」槽选择;loadout["gadget"] 给 id,非法值回退默认
+	var gsel := ""
+	if p_loadout != null and p_loadout.get("gadget") != null:
+		gsel = String(p_loadout["gadget"])
+	var gopt: Dictionary = WeaponsData.gadget_option(p_class_id, gsel)
+	loadout["gadget"] = String(gopt.get("id", cls.gadget))
 	# 清理旧枪(视角模型层)
 	for g in guns:
 		G.vm_camera.remove_child(g.group)
@@ -159,16 +167,19 @@ func give_class(p_class_id: String, p_loadout) -> void:
 	if not cls.shotguns.is_empty() and loadout["shotgun"] != null:
 		guns.append(Gun.new(loadout["shotgun"], self))
 	guns.append(Gun.new(loadout["secondary"], self))
-	if cls.gadget == "rpg":
-		guns.append(Gun.new("rpg", self))
+	# 占武器槽的兵种技能(工程兵毒刺 / 突击兵榴弹发射器):按 3 切换
+	if bool(gopt.get("weapon", false)):
+		guns.append(Gun.new(String(gopt.get("id", "rpg")), self))
 	for g in guns:
 		G.vm_camera.add_child(g.group)
 		g.holster()
 	gun_index = 0
 	gun().equip()
 	_update_body_gun()
-	gadget = cls.gadget
-	gadget_count = cls.gadget_count
+	gadget = String(gopt.get("id", cls.gadget))
+	gadget_cn = String(gopt.get("cn", cls.gadget_cn))
+	gadget_max = int(gopt.get("count", cls.gadget_count))
+	gadget_count = gadget_max
 	grenades = 2
 	at_grenades = 2
 	at_mines = 1
@@ -198,6 +209,9 @@ func spawn(p_pos: Vector3) -> void:
 	if _nade_vm != null and is_instance_valid(_nade_vm):
 		_nade_vm.visible = false
 	_nade_vm_t = -1.0
+	if _adren_vm != null and is_instance_valid(_adren_vm):
+		_adren_vm.visible = false
+	_adren_t = -1.0
 	# 重生恢复尸体隐藏的枪/手臂(死亡时隐藏)
 	if body != null and is_instance_valid(body) and body.has_meta("upper"):
 		var bu: Node3D = body.get_meta("upper")
@@ -316,9 +330,14 @@ func resupply() -> void:
 	grenades = 2
 	at_grenades = 2
 	at_mines = 1
-	var cls = WeaponsData.C()[class_id]
-	if gadget != "rpg":
-		gadget_count = cls.gadget_count
+	# 占武器槽的技能(毒刺/榴弹)弹药随枪械 reserve 一起补,不重置技能次数
+	if not _gadget_is_weapon():
+		gadget_count = gadget_max if gadget_max > 0 else int(WeaponsData.C()[class_id].gadget_count)
+
+
+## 当前兵种技能是否占用武器槽(工程兵毒刺 / 突击兵榴弹发射器:按 3 切换,F 不触发)
+func _gadget_is_weapon() -> bool:
+	return gadget == "rpg" or gadget == "gl"
 
 
 ## Q 索敌:标记准星附近的敌人(BF 索敌系统)
@@ -374,6 +393,8 @@ var _nade_arming := false
 var _nade_hold := 0.0
 var _nade_vm: Node3D = null      # 手雷视角模型(vm_camera 层)
 var _nade_vm_t := -1.0           # 抛掷动画计时(>=0 播放中)
+var _adren_vm: Node3D = null     # 肾上腺素注射器视角模型
+var _adren_t := -1.0             # 注射动画计时(>=0 播放中)
 var _veh_recruit_t := 0.0          # 征召炮手节流计时
 var _veh_recruit_notified := false # 已提示过队友响应
 
@@ -418,6 +439,125 @@ func _set_nade_vm_alpha(a: float) -> void:
 	for ch in _nade_vm.get_children():
 		if ch is GeometryInstance3D:
 			(ch as GeometryInstance3D).transparency = 1.0 - a
+
+
+func _ensure_adren_vm() -> void:
+	if _adren_vm != null and is_instance_valid(_adren_vm):
+		return
+	_adren_vm = Node3D.new()
+	var body := MeshInstance3D.new()
+	var bm := CylinderMesh.new()
+	bm.top_radius = 0.012
+	bm.bottom_radius = 0.012
+	bm.height = 0.085
+	bm.radial_segments = 8
+	body.mesh = bm
+	body.rotation.x = PI / 2.0
+	var body_mat := StandardMaterial3D.new()
+	body_mat.albedo_color = Color(0.86, 0.92, 0.96)
+	body_mat.roughness = 0.25
+	body_mat.metallic = 0.4
+	body.material_override = body_mat
+	body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_adren_vm.add_child(body)
+	var liquid := MeshInstance3D.new()
+	var lm := CylinderMesh.new()
+	lm.top_radius = 0.007
+	lm.bottom_radius = 0.007
+	lm.height = 0.045
+	liquid.mesh = lm
+	liquid.rotation.x = PI / 2.0
+	var lmat := StandardMaterial3D.new()
+	lmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	lmat.albedo_color = Color(0.95, 0.65, 0.18)
+	liquid.material_override = lmat
+	liquid.position.z = 0.012
+	_adren_vm.add_child(liquid)
+	var needle := MeshInstance3D.new()
+	var nm := CylinderMesh.new()
+	nm.top_radius = 0.0015
+	nm.bottom_radius = 0.0015
+	nm.height = 0.045
+	needle.mesh = nm
+	needle.rotation.x = PI / 2.0
+	var nmat := StandardMaterial3D.new()
+	nmat.albedo_color = Color(0.82, 0.86, 0.9)
+	nmat.metallic = 0.9
+	nmat.roughness = 0.15
+	needle.material_override = nmat
+	needle.position.z = -0.062
+	_adren_vm.add_child(needle)
+	var plunger := MeshInstance3D.new()
+	var pm := CylinderMesh.new()
+	pm.top_radius = 0.006
+	pm.bottom_radius = 0.006
+	pm.height = 0.06
+	plunger.mesh = pm
+	plunger.rotation.x = PI / 2.0
+	var pmat := StandardMaterial3D.new()
+	pmat.albedo_color = Color(0.2, 0.25, 0.3)
+	plunger.material_override = pmat
+	plunger.position.z = 0.055
+	_adren_vm.add_child(plunger)
+	var hand := WeaponModels.build_hand(false)
+	hand.scale = Vector3.ONE * 0.82
+	hand.position = Vector3(0, -0.022, 0.02)
+	hand.rotation = Vector3(0.15, 0.0, -1.35)
+	_adren_vm.add_child(hand)
+	_adren_vm.visible = false
+	G.vm_camera.add_child(_adren_vm)
+
+
+func _start_adren_anim() -> void:
+	_ensure_adren_vm()
+	_adren_t = 0.0
+	_adren_vm.visible = true
+	var g := gun()
+	if g != null and g.group != null and is_instance_valid(g.group):
+		g.group.visible = false
+
+
+## 肾上腺素注射:右手从画面右侧抬起 → 刺入左胸 → 轻推注射 → 拔出收回
+func _update_adren_vm(dt: float) -> void:
+	if class_id != "assault":
+		return
+	_ensure_adren_vm()
+	if _adren_t < 0.0:
+		if _adren_vm.visible:
+			_adren_vm.visible = false
+			var g0 := gun()
+			if g0 != null and g0.group != null and is_instance_valid(g0.group):
+				g0.group.visible = true
+		return
+	_adren_t += dt
+	var dur := 1.15
+	var k := clampf(_adren_t / dur, 0.0, 1.0)
+	var start := Vector3(0.24, -0.16, -0.28)
+	var chest := Vector3(-0.14, -0.10, -0.20)
+	var pos := start
+	var rot := Vector3(0.15, 0.35, 0.1)
+	if k < 0.22:
+		var e := k / 0.22
+		pos = start.lerp(chest, e * e * (3.0 - 2.0 * e))
+		rot = rot.lerp(Vector3(-0.55, -0.9, 0.2), e)
+	elif k < 0.52:
+		pos = chest + Vector3(0.0, 0.004, -0.012 * sin((k - 0.22) / 0.3 * PI))
+		rot = Vector3(-0.55, -0.9, 0.2)
+	elif k < 0.78:
+		pos = chest + Vector3(0.0, 0.004, -0.012)
+		rot = Vector3(-0.55, -0.9, 0.2)
+	else:
+		var e := (k - 0.78) / 0.22
+		pos = (chest + Vector3(0.0, 0.004, -0.012)).lerp(start, e)
+		rot = Vector3(-0.55, -0.9, 0.2).lerp(Vector3(0.15, 0.35, 0.1), e)
+	_adren_vm.position = pos
+	_adren_vm.rotation = rot
+	if k >= 1.0:
+		_adren_t = -1.0
+		_adren_vm.visible = false
+		var g := gun()
+		if g != null and g.group != null and is_instance_valid(g.group):
+			g.group.visible = true
 
 
 func _nade_force() -> float:
@@ -510,43 +650,67 @@ func use_gadget() -> void:
 	if G.mode == "tdm":
 		G.hud.hint("团队死斗禁用兵种技能")
 		return
-	# 工程兵:F 维修附近己方受损载具
+	# 无人机操控中:F 直接召回(不消耗次数)
+	if G.drone != null and G.drone.piloting:
+		G.drone.recall("玩家手动召回")
+		return
+	# 工程兵:F 优先维修附近己方受损载具(不消耗技能次数)
 	if class_id == "engineer" and _try_repair_vehicle():
 		return
-	# 侦察兵:F 部署重生信标
-	if class_id == "recon":
-		# 任务1:BR 禁用重生信标(BR 的 F 键为医疗包,此为兜底门控)
-		if G.mode == "br":
-			G.hud.hint("大逃杀禁用重生信标")
-			AudioSys.dry_fire()
-			return
-		if gadget_count <= 0:
-			AudioSys.dry_fire()
-			return
-		gadget_count -= 1
-		G.game.spawn_beacon(self)
+	# 占武器槽的技能(毒刺/榴弹发射器):F 不触发,提示按 3 切换
+	if _gadget_is_weapon():
+		G.hud.hint("按 3 切换" + (gadget_cn if gadget_cn != "" else "兵种武器"))
+		return
+	# 重生信标:BR 禁用(BR 的 F 键为医疗包,此为兜底门控)
+	if gadget == "beacon" and G.mode == "br":
+		G.hud.hint("大逃杀禁用重生信标")
+		AudioSys.dry_fire()
 		return
 	if gadget_count <= 0:
 		AudioSys.dry_fire()
 		return
-	if gadget == "medkit":
-		gadget_count -= 1
-		heal_over_time = 60
-		AudioSys.capture(true)
-		G.hud.hint("医疗包:恢复中…")
-	elif gadget == "ammobox":
-		gadget_count -= 1
-		resupply()
-		AudioSys.reload(1)
-		G.hud.hint("弹药已补给")
-	elif gadget == "sensor":
-		gadget_count -= 1
-		G.game.spot_enemies(50, 12)
-		AudioSys.capture(true)
-		G.hud.hint("动态探测器已启动:敌人已标记")
-	elif gadget == "ammopack":
-		gadget_count -= 1
-		G.game.spawn_ammo_pack(self)
+	match gadget:
+		"beacon":
+			gadget_count -= 1
+			G.game.spawn_beacon(self)
+		"medkit":
+			gadget_count -= 1
+			heal_over_time = 60
+			_start_adren_anim()
+			AudioSys.capture(true)
+			G.hud.hint("肾上腺素注入:恢复中…")
+		"ammobox":
+			gadget_count -= 1
+			resupply()
+			AudioSys.reload(1)
+			G.hud.hint("弹药已补给")
+		"sensor":
+			gadget_count -= 1
+			G.game.spot_enemies(50, 12)
+			AudioSys.capture(true)
+			G.hud.hint("动态探测器已启动:敌人已标记")
+		"medpack":
+			gadget_count -= 1
+			G.game.spawn_med_pack(self)
+		"ammopack":
+			gadget_count -= 1
+			G.game.spawn_ammo_pack(self)
+		"coverkit":
+			# 掩体制造器:正前方架起半身掩体(位置被占/贴墙时不消耗次数)
+			if G.game.spawn_cover(self):
+				gadget_count -= 1
+			else:
+				AudioSys.dry_fire()
+		"drone":
+			if G.drone == null:
+				AudioSys.dry_fire()
+				G.hud.hint("无人机系统未就绪")
+			elif G.drone.launch(self):
+				gadget_count -= 1
+			else:
+				AudioSys.dry_fire()
+		_:
+			AudioSys.dry_fire()
 
 
 ## 工程兵维修:附近 4m 内有受损己方/中立载具则持续修复
@@ -853,8 +1017,28 @@ func _update_passenger_gun(dt: float) -> void:
 		switch_weapon(2)
 	var wheel = input.consume_wheel()
 	if wheel != 0:
-		switch_weapon((gun_index + (1 if wheel > 0 else -1) + guns.size()) % guns.size())
+		if not _wheel_to_scope_zoom(wheel):
+			switch_weapon((gun_index + (1 if wheel > 0 else -1) + guns.size()) % guns.size())
 	g.update(dt)
+
+
+## 制导瞄准镜 UI 使用的锁定进度(0~1)
+func missile_lock_progress() -> float:
+	var g := gun()
+	if g == null or g.id != "rpg":
+		return 0.0
+	return clampf(_lock_t, 0.0, 1.0)
+
+
+## 火箭筒开镜时滚轮改变 CLU 放大倍率(0×/2×/4×)而不是切换武器。
+## 返回 true 表示滚轮已被瞄具消费;未开镜/非火箭筒时返回 false 走原切枪逻辑。
+func _wheel_to_scope_zoom(wheel: int) -> bool:
+	if melee_active:
+		return false
+	var g := gun()
+	if g == null or g.id != "rpg" or not g.ads_held or g.ads_amount < 0.3:
+		return false
+	return g.cycle_zoom(wheel)
 
 
 func update_player(dt: float) -> void:
@@ -862,6 +1046,13 @@ func update_player(dt: float) -> void:
 		return
 	var input = G.input_sys
 	spawn_protect = maxf(0, spawn_protect - dt)
+	# 无人侦察机操控中:输入全部交给无人机,本体原地待机(仍会被敌人打中)。
+	# 相机由 ReconDroneSystem 的独立相机接管,这里不再推进步战视角/移动/武器逻辑。
+	if G.drone != null and G.drone.piloting:
+		if Input.is_action_just_pressed("gadget"):
+			G.drone.recall("玩家手动召回")
+		else:
+			return
 	# 驾驶模式
 	if vehicle != null:
 		update_vehicle(dt)
@@ -1039,8 +1230,10 @@ func update_player(dt: float) -> void:
 			switch_weapon(2)
 		var wheel = input.consume_wheel()
 		if wheel != 0:
-			var i := (gun_index + (1 if wheel > 0 else -1) + guns.size()) % guns.size()
-			switch_weapon(i)
+			# 火箭筒开镜:滚轮调 CLU 倍率(0×/2×/4×);其余情况仍是滚轮切枪
+			if not _wheel_to_scope_zoom(wheel):
+				var i := (gun_index + (1 if wheel > 0 else -1) + guns.size()) % guns.size()
+				switch_weapon(i)
 		# 手雷蓄力:按住 G 保持(抬臂蓄力),松开投出;力度随蓄力
 		if Input.is_action_just_pressed("grenade"):
 			if grenades > 0 and alive:
@@ -1112,7 +1305,7 @@ func update_player(dt: float) -> void:
 				_lock_t += dt
 				if _lock_t > 1.0 and G.lock_target != cand:
 					G.lock_target = cand
-					G.hud.hint("防空导弹已锁定 — 开火!")
+					G.hud.hint("毒刺导弹已锁定 — 开火!")
 					AudioSys.capture(true)
 				elif _lock_t > 0.3 and G.lock_target != cand and randf() < 0.1:
 					G.hud.hint("锁定中…保持瞄准")
@@ -1143,6 +1336,7 @@ func update_player(dt: float) -> void:
 		if not _nade_arming and _nade_vm_t < 0.0 and melee_active:
 			pass
 		_update_nade_vm(dt)
+		_update_adren_vm(dt)
 	else:
 		# 小刀状态:左键挥击;R/切枪键/滚轮收回
 		if melee != null:

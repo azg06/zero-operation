@@ -30,7 +30,7 @@ func _gui_input(event: InputEvent) -> void:
 		var wz: float = (event.position.y / s) * 2 * ws - ws
 		# 基地(默认出生点):攻方在北(顶),守方在南(底)
 		var base_wz: float = (G.world_size - 16) if G.player.team == "ru" else -(G.world_size - 16)
-		if Vector2(wx, wz - base_wz).length() < 22:
+		if Vector2(wx, wz - base_wz).length() < 22 and G.game.bt_deploy_allowed(G.player.team, "base", null):
 			G.hud.spawn_point = null
 			G.hud.spawn_mate = null
 			AudioSys.ui()
@@ -68,6 +68,8 @@ func _gui_input(event: InputEvent) -> void:
 		var bd := 24.0
 		for f in G.flags:
 			if f.owner_team != G.player.team or (G.mode == "breakthrough" and f.zone_locked):
+				continue
+			if not G.game.bt_deploy_allowed(G.player.team, "flag", f):
 				continue
 			var d := Vector2(f.pos.x - wx, f.pos.z - wz).length()
 			if d < bd:
@@ -157,7 +159,8 @@ func _draw() -> void:
 	# 基地默认出生点(攻方顶部 / 守方底部)
 	var bx := _w2m(0, ws, s)
 	var by := _w2m((G.world_size - 16) if G.player.team == "ru" else -(G.world_size - 16), ws, s)
-	var base_sel: bool = G.hud.spawn_point == null and G.hud.spawn_mate == null
+	var base_ok: bool = G.game.bt_deploy_allowed(G.player.team, "base", null)
+	var base_sel: bool = base_ok and G.hud.spawn_point == null and G.hud.spawn_mate == null
 	draw_circle(Vector2(bx, by), 8 if not base_sel else 11, Color(UiTheme.FRIENDLY.r, UiTheme.FRIENDLY.g, UiTheme.FRIENDLY.b, 0.3))
 	draw_arc(Vector2(bx, by), 8 if not base_sel else 11, 0, TAU, 24,
 		Color(0.42, 0.48, 0.54) if not base_sel else Color.WHITE, 1.5 if not base_sel else 3.0)
@@ -174,7 +177,8 @@ func _draw() -> void:
 			continue
 		var x := _w2m(f.pos.x, ws, s)
 		var y := _w2m(f.pos.z, ws, s)
-		var is_sel: bool = G.hud.spawn_point is Flag and f is Flag and G.hud.spawn_point == f
+		var is_sel: bool = G.hud.spawn_point is Flag and f is Flag and G.hud.spawn_point == f \
+			and G.game.bt_deploy_allowed(G.player.team, "flag", f)
 		draw_circle(Vector2(x, y), 12 if is_sel else 9, Color(UiTheme.FRIENDLY.r, UiTheme.FRIENDLY.g, UiTheme.FRIENDLY.b, 0.35))
 		draw_arc(Vector2(x, y), 12 if is_sel else 9, 0, TAU, 24,
 			Color.WHITE if is_sel else UiTheme.FRIENDLY, 3.0 if is_sel else 1.5)

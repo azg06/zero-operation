@@ -8,6 +8,9 @@ const ADS_POS := Vector3(0, -0.0755, -0.26)
 # 透视翻转后右臂会从屏幕中央/胸口方向穿出。现在分别推到画面右下/左下角。
 const ELBOW_R := Vector3(0.26, -0.50, 0.22)
 const ELBOW_L := Vector3(-0.34, -0.46, 0.20)
+# 火箭筒 CLU 昼视镜可切换放大倍率:开镜时滚轮上/下在 0×(宽视野)→ 2× → 4× 间切换。
+# 0× 表示不放大(镜内与镜外同 FOV),弹道等高线会按当前倍率自动重算刻度间距。
+const RPG_ZOOM_LEVELS := [0.0, 2.0, 4.0]
 
 var def                         # WeaponDef(改装后为实例级副本,不污染全局表)
 var id := ""
@@ -26,6 +29,7 @@ var reload_rot := Vector3.ZERO    # 换弹控制器输出的视角模型旋转
 var fire_timer := 0.0
 var ads_amount := 0.0
 var ads_held := false
+var zoom_idx := 2                # 火箭筒 CLU 倍率档位(RPG_ZOOM_LEVELS 索引,默认 4×)
 var bloom := 0.0                # 连射扩散
 var kick_z := 0.0
 var kick_rot := 0.0             # 视角模型后坐
@@ -109,12 +113,14 @@ func _init(weapon_id: String, p) -> void:
 		_mag = group.get_meta("mag")
 		_mag_y0 = _mag.position.y
 		_mag_x0 = _mag.position.x
-	# 弹匣动画类型:AK/SVD 前挂后卡(侧摆),机枪弹鼓/弹链箱(旋转),P90 顶置弹匣(上抽),其余直插(下沉)
+	# 弹匣动画类型:AK/SVD 前挂后卡(侧摆),机枪弹鼓/弹链箱(专用流程),P90 顶置弹匣(上抽),其余直插(下沉)
 	_mag_anim = "down"
 	if weapon_id in ["ak", "svd"]:
 		_mag_anim = "side"
-	elif weapon_id in ["rpd", "m249", "pkm"]:
+	elif weapon_id == "rpd":
 		_mag_anim = "drum"
+	elif weapon_id in ["m249", "pkm", "mg42", "m60", "mk48", "negev", "mg3"]:
+		_mag_anim = "belt"
 	elif weapon_id == "p90":
 		_mag_anim = "up"
 	if group.has_meta("pump"):
@@ -345,6 +351,10 @@ func try_fire() -> void:
 		return
 	if player.sprint_amount > 0.5:
 		return
+	# ADS 状态下换弹:即使 reloading 已置 false、收尾动画仍在播放,也不允许提前击发,
+	# 避免“按住右键时换弹动作还没播完就开枪”。
+	if reload_ctl != null and reload_ctl.is_animating() and (ads_held or ads_amount > 0.35):
+		return
 	if reloading:
 		if reload_ctl == null:
 			return
@@ -375,10 +385,11 @@ func try_fire() -> void:
 		# RPG:发射火箭弹;已锁定空中目标 → 防空导弹(制导)
 		var dir: Vector3 = -G.camera.global_transform.basis.z
 		var origin: Vector3 = G.camera.global_position + dir * 0.5
-		var locked = G.lock_target
+		# 制导只属于毒刺(rpg):榴弹发射器永远走无制导抛物线弹道
+		var locked = G.lock_target if id == "rpg" else null
 		var use_def = def
 		if locked != null:
-			use_def = { "cn": "防空导弹", "name": "防空导弹", "damage": 320.0, "splash": 10.0, "speed": 50.0, "tracer": def.tracer }
+			use_def = { "cn": "反载具毒刺导弹", "name": "反载具毒刺导弹", "damage": 320.0, "splash": 10.0, "speed": 50.0, "tracer": def.tracer }
 		G.effects.spawn_rocket(p, use_def, origin, dir, locked)
 		if locked != null:
 			G.hud.hint("防空导弹已发射,追踪目标中")
@@ -458,15 +469,24 @@ func try_fire() -> void:
 		reload()
 
 
-## 弹匣掉落
+## 弹匣/弹鼓/弹链箱掉落
 func _drop_mag() -> void:
 	if _mag == null:
 		return
+	# 按当前换弹流程决定世界掉落物模型:弹鼓掉落圆鼓,弹链机枪掉落弹链箱,
+	# 普通武器仍掉落弹匣,避免 RPD 掉出步枪弹匣、M249 掉出小手枪弹匣的违和感。
+	var drop_kind := "mag"
+	if reload_ctl != null and not reload_ctl.cfg.is_empty():
+		match String(reload_ctl.cfg.get("reload_flow", "mag")):
+			"drum":
+				drop_kind = "drum"
+			"belt":
+				drop_kind = "beltbox"
 	# _mag 属于 vm_camera(own_world_3d 独立 SubViewport)子树,其 global_position 是视角模型层
 	# 局部世界坐标,直接传入会把弹匣放到原点附近;与 muzzle_world_main 同约定:
 	# 经主相机全局变换把 视角模型层局部坐标 → 主世界坐标
 	var world_pos: Vector3 = G.camera.global_transform * (group.transform * _mag.position)
-	G.effects.spawn_mag(world_pos, G.camera.global_transform.basis)
+	G.effects.spawn_mag(world_pos, G.camera.global_transform.basis, drop_kind)
 
 
 func reload() -> void:
@@ -512,8 +532,15 @@ func update(dt: float) -> void:
 	# 视角模型深度/臂长设置:整体向屏幕内伸展,并放大视角模型让细节更清楚
 	var vm_depth := _viewmodel_depth()
 	g.position.z += (vm_depth - 1.0) * 0.09
-	g.scale = Vector3.ONE * clampf(1.0 + (vm_depth - 1.0) * 0.18, 0.8, 1.35)
+	# 肩扛式反载具武器:从屏幕右下横入画面、模型明显放大,ADS 时前移到 CLU 目镜位置
+	var vm_scale_k := 1.55 if id == "rpg" else 1.0
+	g.scale = Vector3.ONE * clampf((1.0 + (vm_depth - 1.0) * 0.18) * vm_scale_k, 0.8, 1.7)
 	g.rotation = Vector3.ZERO
+	if id == "rpg":
+		# 发射器头部沿中心向左旋转 5°(ADS 时回正以对准 CLU 目镜)
+		g.rotation.y = lerpf(deg_to_rad(5.0), 0.0, ads_amount)
+		g.rotation.x = lerpf(-0.05, 0.0, ads_amount)
+		g.rotation.z = lerpf(0.06, 0.0, ads_amount)
 	# 拔枪/收枪
 	var draw_drop := (1 - draw_t) * 0.35
 	g.position.y -= draw_drop
@@ -581,7 +608,10 @@ func update(dt: float) -> void:
 		bolt_t += dt
 		if bolt_t > 0.18 and not _bolt_snd:
 			_bolt_snd = true
-			AudioSys.bolt()
+			if reloading:
+				AudioSys.reload_action(String(reload_ctl.cfg.get("bolt_snd", "bolt_cycle")))
+			else:
+				AudioSys.bolt()
 		var bt := bolt_t / 0.85
 		if bt >= 1:
 			bolt_t = 0
@@ -627,7 +657,11 @@ func _update_pip_scope_visuals(g: Node3D, ads: float) -> void:
 	var in_ads := ads >= 0.5
 	var body: Node3D = _meta_node(g, "scope_tube")
 	if body != null:
-		body.visible = not in_ads
+		# 毒刺 CLU 的方形目镜筒在 ADS 时保留,作为 PIP 取景框;狙击镜仍隐藏镜筒
+		body.visible = (id == "rpg") or not in_ads
+	var clu_body: Node3D = _meta_node(g, "scope_clu")
+	if clu_body != null:
+		clu_body.visible = not in_ads
 	var black: MeshInstance3D = _meta_node(g, "scope_lens_black") as MeshInstance3D
 	if black != null:
 		black.visible = not in_ads
@@ -664,12 +698,45 @@ func scope_sight() -> bool:
 ## 镜内实际 FOV:优先按真实倍率(scope_mag)和玩家基础 FOV 换算,
 ## 保证 75/90/110 FOV 下都获得一致的 4×/6×/7×/8× 感知倍率;
 ## 没有 scope_mag 的旧数据回退 def.zoom_fov。
+## 火箭筒 CLU 走可切换倍率档位(0×/2×/4×),0× 档镜内与镜外同 FOV。
 func scope_fov() -> float:
 	var mag := float(def.scope_mag)
+	if id == "rpg":
+		mag = zoom_mag()
+		if mag <= 1.0:
+			# 0× 宽视野档:与镜外同 FOV,CLU 屏幕画面和裸眼视野连续(不放大也不缩小)
+			return G.camera.fov if G.camera != null else float(G.settings.get("fov", 75.0))
 	if mag > 1.0:
 		var base := float(G.settings.get("fov", 75.0))
 		return rad_to_deg(2.0 * atan(tan(deg_to_rad(base) * 0.5) / mag))
 	return float(def.zoom_fov)
+
+
+## 当前光学倍率:火箭筒读 CLU 档位,其余武器读数据表 scope_mag
+func zoom_mag() -> float:
+	if id != "rpg":
+		return float(def.scope_mag)
+	return float(RPG_ZOOM_LEVELS[clampi(zoom_idx, 0, RPG_ZOOM_LEVELS.size() - 1)])
+
+
+## 分划右上角倍率文字(0× 档显示 0X)
+func zoom_label() -> String:
+	return "%dX" % int(round(zoom_mag()))
+
+
+## 火箭筒开镜时滚轮切换 CLU 倍率档位。
+## 返回 true 表示本次滚轮已被瞄具消费(调用方不得再切换武器);
+## 到达两端时仍然消费滚轮,避免开镜微调倍率时把武器换掉。
+func cycle_zoom(dir: int) -> bool:
+	if id != "rpg" or dir == 0:
+		return false
+	var i := clampi(zoom_idx + (1 if dir > 0 else -1), 0, RPG_ZOOM_LEVELS.size() - 1)
+	if i != zoom_idx:
+		zoom_idx = i
+		AudioSys.ui()
+		if G.hud != null:
+			G.hud.hint("CLU 昼视镜倍率 %s" % zoom_label())
+	return true
 
 
 ## 镜内渲染是否已足够开启(供 OpticScopeSystem/射击弹道使用)
@@ -721,6 +788,9 @@ func _viewmodel_depth() -> float:
 func _point_arm(arm: Node3D, wrist: Vector3, elbow: Vector3) -> void:
 	if arm == null:
 		return
+	# 肩扛式反载具武器:左臂肘锚点再向左下前方延伸,让手臂向准心方向自然前伸
+	if id == "rpg" and arm == _left_arm:
+		elbow = Vector3(-0.52, -0.62, 0.34)
 	var depth := _viewmodel_depth()
 	# 深度设置会把肘部向屏幕外/更深处推远,从而拉长前臂,让换弹细节更清楚
 	var elbow2 := elbow + Vector3(0.0, 0.0, (depth - 1.0) * 0.55)

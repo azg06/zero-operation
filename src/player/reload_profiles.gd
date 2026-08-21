@@ -53,8 +53,8 @@ static func _mag_style_for(id: String, def) -> String:
 	if id in ["ak", "ak74", "svd"]:
 		return "side"
 	if id == "rpd":
-		# RPD 弹鼓位于机匣正下方,换弹时垂直落下/推入,不做鼓面旋转
-		return "down"
+		# RPD 为左侧大圆鼓供弹:必须走“解锁 → 横移摘下 → 重新对位 → 旋转锁定”的弹鼓流程
+		return "drum"
 	if id == "pp19":
 		# 野牛长筒螺旋弹匣沿枪管方向横置,装填时垂直落下/垂直推入,不走弹鼓旋转路径
 		return "down"
@@ -63,6 +63,28 @@ static func _mag_style_for(id: String, def) -> String:
 	if id in ["m24"]:
 		return "none"
 	return "down"
+
+
+## 换弹音效枪族:让 AK 钢弹匣、SMG、手枪、狙击枪的拔插/枪机声有明显区别
+static func _snd_family_for(id: String, def) -> String:
+	if def.pellets > 1:
+		return "shotgun"
+	if def.kind == "pistol":
+		return "pistol"
+	if id in ["ak", "ak74", "svd"]:
+		return "ak"
+	if def.kind == "sniper":
+		return "sniper"
+	if def.kind == "smg":
+		return "smg"
+	return "rifle"
+
+
+## 弹链机枪音效组:轻机枪组与重机枪组使用不同的开盖/抽链/闭锁采样
+static func _belt_snd_set_for(id: String) -> String:
+	if id in ["pkm", "mg42", "mg3", "m60"]:
+		return "heavy"
+	return "light"
 
 
 ## 枪机操作风格:不同枪族/结构完全不同的收尾动作
@@ -80,7 +102,8 @@ static func _chamber_for(id: String, def) -> String:
 	if id in ["ak", "ak74", "svd"]:
 		return "pull_ak"
 	if def.kind == "lmg":
-		return "belt_slap"
+		# 弹鼓/弹链机枪的空仓收尾:拉机柄/受弹机盖闭锁后的真实上膛循环,不再“拍弹匣”
+		return "pull_heavy"
 	if def.kind == "dmr":
 		return "release"
 	if def.kind == "sniper":
@@ -96,10 +119,25 @@ static func _base(style: String) -> Dictionary:
 	var p := {
 		"style": style,
 		"mag": "down",
+		"reload_flow": "mag",
 		"tac_time": 0.0,
 		"empty_time": 0.0,
 		"tac_weights": [0.16, 0.20, 0.32, 0.18, 0.14],
 		"empty_weights": [0.12, 0.15, 0.26, 0.15, 0.18, 0.14],
+		"drum_weights": [0.13, 0.18, 0.25, 0.18, 0.12, 0.14],
+		"belt_weights": [0.17, 0.18, 0.24, 0.17, 0.13, 0.11],
+		"charge_weight": 0.14,
+		"cover_angle": 0.62,
+		"cover_open_at": 0.10,
+		"cover_open_span": 0.74,
+		"cover_close_at": 0.08,
+		"cover_close_span": 0.76,
+		"belt_commit": 0.68,
+		"drum_commit": 0.78,
+		"seal_point": 0.68,
+		"cover_seal": 0.84,
+		"swap_point": 0.88,
+		"mech_pitch": 1.0,
 		"pose_pos": Vector3(0.045, 0.030, 0.060),
 		"pose_rot": Vector3(0.035, -0.16, -0.22),
 		"pose_in": 0.14,
@@ -226,6 +264,20 @@ static func _base(style: String) -> Dictionary:
 ## 武器级覆写:只放真正需要单独设计的枪,其余走枪族配置
 static func _override(id: String, p: Dictionary) -> void:
 	match id:
+		"gl":
+			# M320 中折式榴弹发射器:开膛 → 抽空壳 → 取新榴弹 → 推入 → 合膛闭锁
+			# breech_hinge=开膛下折角度(rad),由 WeaponReloadController 按阶段驱动膛体铰链
+			p["breech_hinge"] = 0.62
+			p["insert_offset"] = Vector3(0.02, 0.055, 0.15)   # 榴弹从弹膛后上方塞入(中折式)
+			p["load_snd"] = "shell_insert"   # 40mm 榴弹逐发塞入声(比导弹筒入膛更贴切)
+			p["pose_pos"] = Vector3(0.0, -0.022, 0.055)
+			p["pose_rot"] = Vector3(0.10, -0.16, -0.14)
+			p["tac_weights"] = [0.18, 0.2, 0.26, 0.2, 0.16]
+			p["empty_weights"] = [0.18, 0.2, 0.26, 0.2, 0.16]
+			p["inertia_strength"] = 1.25
+			p["pose_damp"] = 10.0
+			p["insert_impact"] = 0.011
+			p["cam_strength"] = 1.1
 		"m4":
 			p["pose_rot"] = Vector3(0.025, -0.09, -0.12)
 		"ak":
@@ -255,11 +307,19 @@ static func _override(id: String, p: Dictionary) -> void:
 		"m249":
 			p["pose_pos"] = Vector3(0.014, -0.014, 0.052)
 			p["anim_speed"] = 0.94
+			p["mech_pitch"] = 0.98
+			p["belt_weights"] = [0.16, 0.19, 0.24, 0.17, 0.13, 0.11]
 		"pkm":
 			p["pose_pos"] = Vector3(0.014, -0.016, 0.054)
 			p["anim_speed"] = 0.93
+			p["mech_pitch"] = 0.92
+			p["cover_angle"] = 0.68
+			p["belt_weights"] = [0.15, 0.18, 0.26, 0.17, 0.13, 0.11]
 		"mg42":
 			p["anim_speed"] = 0.97
+			p["mech_pitch"] = 1.05
+			p["cover_angle"] = 0.74
+			p["belt_weights"] = [0.18, 0.16, 0.24, 0.16, 0.15, 0.11]
 		"m82a1":
 			p["pose_pos"] = Vector3(0.018, -0.004, 0.038)
 			p["inertia_strength"] = 1.4
@@ -290,17 +350,31 @@ static func _override(id: String, p: Dictionary) -> void:
 			p["drop_dist"] = 0.16
 			p["slap"] = 0.010
 		"rpd":
-			p["drop_dist"] = 0.16
-			p["mag_rot"] = 0.0
+			p["anim_speed"] = 0.96
+			p["mech_pitch"] = 0.97
 			p["chamber_amp"] = 0.058
+			p["drum_weights"] = [0.12, 0.17, 0.26, 0.18, 0.13, 0.14]
 		"m60":
+			p["anim_speed"] = 0.90
+			p["mech_pitch"] = 0.88
+			p["cover_angle"] = 0.58
 			p["chamber_amp"] = 0.06
+			p["belt_weights"] = [0.14, 0.18, 0.26, 0.17, 0.14, 0.11]
 		"mk48":
+			p["anim_speed"] = 0.92
+			p["mech_pitch"] = 0.95
 			p["chamber_amp"] = 0.064
+			p["belt_weights"] = [0.16, 0.18, 0.25, 0.17, 0.13, 0.11]
 		"negev":
+			p["anim_speed"] = 0.88
+			p["mech_pitch"] = 0.90
 			p["chamber_amp"] = 0.066
+			p["belt_weights"] = [0.14, 0.18, 0.26, 0.18, 0.13, 0.11]
 		"mg3":
+			p["anim_speed"] = 0.94
+			p["mech_pitch"] = 1.02
 			p["chamber_amp"] = 0.064
+			p["belt_weights"] = [0.17, 0.17, 0.24, 0.17, 0.14, 0.11]
 		"m110":
 			p["chamber_amp"] = 0.05
 		"sks":
@@ -343,6 +417,43 @@ static func profile_for(id: String, def) -> Dictionary:
 	var p := _base(style)
 	p["mag"] = _mag_style_for(id, def)
 	p["chamber_style"] = _chamber_for(id, def)
+	# 弹鼓/弹链轻机枪切换到专用换弹流程;其余武器保持原弹匣流程
+	match String(p["mag"]):
+		"drum":
+			p["reload_flow"] = "drum"
+		"belt":
+			p["reload_flow"] = "belt"
+	# 按枪族映射换弹音效:不同结构/材质的武器不再共用同一声
+	var snd_family := _snd_family_for(id, def)
+	match snd_family:
+		"ak":
+			p["mag_out_snd"] = "mag_out_ak"
+			p["mag_in_snd"] = "mag_in_ak"
+			p["pouch_snd"] = "ammo_pouch"
+			p["bolt_snd"] = "bolt_cycle_ak"
+		"pistol":
+			p["mag_out_snd"] = "mag_out_pistol"
+			p["mag_in_snd"] = "mag_in_pistol"
+			p["pouch_snd"] = "ammo_pouch_pistol"
+			p["bolt_snd"] = "slide_release"
+		"sniper":
+			p["mag_out_snd"] = "mag_out_sniper"
+			p["mag_in_snd"] = "mag_in_sniper"
+			p["pouch_snd"] = "ammo_pouch_sniper"
+			p["bolt_snd"] = "bolt_cycle_sniper"
+		"smg":
+			p["mag_out_snd"] = "mag_out_smg"
+			p["mag_in_snd"] = "mag_in_smg"
+			p["pouch_snd"] = "ammo_pouch_smg"
+			p["bolt_snd"] = "bolt_cycle_smg"
+		_:
+			p["mag_out_snd"] = "mag_out"
+			p["mag_in_snd"] = "mag_in"
+			p["pouch_snd"] = "ammo_pouch"
+			p["bolt_snd"] = "bolt_cycle"
+	if def.kind == "lmg":
+		p["bolt_snd"] = "bolt_cycle_lmg"
+		p["belt_snd_set"] = _belt_snd_set_for(id)
 	# 换弹总时长:优先 WeaponDef 的专用战术时长,否则按 78% 折算
 	if def.pellets > 1:
 		p["shell_time"] = maxf(0.45, float(def.reload_time) / float(maxi(1, def.mag)))

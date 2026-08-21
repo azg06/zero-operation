@@ -231,6 +231,59 @@ static func _bolt(g: Node3D, x: float, y: float, z: float, side := 1.0, mat := "
 	g.set_meta("bolt", b)
 
 
+## 弹链供弹机枪的受弹机盖:独立 Node3D 动画件(绕根部 X 轴前掀开盖)。
+## CoverLatch 为手部抓握点,机盖旋转后随动,保证换弹手不会抓空气。
+static func _feed_cover(g: Node3D, y: float, z_center: float, length: float, w := 0.052, mat := "dark") -> Node3D:
+	var cover := Node3D.new()
+	cover.name = "FeedCover"
+	# 铰链根位于机匣后缘:绕 +X 旋转时只有盖体前端向 -Z 方向掀开,后缘不穿入机匣。
+	cover.position = Vector3(0, y, z_center + length * 0.5)
+	cover.add_child(box(w, 0.018, length, 0, 0, -length * 0.5, mat))
+	cover.add_child(box(w - 0.012, 0.007, length - 0.06, 0, 0.0105, -length * 0.5, "metal"))  # 顶部加强筋
+	var latch := box(0.016, 0.016, 0.036, 0, 0.017, -length * 0.66, mat)
+	latch.name = "CoverLatch"
+	cover.add_child(latch)
+	g.add_child(cover)
+	g.set_meta("cover", cover)
+	g.set_meta("cover_latch", latch)
+	return cover
+
+
+## 弹链尾:从弹链箱口伸入受弹机端口的一段可见弹链(铜色弹壳 + 深色链节)。
+## 挂在弹链箱(meta "mag")节点下,随箱体拆卸/装填移动,由换弹控制器独立调整入槽姿态。
+static func _add_belt_tail(mag: Node3D, a: Vector3, b: Vector3, c: Vector3, links := 7) -> Node3D:
+	var belt := Node3D.new()
+	belt.name = "BeltTail"
+	for i in links:
+		var t := float(i) / float(maxi(1, links - 1))
+		var ab := a.lerp(b, t)
+		var bc := b.lerp(c, t)
+		var p := ab.lerp(bc, t)
+		belt.add_child(box(0.017, 0.02, 0.042, p.x, p.y, p.z, "brass" if i % 2 == 0 else "dark"))
+	mag.add_child(belt)
+	return belt
+
+
+## 侧挂弹链箱(meta "mag") + 弹链尾(BeltTail) + 供弹口参考点(meta "feed_port")。
+## side=-1 挂左侧 / +1 挂右侧;弹链从箱口上缘弧线进入 port_pos 的受弹机供弹槽。
+static func _side_belt_feed(g: Node3D, side: float, box_pos: Vector3, box_size: Vector3, port_pos: Vector3, mat := "olive") -> MeshInstance3D:
+	var mag := box(box_size.x, box_size.y, box_size.z, box_pos.x, box_pos.y, box_pos.z, mat)
+	# 弹链箱上盖锁扣/提手
+	mag.add_child(box(0.024, 0.014, 0.05, -side * box_size.x * 0.28, box_size.y * 0.5 + 0.009, -box_size.z * 0.18, "dark"))
+	var from := box_pos + Vector3(-side * box_size.x * 0.34, box_size.y * 0.42, 0.0)
+	var mid := (from + port_pos) * 0.5 + Vector3(side * 0.02, 0.052, 0.01)
+	var tail := _add_belt_tail(mag, from - box_pos, mid - box_pos, port_pos - box_pos, 7)
+	g.add_child(mag)
+	g.set_meta("mag", mag)
+	g.set_meta("belt", tail)
+	var port := Node3D.new()
+	port.name = "FeedPort"
+	port.position = port_pos
+	g.add_child(port)
+	g.set_meta("feed_port", port)
+	return mag
+
+
 ## 手枪式握把:顶端(y_top)枢轴后倾,顶端贴合机匣底(消除握把悬空);返回枢轴供 add_child
 static func _grip(w: float, h: float, d: float, x: float, y_top: float, z: float, mat := "poly", tilt := 0.32) -> Node3D:
 	var pivot := Node3D.new()
@@ -542,13 +595,14 @@ static func _build(id: String, g: Node3D) -> void:
 			# 机械瞄具(视轴 = sight_y 0.078)
 			_irons(g, 0.078, -0.18, 0.09, 0.032, 0.01)
 		"m249":
-			# 大机匣 + 顶部受弹机盖
+			# 大机匣 + 顶部受弹机盖(独立动画件)
 			g.add_child(box(0.062, 0.1, 0.44, 0, 0.02, -0.08))
-			g.add_child(box(0.058, 0.03, 0.46, 0, 0.085, -0.1, "dark"))
-			_rail(g, 0.106, 0.1, -0.34)
-			# 弹链箱(左侧挂,贴合机匣左侧)
-			var mag_l := box(0.075, 0.11, 0.13, -0.062, -0.075, -0.12, "olive")
-			g.add_child(mag_l); g.set_meta("mag", mag_l)
+			var m249_cover := _feed_cover(g, 0.085, -0.1, 0.46)
+			# M249 顶部导轨装在受弹机盖上:作为 cover 子节点,开盖时随盖翻转,不穿模
+			_rail(m249_cover, 0.021, -0.03, -0.47)
+			# 弹链箱(左侧挂)+ 可见弹链尾 → 受弹机左供弹口
+			_side_belt_feed(g, -1.0, Vector3(-0.062, -0.075, -0.12), Vector3(0.075, 0.11, 0.13),
+				Vector3(-0.026, -0.015, -0.16), "olive")
 			# 护木 + 枪管 + 两脚架
 			g.add_child(cyl(0.028, 0.032, 0.26, 0, 0.02, -0.42, "dark"))
 			g.add_child(cyl(0.014, 0.016, 0.4, 0, 0.028, -0.68))
@@ -565,10 +619,10 @@ static func _build(id: String, g: Node3D) -> void:
 			_irons(g, 0.125, -0.6, 0.1, 0.055, 0.028)
 		"pkm":
 			g.add_child(box(0.062, 0.1, 0.46, 0, 0.02, -0.06))
-			g.add_child(box(0.058, 0.028, 0.48, 0, 0.082, -0.08, "dark"))
-			# 弹链箱(右侧挂,PKM 特征)
-			var mag_p2 := box(0.075, 0.11, 0.13, 0.062, -0.075, -0.1, "dark")
-			g.add_child(mag_p2); g.set_meta("mag", mag_p2)
+			_feed_cover(g, 0.082, -0.08, 0.48)
+			# 弹链箱(右侧挂,PKM 特征)+ 可见弹链尾 → 受弹机右供弹口
+			_side_belt_feed(g, 1.0, Vector3(0.062, -0.075, -0.1), Vector3(0.075, 0.11, 0.13),
+				Vector3(0.026, -0.015, -0.15), "dark")
 			g.add_child(cyl(0.028, 0.032, 0.28, 0, 0.02, -0.42, "wood"))
 			g.add_child(cyl(0.015, 0.017, 0.42, 0, 0.028, -0.7))
 			g.add_child(cyl(0.02, 0.023, 0.06, 0, 0.028, -0.9, "dark"))
@@ -587,8 +641,11 @@ static func _build(id: String, g: Node3D) -> void:
 			var drum_root := Node3D.new()
 			drum_root.position = Vector3(-0.048, -0.06, -0.08)
 			drum_root.add_child(cyl(0.075, 0.075, 0.05, 0, 0, 0, "brass", "x"))
+			drum_root.add_child(cyl(0.03, 0.036, 0.035, 0.026, 0.012, 0.0, "dark", "x"))  # 弹鼓接口颈
+			drum_root.add_child(box(0.012, 0.02, 0.032, -0.016, 0.052, 0.0, "dark"))       # 鼓面锁扣
 			g.add_child(drum_root)
 			g.set_meta("mag", drum_root)
+			g.add_child(box(0.024, 0.03, 0.05, -0.048, -0.028, -0.08, "dark"))             # 机匣侧弹鼓挂座
 			g.add_child(cyl(0.026, 0.03, 0.28, 0, 0.02, -0.39, "wood"))
 			g.add_child(cyl(0.013, 0.015, 0.42, 0, 0.026, -0.68))
 			g.add_child(cyl(0.018, 0.021, 0.05, 0, 0.026, -0.875, "dark"))
@@ -686,20 +743,83 @@ static func _build(id: String, g: Node3D) -> void:
 			# 机械瞄具(视轴 = sight_y 0.1)
 			_irons(g, 0.1, -0.58, 0.09, 0.045, 0.048)
 		"rpg":
-			# 火箭筒:主筒 + 锥形弹头 + 握把 + 机瞄
-			g.add_child(cyl(0.042, 0.042, 0.6, 0, 0.02, -0.1, "olive"))
-			g.add_child(cyl(0.05, 0.05, 0.1, 0, 0.02, 0.22, "dark"))
-			# 膛内火箭弹(锥头,换弹时隐藏)
+			# 现代反载具导弹:方形发射筒 + 顶部/底部导轨 + 大型侧置 CLU 指挥发射单元
+			g.add_child(cyl(0.047, 0.047, 0.78, 0, 0.02, -0.14, "olive"))       # 发射筒芯
+			g.add_child(box(0.072, 0.020, 0.82, 0, 0.056, -0.14, "poly"))       # 顶部战术导轨
+			g.add_child(box(0.072, 0.018, 0.82, 0, -0.018, -0.14, "poly"))      # 底部加强筋
+			g.add_child(box(0.086, 0.086, 0.05, 0, 0.02, -0.51, "dark"))        # 方形前口护罩
+			g.add_child(box(0.092, 0.092, 0.06, 0, 0.02, 0.21, "dark"))         # 方形尾盖
+			# 侧置 CLU:光学物镜 + 目镜 + 控制面板 + 橡胶眼罩
+			var clu := Node3D.new()
+			clu.position = Vector3(-0.066, 0.095, -0.16)
+			clu.add_child(box(0.055, 0.14, 0.32, 0, 0, 0, "dark"))
+			clu.add_child(box(0.060, 0.040, 0.050, 0, 0.008, -0.16, "poly"))
+			clu.add_child(cyl(0.019, 0.019, 0.05, 0, 0.010, -0.16, "metal", "z"))   # 物镜筒
+			clu.add_child(cyl(0.021, 0.019, 0.035, 0, 0.010, 0.13, "dark", "z"))    # 目镜筒
+			clu.add_child(box(0.020, 0.055, 0.02, 0, -0.06, 0.08, "poly"))           # 控制按钮区
+			g.add_child(clu)
+			g.set_meta("scope_clu", clu)
+			# PIP 制导镜目镜锚点:开镜时由 OpticScopeSystem 渲染镜内放大画面
+			var rpg_eye := Node3D.new()
+			rpg_eye.name = "ScopeEye"
+			rpg_eye.position = Vector3(-0.066, 0.105, -0.069)
+			g.add_child(rpg_eye)
+			g.set_meta("scope_eye", rpg_eye)
+			g.set_meta("scope_eye_radius", 0.030)
+			# 方形目镜筒:ADS 时作为 PIP 取景框保留显示
+			var rpg_frame := Node3D.new()
+			rpg_frame.position = rpg_eye.position
+			rpg_frame.add_child(box(0.085, 0.012, 0.035, 0, 0.038, 0, "dark"))
+			rpg_frame.add_child(box(0.085, 0.012, 0.035, 0, -0.038, 0, "dark"))
+			rpg_frame.add_child(box(0.012, 0.088, 0.035, -0.040, 0, 0, "dark"))
+			rpg_frame.add_child(box(0.012, 0.088, 0.035, 0.040, 0, 0, "dark"))
+			g.add_child(rpg_frame)
+			g.set_meta("scope_tube", rpg_frame)
+			g.add_child(box(0.045, 0.060, 0.14, 0.064, -0.012, -0.18, "poly"))  # 右侧 BCU
+			g.add_child(box(0.006, 0.075, 0.006, -0.018, 0.112, 0.04, "dark"))   # IFF 天线
+			g.add_child(_grip(0.036, 0.10, 0.05, 0, -0.030, 0.05, "dark", 0.3))
+			g.add_child(box(0.050, 0.10, 0.04, 0, 0.0, 0.13, "poly"))            # 肩托
+			_trigger(g, -0.040, 0.02)
+			# 可拆装导弹筒(换弹动画件):方形导弹筒 + 外露战斗部 + 十字稳定鳍
 			var rkt := Node3D.new()
-			rkt.position = Vector3(0, 0.02, -0.42)
-			rkt.add_child(cyl(0.0, 0.055, 0.16, 0, 0, 0, "brass"))
-			rkt.add_child(cyl(0.055, 0.03, 0.1, 0, 0, 0.12, "dark"))
+			rkt.position = Vector3(0, 0.02, -0.14)
+			rkt.add_child(box(0.060, 0.060, 0.54, 0, 0, 0.02, "olive"))          # 导弹筒体
+			rkt.add_child(cyl(0.0, 0.042, 0.15, 0, 0, -0.27, "brass", "z"))      # 外露战斗部锥体
+			rkt.add_child(box(0.012, 0.048, 0.05, 0, 0.030, -0.19, "dark"))      # 上鳍
+			rkt.add_child(box(0.012, 0.048, 0.05, 0, -0.030, -0.19, "dark"))     # 下鳍
+			rkt.add_child(box(0.048, 0.012, 0.05, 0.030, 0, -0.19, "dark"))      # 右鳍
+			rkt.add_child(box(0.048, 0.012, 0.05, -0.030, 0, -0.19, "dark"))     # 左鳍
 			g.add_child(rkt)
 			g.set_meta("rocket", rkt)
-			g.add_child(_grip(0.034, 0.1, 0.05, 0, -0.024, 0.02, "dark", 0.3))
-			g.add_child(_grip(0.034, 0.08, 0.05, 0, -0.024, -0.25, "dark", 0.15))
-			g.add_child(box(0.014, 0.06, 0.05, 0, 0.075, -0.1, "dark"))
-			g.add_child(box(0.03, 0.02, 0.06, 0, 0.07, 0.08, "dark"))
+		"gl":
+			# 突击兵 M320:中折式单发 40mm 榴弹发射器
+			# 结构:握把机匣(固定)+ 绕机匣前下方铰链「向下」折开的膛体 breech + 膛内榴弹 rocket
+			g.add_child(box(0.062, 0.088, 0.16, 0, -0.006, 0.02, "dark"))          # 机匣本体(立breech面 z=-0.06)
+			g.add_child(box(0.05, 0.03, 0.1, 0, 0.05, 0.03, "poly"))               # 机匣上盖
+			g.add_child(box(0.03, 0.018, 0.03, 0, -0.04, -0.062, "metal"))         # 铰链座(轴点)
+			g.add_child(_grip(0.036, 0.105, 0.05, 0, -0.075, 0.06, "poly", 0.28))  # 手枪握把
+			_trigger(g, -0.045, 0.015)
+			# 膛体:枢轴 = 机匣前下方铰链销(0,-0.04,-0.062);子件相对该轴点摆放,
+			# 换弹时绕 X 负向旋转 → 枪管向下折开、弹膛口抬离立breech面(经典中折)
+			var gl_breech := Node3D.new()
+			gl_breech.name = "Breech"
+			gl_breech.position = Vector3(0, -0.04, -0.062)
+			var gl_ax := 0.052                                                      # 枪管轴线相对铰链的高度
+			gl_breech.add_child(cyl(0.031, 0.031, 0.3, 0, gl_ax, -0.143, "olive", "z"))   # 40mm 膛管
+			gl_breech.add_child(cyl(0.036, 0.036, 0.04, 0, gl_ax, -0.285, "dark", "z"))   # 前口加强环
+			gl_breech.add_child(box(0.052, 0.014, 0.2, 0, gl_ax + 0.038, -0.15, "poly"))  # 顶部导轨
+			gl_breech.add_child(box(0.012, 0.026, 0.012, 0, gl_ax + 0.06, -0.03, "dark")) # 照门
+			gl_breech.add_child(box(0.01, 0.022, 0.01, 0, gl_ax + 0.05, -0.27, "dark"))   # 准星
+			gl_breech.add_child(box(0.03, 0.024, 0.06, 0, gl_ax - 0.04, -0.21, "poly"))   # 前护木
+			g.add_child(gl_breech)
+			g.set_meta("breech", gl_breech)
+			# 膛内 40mm 榴弹:坐进膛管后段(弹膛),战斗部朝前;随膛体一起下折
+			var gl_rd := Node3D.new()
+			gl_rd.position = Vector3(0, gl_ax, -0.062)
+			gl_rd.add_child(cyl(0.0195, 0.0195, 0.075, 0, 0, 0.02, "brass", "z"))        # 药筒
+			gl_rd.add_child(cyl(0.0, 0.021, 0.055, 0, 0, -0.045, "olive", "z"))          # 战斗部锥体
+			gl_breech.add_child(gl_rd)
+			g.set_meta("rocket", gl_rd)
 		"m1911":
 			var sl1 := box(0.034, 0.048, 0.19, 0, 0.032, -0.03, "dark"); g.add_child(sl1)
 			g.set_meta("slide", sl1)
@@ -866,11 +986,11 @@ static func _build(id: String, g: Node3D) -> void:
 		"mg42":
 			# MG42:方形机匣 + 细长枪管 + 侧挂弹链箱 + 两脚架
 			g.add_child(box(0.05, 0.09, 0.4, 0, 0.018, 0.02))
-			g.add_child(box(0.04, 0.03, 0.5, 0, 0.062, -0.12, "dark"))
+			_feed_cover(g, 0.062, -0.12, 0.5)
 			g.add_child(cyl(0.011, 0.012, 0.56, 0, 0.024, -0.45))
 			g.add_child(cyl(0.014, 0.016, 0.06, 0, 0.024, -0.71, "dark"))
-			var belt := box(0.05, 0.09, 0.14, 0, -0.025, 0.06, "dark")
-			g.add_child(belt)
+			_side_belt_feed(g, -1.0, Vector3(-0.060, -0.068, -0.07), Vector3(0.07, 0.1, 0.12),
+				Vector3(-0.024, -0.018, -0.14), "olive")
 			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.008, 0.2, "wood", 0.14))
 			g.add_child(box(0.046, 0.1, 0.02, 0, 0.0, 0.3, "wood"))
 			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.025, 0.05, "wood", 0.4))
@@ -886,11 +1006,12 @@ static func _build(id: String, g: Node3D) -> void:
 		"m60":
 			# M60:粗枪管 + 盒机匣 + 提把 + 弹链箱
 			g.add_child(box(0.052, 0.085, 0.34, 0, 0.018, -0.04))
+			_feed_cover(g, 0.0625, -0.04, 0.34)
 			g.add_child(cyl(0.016, 0.018, 0.56, 0, 0.028, -0.47))
 			g.add_child(cyl(0.02, 0.022, 0.06, 0, 0.028, -0.735, "dark"))
 			g.add_child(box(0.03, 0.035, 0.14, 0, 0.073, -0.18, "poly"))
-			var belt2 := box(0.05, 0.1, 0.13, 0, -0.025, 0.04, "dark")
-			g.add_child(belt2)
+			_side_belt_feed(g, -1.0, Vector3(-0.060, -0.066, -0.05), Vector3(0.07, 0.1, 0.12),
+				Vector3(-0.024, -0.018, -0.12), "olive")
 			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.008, 0.18, "wood", 0.14))
 			g.add_child(box(0.046, 0.1, 0.02, 0, 0.0, 0.28, "wood"))
 			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.024, 0.04, "wood", 0.4))
@@ -989,11 +1110,11 @@ static func _build(id: String, g: Node3D) -> void:
 		"mk48":
 			# MK48:7.62 轻机枪,方机匣 + 粗管 + 弹链箱
 			g.add_child(box(0.052, 0.09, 0.38, 0, 0.018, -0.04))
-			g.add_child(box(0.046, 0.03, 0.46, 0, 0.062, -0.16, "dark"))
+			_feed_cover(g, 0.062, -0.16, 0.46)
 			g.add_child(cyl(0.014, 0.016, 0.58, 0, 0.026, -0.51))
 			g.add_child(cyl(0.018, 0.02, 0.06, 0, 0.026, -0.795, "dark"))
-			var belt_k := box(0.05, 0.1, 0.14, 0, -0.025, 0.05, "dark")
-			g.add_child(belt_k)
+			_side_belt_feed(g, -1.0, Vector3(-0.060, -0.065, -0.05), Vector3(0.07, 0.1, 0.12),
+				Vector3(-0.024, -0.018, -0.13), "olive")
 			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.008, 0.2, "wood", 0.14))
 			g.add_child(box(0.046, 0.1, 0.02, 0, 0.0, 0.3, "wood"))
 			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.025, 0.05, "wood", 0.4))
@@ -1003,10 +1124,11 @@ static func _build(id: String, g: Node3D) -> void:
 		"negev":
 			# 内格夫:长机匣 + 粗管散热 + 两脚架
 			g.add_child(box(0.052, 0.09, 0.44, 0, 0.018, -0.06))
+			_feed_cover(g, 0.062, -0.06, 0.44)
 			g.add_child(cyl(0.012, 0.014, 0.6, 0, 0.026, -0.56))
 			g.add_child(cyl(0.016, 0.018, 0.06, 0, 0.026, -0.83, "dark"))
-			var belt_n := box(0.05, 0.095, 0.16, 0, -0.02, 0.06, "dark")
-			g.add_child(belt_n)
+			_side_belt_feed(g, -1.0, Vector3(-0.060, -0.065, -0.05), Vector3(0.07, 0.1, 0.12),
+				Vector3(-0.024, -0.018, -0.12), "olive")
 			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.008, 0.22, "poly", 0.14))
 			g.add_child(box(0.046, 0.1, 0.02, 0, 0.0, 0.32, "poly"))
 			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.025, 0.05, "poly", 0.4))
@@ -1019,13 +1141,13 @@ static func _build(id: String, g: Node3D) -> void:
 			_bolt(g, 0.03, 0.045, 0.02, 1.0)
 			_irons(g, 0.125, -0.6, 0.05, 0.05, 0.026)
 		"mg3":
-			# MG3:MG42 风格方机匣 + 细长管 + 侧挂弹链
+			# MG3:MG42 风格方机匣 + 细长管 + 右侧挂弹链箱(与 MG42 镜像区分)
 			g.add_child(box(0.05, 0.09, 0.4, 0, 0.018, 0.02))
-			g.add_child(box(0.04, 0.03, 0.5, 0, 0.062, -0.12, "dark"))
+			_feed_cover(g, 0.062, -0.12, 0.5)
 			g.add_child(cyl(0.011, 0.012, 0.56, 0, 0.024, -0.45))
 			g.add_child(cyl(0.014, 0.016, 0.06, 0, 0.024, -0.71, "dark"))
-			var belt_3 := box(0.05, 0.09, 0.14, 0, -0.025, 0.06, "dark")
-			g.add_child(belt_3)
+			_side_belt_feed(g, 1.0, Vector3(0.060, -0.068, -0.07), Vector3(0.07, 0.1, 0.12),
+				Vector3(0.024, -0.018, -0.14), "dark")
 			g.add_child(_grip(0.042, 0.1, 0.2, 0, -0.008, 0.2, "wood", 0.14))
 			g.add_child(box(0.046, 0.1, 0.02, 0, 0.0, 0.3, "wood"))
 			g.add_child(_grip(0.034, 0.1, 0.045, 0, -0.025, 0.05, "wood", 0.4))
@@ -1215,7 +1337,8 @@ const HAND_ANCHORS := {
 	"awm": { "r": [0.012, -0.095, 0.065], "l": [0, -0.048, -0.32] },
 	"m1014": { "r": [0.012, -0.1, 0.045], "l": [0, -0.062, -0.32] },
 	"m1911": { "r": [0.012, -0.075, 0.055], "l": [-0.028, -0.085, 0.05] },
-	"rpg": { "r": [0.012, -0.07, 0.115], "l": [0, -0.03, -0.1] },
+	"rpg": { "r": [0.012, -0.07, 0.115], "l": [0, -0.02, -0.32] },
+	"gl": { "r": [0.012, -0.088, 0.055], "l": [0, -0.055, -0.26] },
 	"scar": { "r": [0.012, -0.1, 0.035], "l": [0, -0.038, -0.4] },
 	"aug": { "r": [0.012, -0.1, -0.005], "l": [0, -0.045, -0.32] },
 	"ump": { "r": [0.012, -0.095, 0.035], "l": [0, -0.055, -0.24] },
@@ -1263,7 +1386,7 @@ const HAND_ANCHORS := {
 ## 枪口 z 位置表
 const MUZZLE_Z := {
 	"m4": -0.8, "ak": -0.86, "mp5": -0.53, "m249": -0.9, "awm": -0.92, "m1014": -0.72,
-	"m1911": -0.15, "rpg": -0.62, "scar": -0.82, "aug": -0.66, "ump": -0.46, "p90": -0.35,
+	"m1911": -0.15, "rpg": -0.48, "gl": -0.42, "scar": -0.82, "aug": -0.66, "ump": -0.46, "p90": -0.35,
 	"pkm": -0.94, "rpd": -0.88, "m24": -0.86, "svd": -0.84,
 	"g17": -0.15, "p226": -0.155, "deagle": -0.21, "m93r": -0.18, "spas12": -0.75,
 	# [8/10 武器扩充] 新枪枪口位置
@@ -1297,6 +1420,7 @@ const MOD_ANCHORS := {
 	"m1014": { "muzzle": Vector3(0, 0.045, -0.62), "grip": Vector3(0, -0.03, -0.34), "trigger": Vector3(0, -0.06, 0.005), "optic": Vector3(0, 0.062, -0.04) },
 	"spas12": { "muzzle": Vector3(0, 0.048, -0.64), "grip": Vector3(0, -0.03, -0.36), "trigger": Vector3(0, -0.062, 0.005), "optic": Vector3(0, 0.065, -0.05) },
 	"rpg": { "muzzle": Vector3(0, 0.02, -0.4), "grip": Vector3(0, -0.07, -0.28), "trigger": Vector3(0, -0.055, -0.005), "optic": Vector3(0, 0.065, -0.1) },
+	"gl": { "muzzle": Vector3(0, 0.012, -0.38), "grip": Vector3(0, -0.06, -0.22), "trigger": Vector3(0, -0.055, 0.0), "optic": Vector3(0, 0.075, -0.06) },
 	"m1911": { "muzzle": Vector3(0, 0.034, -0.155), "mag": Vector3(0, -0.13, 0.045), "grip": Vector3(0, -0.035, -0.05), "trigger": Vector3(0, -0.055, -0.005), "optic": Vector3(0, 0.062, -0.03) },
 	"g17": { "muzzle": Vector3(0, 0.032, -0.165), "mag": Vector3(0, -0.13, 0.045), "grip": Vector3(0, -0.035, -0.05), "trigger": Vector3(0, -0.055, -0.005), "optic": Vector3(0, 0.06, -0.03) },
 	"p226": { "muzzle": Vector3(0, 0.034, -0.165), "mag": Vector3(0, -0.13, 0.045), "grip": Vector3(0, -0.035, -0.05), "trigger": Vector3(0, -0.055, -0.005), "optic": Vector3(0, 0.062, -0.03) },
@@ -1769,8 +1893,16 @@ static func _apply_mods(g: Node3D, id: String, mods: Dictionary) -> void:
 				if si != null:
 					si.visible = false
 				var op := build_mod_optic(mod_id)
-				op.position = _optic_anchor(id, a)
-				g.add_child(op)
+				var optic_anchor := _optic_anchor(id, a)
+				var optic_host: Node3D = g
+				if id == "m249" and g.has_meta("cover"):
+					# M249 导轨装在受弹机盖上:瞄准镜也随盖开合,换弹时不会浮空/穿盖
+					var cv: Node3D = g.get_meta("cover")
+					if cv != null:
+						optic_host = cv
+						optic_anchor = optic_anchor - cv.position
+				op.position = optic_anchor
+				optic_host.add_child(op)
 
 
 ## 第一人称手模(拳头,战术手套)

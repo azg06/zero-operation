@@ -33,7 +33,68 @@ const GUN_SOUND_FILES := {
 ## 响度补偿:源 wav 实测这 4 个枪声素材峰值过低(ump45=0.089/-21dB、aug_a3=0.114/-18.8dB、
 ## p90=0.114/-18.8dB、glock17=0.130/-17.7dB,其余 16 个 0.17-1.0 正常),运行时按文件名增益
 ## (不预处理 wav),补偿后估算峰值≈0.25-0.3,与其他枪听感一致;键必须对应 GUN_SOUND_FILES 值
-const GUN_GAIN := { "ump45": 3.0, "aug_a3": 2.2, "p90": 2.2, "glock17": 2.0 }
+const GUN_GAIN := { "ump45": 3.0, "aug_a3": 2.2, "p90": 2.2, "glock17": 2.0,
+	"m249": 1.2, "m60": 1.9, "negev": 1.5, "mk48": 1.15, "rpd": 1.2 }
+## 换弹动作音效:动作名 -> audio/reload 下的文件名(由 audio.cpp Stable Audio SFX 生成)
+const RELOAD_ACTION_FILES := {
+	"mag_out": "mag_out",
+	"mag_in": "mag_in",
+	"ammo_pouch": "ammo_pouch",
+	"drum_pouch": "drum_pouch",
+	"belt_pouch": "belt_pouch",
+	"bolt_cycle": "bolt_cycle",
+	"slide_release": "slide_release",
+	"shell_grab": "shell_grab",
+	"shell_insert": "shell_insert",
+	"shotgun_pump": "shotgun_pump",
+	"rocket_remove": "rocket_remove",
+	"rocket_load": "rocket_load",
+	"drum_unlock": "drum_unlock",
+	"drum_detach": "drum_detach",
+	"drum_insert": "drum_insert",
+	"drum_lock": "drum_lock",
+	"cover_open": "cover_open",
+	"cover_close": "cover_close",
+	"belt_out": "belt_out",
+	"belt_in": "belt_in",
+	"belt_lock": "belt_lock",
+	# 枪族区分版本
+	"mag_out_ak": "mag_out_ak",
+	"mag_in_ak": "mag_in_ak",
+	"mag_out_smg": "mag_out_smg",
+	"mag_in_smg": "mag_in_smg",
+	"mag_out_pistol": "mag_out_pistol",
+	"mag_in_pistol": "mag_in_pistol",
+	"mag_out_sniper": "mag_out_sniper",
+	"mag_in_sniper": "mag_in_sniper",
+	"ammo_pouch_pistol": "ammo_pouch_pistol",
+	"ammo_pouch_smg": "ammo_pouch_smg",
+	"ammo_pouch_sniper": "ammo_pouch_sniper",
+	"bolt_cycle_ak": "bolt_cycle_ak",
+	"bolt_cycle_smg": "bolt_cycle_smg",
+	"bolt_cycle_sniper": "bolt_cycle_sniper",
+	"bolt_cycle_lmg": "bolt_cycle_lmg",
+	"cover_open_heavy": "cover_open_heavy",
+	"cover_close_heavy": "cover_close_heavy",
+	"belt_out_heavy": "belt_out_heavy",
+	"belt_in_heavy": "belt_in_heavy",
+	"belt_lock_heavy": "belt_lock_heavy",
+}
+## 各动作采样的响度补偿:把合成素材拉到游戏内统一听感(峰值越低增益越大)
+const RELOAD_ACTION_GAIN := {
+	"shell_grab": 5.0, "shell_insert": 1.6, "ammo_pouch": 1.6, "belt_pouch": 2.0,
+	"drum_pouch": 1.7, "slide_release": 1.2, "mag_out": 1.2, "mag_in": 1.2,
+	"bolt_cycle": 1.4, "rocket_remove": 1.0, "rocket_load": 1.3, "drum_detach": 1.0,
+	"drum_unlock": 1.0, "drum_lock": 1.1, "cover_open": 1.0, "cover_close": 1.0,
+	"drum_insert": 1.0, "shotgun_pump": 1.0, "belt_out": 1.0, "belt_in": 1.0,
+	"belt_lock": 1.2,
+	"mag_out_ak": 1.2, "mag_in_ak": 1.0, "mag_out_smg": 1.3, "mag_in_smg": 1.4,
+	"mag_out_pistol": 1.0, "mag_in_pistol": 1.0, "mag_out_sniper": 1.0, "mag_in_sniper": 1.0,
+	"ammo_pouch_pistol": 2.5, "ammo_pouch_smg": 2.2, "ammo_pouch_sniper": 1.3,
+	"bolt_cycle_ak": 1.0, "bolt_cycle_smg": 1.4, "bolt_cycle_sniper": 1.2, "bolt_cycle_lmg": 1.0,
+	"cover_open_heavy": 1.0, "cover_close_heavy": 1.0, "belt_out_heavy": 1.0,
+	"belt_in_heavy": 1.0, "belt_lock_heavy": 1.3,
+}
 ## 载具类型 → [音频文件, 参考距离, 最大距离](audio/vehicles 子目录)
 const VEH_SOUND_FILES := {
 	"tank": ["tank_gun", 25, 280],
@@ -109,9 +170,11 @@ func _ready() -> void:
 func _preload_hot() -> void:
 	for v in GUN_SOUND_FILES.values():
 		_snd(v, "guns")
+	for v in RELOAD_ACTION_FILES.values():
+		_snd(v, "reload")
 	for k in ["shoot_rifle", "shoot_smg", "shoot_lmg", "shoot_sniper", "shoot_pistol", "shoot_shotgun", "shoot_dmr",
 			"hit", "hit_head", "kill", "kill_head", "dry_fire", "bolt",
-			"reload_1", "reload_2", "reload_3", "rpg_fire"]:
+			"reload_0", "reload_1", "reload_2", "reload_3", "rpg_fire"]:
 		_snd(k)
 	for e in VEH_SOUND_FILES.values():
 		_snd(e[0], "vehicles")
@@ -317,6 +380,9 @@ func veh_weapon(type: String, pos: Vector3) -> void:
 
 
 func rpg_fire(pos: Vector3) -> void:
+	# 玩家开火时 2D 主体 + 3D 环境尾音;其他单位仍用 3D 定位
+	if G.player != null and pos.distance_to(G.player.pos) < 2.0:
+		_play_2d("rpg_fire", 0.95, Utils.rand(0.94, 1.06))
 	_play_3d("rpg_fire", pos, 20, 200, Utils.rand(0.9, 1.1), Utils.rand(0.95, 1.05))
 
 
@@ -330,6 +396,21 @@ func bolt() -> void:
 
 func reload(stage: int) -> void:
 	_play_2d("reload_" + str(stage), Utils.rand(0.9, 1.1), Utils.rand(0.96, 1.04))
+
+
+## 换弹动作音效统一入口:每个动作播放 audio/reload 下对应的 AI 合成采样。
+## pitch_scale 由 ReloadProfiles 按枪型传入(重型机枪更低沉,高射速机枪更清脆)。
+func reload_action(action: String, pitch_scale := 1.0) -> void:
+	var snd: String = RELOAD_ACTION_FILES.get(action, "")
+	if snd.is_empty():
+		return
+	var gain: float = float(RELOAD_ACTION_GAIN.get(snd, 1.0))
+	_play_2d(snd, clampf(gain, 0.5, 5.0), clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "reload")
+
+
+## 弹鼓/弹链轻机枪机械音效事件:直接路由到对应的 AI 合成动作采样。
+func mech(event: String, pitch_scale := 1.0) -> void:
+	reload_action(event, pitch_scale)
 
 
 # ==================== 命中反馈 ====================

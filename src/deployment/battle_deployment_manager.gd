@@ -98,15 +98,17 @@ class BattlefieldWorldObserver extends RefCounted:
 			return out
 		my_team = p.team
 		# 1) 固定基地出生点(备用)
-		out.append({ "kind": "base", "pos": base_pos(), "label": "基地", "ref": null, "valid": true })
-		# 2) 占领点(仅己方/解锁区域可部署)
+		out.append({ "kind": "base", "pos": base_pos(), "label": "基地", "ref": null,
+			"valid": G.game.bt_deploy_allowed(my_team, "base", null) })
+		# 2) 占领点(仅己方/解锁区域/动态部署规则允许)
 		for f in G.flags:
 			if f == null:
 				continue
 			var deployable: bool = f.owner_team == my_team and not (G.mode == "breakthrough" and f.zone_locked)
+			var bt_allowed: bool = G.game.bt_deploy_allowed(my_team, "flag", f)
 			out.append({
 				"kind": "flag", "pos": f.pos, "label": f.id + " 据点", "ref": f,
-				"valid": deployable and bt_ok(f.pos.z),
+				"valid": deployable and bt_ok(f.pos.z) and bt_allowed,
 				"state": "mine" if f.owner_team == my_team else ("enemy" if f.owner_team != null else "neutral"),
 				"contested": f.contested, "progress": f.progress,
 				"locked": G.mode == "breakthrough" and f.zone_locked,
@@ -146,11 +148,12 @@ class BattlefieldWorldObserver extends RefCounted:
 		my_team = p.team
 		match t["kind"]:
 			"base":
-				return true
+				return G.game.bt_deploy_allowed(my_team, "base", null)
 			"flag":
 				var f = t["ref"]
 				return is_instance_valid(f) and f.owner_team == my_team \
-					and not f.zone_locked and bt_ok(f.pos.z)
+					and not f.zone_locked and bt_ok(f.pos.z) \
+					and G.game.bt_deploy_allowed(my_team, "flag", f)
 			"mate":
 				var b = t["ref"]
 				var sq = G.player_squad

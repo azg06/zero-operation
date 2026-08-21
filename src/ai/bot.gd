@@ -1407,7 +1407,7 @@ func _update_perf_lod() -> void:
 			br_log_t = G.time + 5.0
 			print("[PERF] bot=%d 远距节流 %s think=0.30s dist=%.0fm" % [id, "生效" if _br_far else "解除", dp])
 		return
-	_think_every = 0.26 if _far_zone else (0.18 if n > 26 else 0.14)
+	_think_every = 0.18 if _far_zone else (0.14 if n > 26 else 0.12)
 
 
 ## 班组推进缓存:向 8m 外最近队友适度靠拢(think 期算一次,避免每帧 O(n))
@@ -2331,7 +2331,7 @@ func update_bot(dt: float) -> void:
 					# 制导火箭:提前量仅作初瞄,飞行中持续转向修正(距/40 保守过瞄,由引导收敛)
 					aim += (tvel as Vector3) * (pos.distance_to(target.get("pos")) / 40.0)
 				# 第 5 参 target 启用制导:Vehicle/Aircraft 均提供 pos/dead,目标死亡自动解除制导转直坠
-				G.effects.spawn_rocket(self, { "cn": "RPG-7", "damage": 120.0, "splash": 6.5, "speed": 55.0 }, origin, (aim - origin).normalized(), target)
+				G.effects.spawn_rocket(self, { "cn": "反载具毒刺导弹", "damage": 120.0, "splash": 6.5, "speed": 55.0 }, origin, (aim - origin).normalized(), target)
 				AudioSys.rpg_fire(pos)
 				Bot.report_noise(pos.x, pos.z, 3.0, team, G.time)  # 火箭巨响广播
 				rpg_cd = 3.6
@@ -2687,7 +2687,8 @@ func _duty_support() -> void:
 				and G.player.pos.distance_to(pos) < 13 and G.player.health < 68):
 			need = true
 		if need:
-			G.game.spawn_ammo_pack(self)
+			# 支援兵技能二选一后:AI 按需求投放——附近有人受伤优先医疗包,否则弹药包
+			G.game.spawn_med_pack(self)
 			ability_cd = 20.0
 	# 低血撤退封烟
 	if health < 35 and target != null and smoke_cd <= 0:

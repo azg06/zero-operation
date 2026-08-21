@@ -7,6 +7,16 @@ var camera: Camera3D = null          # 主相机
 var vm_camera: Camera3D = null       # 视角模型相机(独立世界)
 var vm_viewport: SubViewport = null
 var scope = null                     # OpticScopeSystem(高倍率狙击镜 PIP 渲染器)
+var drone = null                     # ReconDroneSystem(侦察兵无人侦察机操控器)
+
+
+## 当前真正在渲染的视角相机:操控无人机时返回无人机相机,否则主相机。
+## HUD 的世界标记(敌人标点/占领点/队友/目标)必须用它投影,
+## 否则无人机视角下会拿被冻结的主相机算屏幕坐标,标点卡在屏幕上不动。
+func view_camera() -> Camera3D:
+	if drone != null and drone.piloting and drone.cam != null and is_instance_valid(drone.cam):
+		return drone.cam
+	return camera
 var world_root: Node3D = null        # 动态世界容器(换图时整体销毁)
 var world_group: Node3D = null       # 当前地图内容组
 var sun: DirectionalLight3D = null

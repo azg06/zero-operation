@@ -47,8 +47,19 @@ class Crosshair extends Control:
 	var hit_kill := false
 	var hit_head := false
 	var zoom_k := 1.0           # 爆头轻微放大(平滑)
-	var ret_style := ""         # ""=机械瞄具四短线 | reddot | holo | tac
+	var ret_style := ""         # ""=机械瞄具四短线 | reddot | holo | tac | missile
 	var ret_color := Color(1.0, 0.12, 0.1)   # 红点/全息分划红
+	var lock_progress := 0.0    # 毒刺导弹制导锁定进度 0~1
+	var missile_locked := false # 毒刺导弹是否已完成锁定
+	# ---- 火箭筒弹道等高线(holdover 标尺:无制导直射弹的下压分划) ----
+	const BAL_STEP := 10.0      # 等高线间隔(米):20 的整数倍为标注主线
+	const BAL_MAX := 240.0      # 标尺最远刻度(米)
+	var bal_show := false       # 是否绘制等高线(火箭筒开镜 + 未制导锁定)
+	var bal_px_per_tan := 0.0   # 镜内 tan(俯角)→屏幕像素(OpticScopeSystem 提供)
+	var bal_arc_r := 192.0      # 火箭弹圆弧弹道半径 = 弹速 / 重力转向率(米)
+	var bal_lens_half := 0.0    # 镜片屏幕半高(像素):超出即裁掉远距刻度
+	var bal_range := 0.0        # 视线测距(米),0=无回波
+	var mag_label := "4X"       # 镜内倍率文字(火箭筒 CLU 可切 0X/2X/4X)
 
 	func show_hit(kill: bool, head: bool) -> void:
 		hit_kill = kill
@@ -67,6 +78,96 @@ class Crosshair extends Control:
 		if absf(zoom_k - goal) > 0.001:
 			zoom_k = lerpf(zoom_k, goal, 1.0 - exp(-dt * 10.0))
 			queue_redraw()
+
+	## 等高线可用纵向范围:镜片投影半高与可见画面二者取小(标尺不许溢出屏幕下沿)
+	func _bal_lim() -> float:
+		var lim: float = (bal_lens_half if bal_lens_half > 8.0 else minf(size.x, size.y) * 0.45) * 0.92
+		# CLU 取景框可能比画面更高(镜片投影半高 > 半屏高):标尺必须再收进可见画面内,
+		# 否则远距刻度会被屏幕下沿直接切掉,读数不完整。
+		return minf(lim, size.y * 0.45)
+
+	## 射程 d(米)→ 分划下压像素:圆弧弹道 θ = d / 2R,再按镜内正切投影换算
+	func _bal_y(d: float) -> float:
+		return bal_px_per_tan * tan(d / (2.0 * maxf(bal_arc_r, 1.0)))
+
+	## QA 诊断:弹道等高线状态与各档刻度像素位置(供 --test-ads-capture 验证)
+	## 制导锁定期间标尺不显示,但刻度仍照常报出,便于逐倍率核对换算结果。
+	func bal_debug() -> String:
+		if bal_px_per_tan < 1.0:
+			return "bal_no_lens show=%s px_per_tan=%.1f" % [bal_show, bal_px_per_tan]
+		var lim := _bal_lim()
+		var rungs: PackedStringArray = PackedStringArray()
+		var d := BAL_STEP
+		while d <= BAL_MAX + 0.01:
+			var y := _bal_y(d)
+			if y > lim:
+				break
+			rungs.append("%dm=%.0fpx" % [int(round(d)), y])
+			d += BAL_STEP
+		return "bal show=%s arc_r=%.0fm px_per_tan=%.0f lens_half=%.0f lim=%.0f range=%.1fm rungs[%s]" % [
+			bal_show, bal_arc_r, bal_px_per_tan, bal_lens_half, lim, bal_range, ", ".join(rungs)]
+
+	## 火箭筒弹道等高线:圆弧弹道下压角 θ(d) = d / 2R,经镜内正切投影换算为屏幕像素,
+	## 画成一组横向等高线(20 m 主线带数字 / 10 m 副线)+ 右侧弹道曲线 + 左侧测距游标。
+	## 制导锁定后不画:导弹自主追踪,弹道下压量无意义。
+	func _draw_ballistic(c: Vector2, s: float, base: Color) -> void:
+		if not bal_show or bal_px_per_tan < 1.0 or bal_arc_r < 1.0:
+			return
+		var lim := _bal_lim()
+		var col := Color(base.r, base.g, base.b, 0.62 * ch_opacity)
+		var dim := Color(base.r, base.g, base.b, 0.24 * ch_opacity)
+		var f := UiTheme.mono_font()
+		var fs := int(11.0 * s)
+		var tips := PackedVector2Array()
+		var last_y := 0.0
+		var d := BAL_STEP
+		while d <= BAL_MAX + 0.01:
+			var y := _bal_y(d)
+			if y > lim:
+				break
+			var major: bool = int(round(d)) % 20 == 0
+			var taper := lerpf(1.0, 0.52, clampf(y / maxf(lim, 1.0), 0.0, 1.0))
+			var w: float = (25.0 if major else 11.0) * s * taper
+			draw_line(c + Vector2(-w, y), c + Vector2(w, y), col if major else dim, (1.6 if major else 1.0) * s)
+			if major:
+				draw_string(f, c + Vector2(w + 5.0 * s, y + 4.0 * s), str(int(round(d))),
+					HORIZONTAL_ALIGNMENT_LEFT, 60.0 * s, fs, col)
+				tips.append(c + Vector2(w, y))
+			last_y = y
+			d += BAL_STEP
+		if last_y < 1.0:
+			return
+		# 中央虚线立杆:0 位 = 直瞄零线,向下为下压量
+		var yy := 6.0 * s
+		while yy < last_y:
+			var y2: float = minf(yy + 7.0 * s, last_y)
+			draw_line(c + Vector2(0, yy), c + Vector2(0, y2), dim, 1.0 * s)
+			yy = y2 + 6.0 * s
+		# 右侧弹道曲线:连接各主线端点(火箭筒瞄具标志性的下垂弧线)
+		if tips.size() >= 2:
+			var curve := PackedVector2Array()
+			curve.append(c + Vector2(25.0 * s, 0.0))
+			curve.append_array(tips)
+			draw_polyline(curve, dim, 1.2 * s)
+		# 左侧测距游标:当前瞄准点距离落在哪根等高线上(边打边读数)
+		if bal_range > 4.0:
+			var hl := Color(base.r, base.g, base.b, 0.95 * ch_opacity)
+			var yr: float = _bal_y(minf(bal_range, BAL_MAX))
+			var over: bool = yr > lim          # 超出标尺:所需下压量已在画面之外
+			yr = minf(yr, lim)
+			draw_line(c + Vector2(-32.0 * s, yr), c + Vector2(-13.0 * s, yr), hl, 1.8 * s)
+			draw_colored_polygon(PackedVector2Array([
+				c + Vector2(-11.0 * s, yr), c + Vector2(-19.0 * s, yr - 4.0 * s),
+				c + Vector2(-19.0 * s, yr + 4.0 * s)]), hl)
+			draw_string(f, c + Vector2(-80.0 * s, yr + 4.0 * s),
+				("%dM+" % int(round(bal_range))) if over else ("%dM" % int(round(bal_range))),
+				HORIZONTAL_ALIGNMENT_RIGHT, 44.0 * s, fs, hl)
+			# 超出标尺时给出继续抬高的双 V 提示(目标比最远等高线还远)
+			if over:
+				for k in 2:
+					var yk: float = yr + (5.0 + float(k) * 5.0) * s
+					draw_line(c + Vector2(-7.0 * s, yk), c + Vector2(0, yk + 4.0 * s), hl, 1.4 * s)
+					draw_line(c + Vector2(0, yk + 4.0 * s), c + Vector2(7.0 * s, yk), hl, 1.4 * s)
 
 	func _draw() -> void:
 		var c := size / 2.0 + Vector2(0, -kick_px)
@@ -105,6 +206,57 @@ class Crosshair extends Control:
 				gap *= 1.0
 			draw_circle(c, 1.3 * s, cw)
 			return
+		if ret_style == "missile":
+			# 毒刺导弹制导镜:先画出 CLU 目镜的圆形镜筒遮罩,再在镜内绘制制导分划,
+			# 避免红框凭空浮在普通视野上。
+			var s := clampf(size.y / 1080.0, 0.7, 1.4)
+			var lens_r := minf(size.x, size.y) * 0.36
+			# 不绘制任何屏幕贴图遮罩:放大画面由 OpticScopeSystem 的真实 PIP 渲染,
+			# 这里只绘制叠加在镜内画面上的制导 HUD。
+			var box := lens_r * 0.52
+			var lw := 1.8 * s
+			var mcol := Color(0.35, 0.95, 0.55, 0.92 * ch_opacity)
+			if missile_locked:
+				mcol = Color(0.15, 1.0, 0.42, 1.0 * ch_opacity)
+			elif lock_progress > 0.02:
+				mcol = Color(1.0, 0.62, 0.18, (0.7 + 0.25 * sin(lock_progress * 22.0)) * ch_opacity)
+			# 现代军用制导 HUD:角框 + 中心点 + 刻度短线 + 数据文字
+			for sx in [-1.0, 1.0]:
+				for sy in [-1.0, 1.0]:
+					var p := c + Vector2(sx * box, sy * box)
+					draw_line(p, p + Vector2(-sx * 13.0 * s, 0), mcol, lw)
+					draw_line(p, p + Vector2(0, -sy * 13.0 * s), mcol, lw)
+			# 内圈刻度
+			draw_arc(c, box - 8.0 * s, 0, TAU, 32, Color(mcol.r, mcol.g, mcol.b, 0.18 * ch_opacity), 1.0 * s)
+			# 中央点
+			draw_circle(c, 1.5 * s, mcol)
+			# 火箭筒弹道等高线(无制导直射弹的 holdover 标尺)
+			_draw_ballistic(c, s, mcol)
+			# 锁定进度环
+			var pr := clampf(lock_progress, 0.0, 1.0)
+			draw_arc(c, box + 9.0 * s, -PI / 2, -PI / 2 + pr * TAU, 48,
+				Color(mcol.r, mcol.g, mcol.b, 0.85 * ch_opacity), 2.4 * s)
+			if missile_locked:
+				# 锁定菱形 + 外稳定框
+				var dr := 10.0 * s
+				for i in 4:
+					var a := i * PI / 2.0 + PI / 4.0
+					var p := c + Vector2(cos(a), sin(a)) * dr
+					var q := c + Vector2(cos(a + PI / 2.0), sin(a + PI / 2.0)) * dr
+					draw_line(p, q, mcol, lw)
+				draw_arc(c, box + 15.0 * s, 0, TAU, 32, Color(mcol.r, mcol.g, mcol.b, 0.35 * ch_opacity), 1.3 * s)
+			# HUD 文字(镜内左上/右上/左下/右下)
+			var f := UiTheme.mono_font()
+			var fs := int(13.0 * s)
+			draw_string(f, c + Vector2(-box - 6.0 * s, -box + 4.0 * s), "ATGM",
+				HORIZONTAL_ALIGNMENT_LEFT, 90.0 * s, fs, Color(mcol.r, mcol.g, mcol.b, 0.85 * ch_opacity))
+			draw_string(f, c + Vector2(box - 80.0 * s, -box + 4.0 * s), mag_label,
+				HORIZONTAL_ALIGNMENT_LEFT, 60.0 * s, fs, Color(mcol.r, mcol.g, mcol.b, 0.85 * ch_opacity))
+			draw_string(f, c + Vector2(-box - 6.0 * s, box - 8.0 * s), "LOCK" if missile_locked else "SEEK",
+				HORIZONTAL_ALIGNMENT_LEFT, 90.0 * s, fs, mcol)
+			draw_string(f, c + Vector2(box - 110.0 * s, box - 8.0 * s), "ARM 10M",
+				HORIZONTAL_ALIGNMENT_LEFT, 100.0 * s, fs, Color(mcol.r, mcol.g, mcol.b, 0.8 * ch_opacity))
+			return
 		var L := 8.0 * zoom_k
 		var g := (5.0 + spread_px) * zoom_k
 		var w := 1.5
@@ -128,6 +280,254 @@ class Crosshair extends Control:
 			var rr := (15.0 + (1.0 - k) * 24.0) * zoom_k
 			draw_arc(c, rr, 0, TAU, 28, rc, 1.3)
 			draw_arc(c, rr * 0.76, 0, TAU, 20, Color(rc.r, rc.g, rc.b, rc.a * 0.35), 1.0)
+
+
+# ==================== 无人侦察机 UAV 图传抬头显示(现代军用风格) ====================
+# 构成:四角取景框 + 中心分划 + 俯仰梯 + 顶部航向带 + 左高度带 + 右速度带
+#      + 底部电量条 + 右下电子围栏雷达(150m 圆 + 已标记敌人) + REC/链路状态。
+# 全部按 G.drone 的实时状态绘制,不缓存;仅操控无人机期间可见。
+class DroneOverlay extends Control:
+	const COL := Color(0.55, 1.0, 0.72)          # 磷光绿(军用图传)
+	const COL_DIM := Color(0.55, 1.0, 0.72, 0.35)
+	const COL_WARN := Color(1.0, 0.72, 0.25)
+	const COL_BAD := Color(1.0, 0.35, 0.28)
+	var _t := 0.0
+
+	func _process(dt: float) -> void:
+		if not visible:
+			return
+		_t += dt
+		queue_redraw()
+
+	func _draw() -> void:
+		var d = G.drone
+		if d == null or not d.piloting:
+			return
+		var s := clampf(size.y / 1080.0, 0.7, 1.5)
+		var f := UiTheme.mono_font()
+		var c := size / 2.0
+		var fs := int(13.0 * s)
+		var fs_s := int(11.0 * s)
+		var m := 42.0 * s                          # 取景框内边距
+		var r := Rect2(m, m, size.x - m * 2.0, size.y - m * 2.0)
+		_draw_frame(r, s)
+		_draw_reticle(c, s)
+		_draw_pitch_ladder(c, s, f, fs_s, float(d.pitch))
+		_draw_heading_tape(r, s, f, fs_s, float(d.yaw))
+		_draw_tape(Rect2(r.position.x, c.y - 150.0 * s, 54.0 * s, 300.0 * s), s, f, fs_s,
+			float(d.alt_agl()), 10.0, "ALT", true)
+		_draw_tape(Rect2(r.end.x - 54.0 * s, c.y - 150.0 * s, 54.0 * s, 300.0 * s), s, f, fs_s,
+			float(d.speed_ms()), 4.0, "SPD", false)
+		_draw_status(r, s, f, fs, fs_s, d)
+		_draw_fence_radar(Vector2(r.end.x - 78.0 * s, r.end.y - 78.0 * s), 58.0 * s, s, f, fs_s, d)
+		# 扫描线 + 顶部图传噪点条(轻微,不影响观察)
+		var scan_y: float = r.position.y + fmod(_t * 90.0 * s, r.size.y)
+		draw_line(Vector2(r.position.x, scan_y), Vector2(r.end.x, scan_y),
+			Color(COL.r, COL.g, COL.b, 0.07), 2.0 * s)
+		# 超出链路半径:图传雪花化 + 断链倒计时(灰白遮罩由 ReconDroneSystem 的全屏层负责)
+		var lost: float = float(d.signal_lost01())
+		if lost > 0.001:
+			_draw_signal_loss(r, c, s, f, fs, lost, float(d.lost_countdown()))
+
+	## 失联表现:横向噪点条 + 撕裂线 + 中央告警与倒计时(军用图传丢信号的经典表现)
+	func _draw_signal_loss(r: Rect2, c: Vector2, s: float, f: Font, fs: int,
+			lost: float, countdown: float) -> void:
+		var bars := int(6.0 + 16.0 * lost)
+		for i in bars:
+			var y: float = r.position.y + fmod(float(i) * 137.0 + _t * (260.0 + 80.0 * lost), r.size.y)
+			var h: float = (1.0 + randf() * 4.0) * s
+			var a: float = (0.12 + 0.35 * lost) * (0.4 + randf() * 0.6)
+			draw_rect(Rect2(r.position.x, y, r.size.x, h), Color(0.95, 0.97, 1.0, a), true)
+		# 水平撕裂错位块
+		if lost > 0.35:
+			for k in 3:
+				var ty: float = r.position.y + fmod(float(k) * 311.0 + _t * 420.0, r.size.y)
+				draw_rect(Rect2(r.position.x + randf() * 40.0 * s, ty, r.size.x * (0.35 + randf() * 0.5), 8.0 * s),
+					Color(0.75, 0.82, 0.88, 0.18 + 0.22 * lost), true)
+		var warn: Color = COL_BAD if fmod(_t, 0.6) < 0.35 else COL_WARN
+		draw_string(f, Vector2(c.x - 220.0 * s, c.y - 120.0 * s), "!! 图传信号丢失 · LINK LOST !!",
+			HORIZONTAL_ALIGNMENT_CENTER, 440.0 * s, int(fs * 1.5), warn)
+		draw_string(f, Vector2(c.x - 220.0 * s, c.y - 92.0 * s),
+			"超出链路半径 · %.1fs 后断链" % countdown,
+			HORIZONTAL_ALIGNMENT_CENTER, 440.0 * s, fs, warn)
+		draw_string(f, Vector2(c.x - 220.0 * s, c.y + 118.0 * s), "立即返回链路范围内",
+			HORIZONTAL_ALIGNMENT_CENTER, 440.0 * s, fs, warn)
+
+	## 四角取景框(军用图传的裁切角标)
+	func _draw_frame(r: Rect2, s: float) -> void:
+		var L := 26.0 * s
+		var w := 1.6 * s
+		for i in 4:
+			var px: float = r.position.x if i % 2 == 0 else r.end.x
+			var py: float = r.position.y if i < 2 else r.end.y
+			var sx: float = 1.0 if i % 2 == 0 else -1.0
+			var sy: float = 1.0 if i < 2 else -1.0
+			draw_line(Vector2(px, py), Vector2(px + sx * L, py), COL, w)
+			draw_line(Vector2(px, py), Vector2(px, py + sy * L), COL, w)
+
+	## 中心分划:细十字 + 中央方框 + 左右刻度牙
+	func _draw_reticle(c: Vector2, s: float) -> void:
+		var gap := 9.0 * s
+		var L := 20.0 * s
+		draw_line(c + Vector2(-gap - L, 0), c + Vector2(-gap, 0), COL, 1.4 * s)
+		draw_line(c + Vector2(gap, 0), c + Vector2(gap + L, 0), COL, 1.4 * s)
+		draw_line(c + Vector2(0, -gap - L), c + Vector2(0, -gap), COL, 1.4 * s)
+		draw_line(c + Vector2(0, gap), c + Vector2(0, gap + L), COL, 1.4 * s)
+		draw_rect(Rect2(c - Vector2(3.0 * s, 3.0 * s), Vector2(6.0 * s, 6.0 * s)), COL, false, 1.2 * s)
+		for k in [-2, -1, 1, 2]:
+			var y: float = c.y + float(k) * 16.0 * s
+			draw_line(Vector2(c.x - gap - L - 8.0 * s, y), Vector2(c.x - gap - L, y), COL_DIM, 1.0 * s)
+			draw_line(Vector2(c.x + gap + L, y), Vector2(c.x + gap + L + 8.0 * s, y), COL_DIM, 1.0 * s)
+
+	## 俯仰梯:每 10° 一档,横线随云台俯仰上下滚动(负角标 DN)
+	func _draw_pitch_ladder(c: Vector2, s: float, f: Font, fs: int, pitch: float) -> void:
+		var px_per_deg: float = size.y / 78.0        # 与无人机相机 FOV 对应
+		var pdeg := rad_to_deg(pitch)
+		for step in range(-60, 61, 10):
+			var y: float = c.y + (pdeg - float(step)) * px_per_deg
+			if y < 80.0 * s or y > size.y - 80.0 * s:
+				continue
+			var half: float = (60.0 if step == 0 else 34.0) * s
+			var col: Color = COL if step == 0 else COL_DIM
+			if step == 0:
+				draw_line(Vector2(c.x - half, y), Vector2(c.x - 18.0 * s, y), col, 1.4 * s)
+				draw_line(Vector2(c.x + 18.0 * s, y), Vector2(c.x + half, y), col, 1.4 * s)
+			else:
+				# 负俯仰(向下看)用断续短线,正俯仰用实线,与真机 HUD 约定一致
+				var seg: float = half * (0.5 if step < 0 else 1.0)
+				draw_line(Vector2(c.x - half, y), Vector2(c.x - half + seg, y), col, 1.1 * s)
+				draw_line(Vector2(c.x + half - seg, y), Vector2(c.x + half, y), col, 1.1 * s)
+				var tag := "%d" % absi(step)
+				draw_string(f, Vector2(c.x + half + 5.0 * s, y + 4.0 * s), tag,
+					HORIZONTAL_ALIGNMENT_LEFT, 40.0 * s, fs, col)
+
+	## 顶部航向带:每 15° 刻度 + 四方位字母 + 中央航向读数框
+	func _draw_heading_tape(r: Rect2, s: float, f: Font, fs: int, yaw: float) -> void:
+		var cx := r.position.x + r.size.x * 0.5
+		var y := r.position.y + 20.0 * s
+		var w := 300.0 * s
+		var px_per_deg := w / 90.0
+		var hdg: float = fposmod(-rad_to_deg(yaw), 360.0)
+		draw_line(Vector2(cx - w * 0.5, y), Vector2(cx + w * 0.5, y), COL_DIM, 1.2 * s)
+		for step in range(-45, 46, 5):
+			var deg: float = hdg + float(step)
+			var x: float = cx + float(step) * px_per_deg
+			var major: bool = int(round(fposmod(deg, 360.0))) % 15 == 0
+			draw_line(Vector2(x, y), Vector2(x, y + (9.0 if major else 5.0) * s), COL if major else COL_DIM, 1.1 * s)
+			if major:
+				var dd := int(round(fposmod(deg, 360.0)))
+				var lab := str(dd / 10)
+				match dd:
+					0: lab = "N"
+					90: lab = "E"
+					180: lab = "S"
+					270: lab = "W"
+				draw_string(f, Vector2(x - 10.0 * s, y + 22.0 * s), lab,
+					HORIZONTAL_ALIGNMENT_CENTER, 20.0 * s, fs, COL)
+		# 中央航向读数
+		var box := Rect2(cx - 26.0 * s, y - 20.0 * s, 52.0 * s, 17.0 * s)
+		draw_rect(box, Color(0, 0.04, 0.03, 0.5), true)
+		draw_rect(box, COL, false, 1.2 * s)
+		draw_string(f, Vector2(box.position.x, box.end.y - 4.0 * s), "%03d" % int(round(hdg)),
+			HORIZONTAL_ALIGNMENT_CENTER, box.size.x, fs, COL)
+		draw_line(Vector2(cx, y - 3.0 * s), Vector2(cx, y + 12.0 * s), COL, 1.6 * s)
+
+	## 竖向数值带(左=高度 / 右=速度):滚动刻度 + 当前值读数框
+	func _draw_tape(rect: Rect2, s: float, f: Font, fs: int, val: float, step_v: float,
+			label: String, left: bool) -> void:
+		var cy := rect.position.y + rect.size.y * 0.5
+		var px_per_unit := rect.size.y / (step_v * 8.0)
+		var edge: float = rect.end.x if left else rect.position.x
+		draw_line(Vector2(edge, rect.position.y), Vector2(edge, rect.end.y), COL_DIM, 1.2 * s)
+		var base: float = floor((val - step_v * 4.0) / step_v) * step_v
+		for i in 9:
+			var v: float = base + float(i) * step_v
+			if v < 0.0:
+				continue
+			var y: float = cy + (val - v) * px_per_unit
+			if y < rect.position.y or y > rect.end.y:
+				continue
+			var tick: float = 9.0 * s
+			var x0: float = edge - tick if left else edge
+			var x1: float = edge if left else edge + tick
+			draw_line(Vector2(x0, y), Vector2(x1, y), COL_DIM, 1.0 * s)
+			draw_string(f, Vector2(edge - (48.0 * s if left else -12.0 * s), y + 4.0 * s), "%d" % int(v),
+				HORIZONTAL_ALIGNMENT_RIGHT if left else HORIZONTAL_ALIGNMENT_LEFT, 36.0 * s, fs, COL_DIM)
+		var bw := 52.0 * s
+		var box := Rect2(edge - bw if left else edge, cy - 10.0 * s, bw, 20.0 * s)
+		draw_rect(box, Color(0, 0.04, 0.03, 0.55), true)
+		draw_rect(box, COL, false, 1.2 * s)
+		draw_string(f, Vector2(box.position.x, box.end.y - 6.0 * s), "%d" % int(round(val)),
+			HORIZONTAL_ALIGNMENT_CENTER, box.size.x, fs, COL)
+		draw_string(f, Vector2(box.position.x, box.position.y - 6.0 * s), label,
+			HORIZONTAL_ALIGNMENT_CENTER, box.size.x, fs, COL_DIM)
+
+	## 状态区:机号/链路/REC + 底部电量条 + 半径读数
+	func _draw_status(r: Rect2, s: float, f: Font, fs: int, fs_s: int, d) -> void:
+		draw_string(f, r.position + Vector2(0, -8.0 * s), "UAV-01 · RECON FEED",
+			HORIZONTAL_ALIGNMENT_LEFT, 300.0 * s, fs, COL)
+		# REC 闪烁点
+		if fmod(_t, 1.4) < 0.8:
+			draw_circle(Vector2(r.end.x - 92.0 * s, r.position.y - 12.0 * s), 4.0 * s, COL_BAD)
+		draw_string(f, Vector2(r.end.x - 80.0 * s, r.position.y - 8.0 * s), "REC",
+			HORIZONTAL_ALIGNMENT_LEFT, 60.0 * s, fs, COL_BAD)
+		# 电量条
+		var bat: float = float(d.battery01())
+		var bw := 168.0 * s
+		var bar := Rect2(r.position.x, r.end.y + 10.0 * s, bw, 12.0 * s)
+		draw_rect(bar, Color(0, 0.05, 0.04, 0.6), true)
+		var bcol: Color = COL if bat > 0.35 else (COL_WARN if bat > 0.15 else COL_BAD)
+		draw_rect(Rect2(bar.position, Vector2(bar.size.x * bat, bar.size.y)), bcol, true)
+		draw_rect(bar, COL_DIM, false, 1.1 * s)
+		draw_string(f, Vector2(bar.end.x + 8.0 * s, bar.end.y - 1.0 * s),
+			"BAT %d%%  %ds" % [int(round(bat * 100.0)), int(ceil(float(d.life)))],
+			HORIZONTAL_ALIGNMENT_LEFT, 200.0 * s, fs_s, bcol)
+		# 链路/围栏读数
+		var fence: float = float(d.dist_to_origin) / maxf(float(d.RADIUS), 1.0)
+		var fcol: Color = COL if fence < 0.9 else COL_WARN
+		draw_string(f, Vector2(r.end.x - 260.0 * s, r.end.y + 20.0 * s),
+			"RNG %dM / %dM   LINK %d%%   F=RTB" % [int(round(float(d.dist_to_origin))),
+				int(float(d.RADIUS)), int(round(100.0 - fence * 12.0))],
+			HORIZONTAL_ALIGNMENT_RIGHT, 260.0 * s, fs_s, fcol)
+
+	## 右下电子围栏雷达:150m 圆 + 起点十字 + 本机航向三角 + 已标记敌人红点
+	func _draw_fence_radar(ctr: Vector2, rad: float, s: float, f: Font, fs: int, d) -> void:
+		draw_circle(ctr, rad, Color(0, 0.05, 0.04, 0.45))
+		draw_arc(ctr, rad, 0, TAU, 40, COL_DIM, 1.2 * s)
+		draw_arc(ctr, rad * 0.5, 0, TAU, 32, Color(COL.r, COL.g, COL.b, 0.18), 1.0 * s)
+		draw_line(ctr - Vector2(4.0 * s, 0), ctr + Vector2(4.0 * s, 0), COL_DIM, 1.0 * s)
+		draw_line(ctr - Vector2(0, 4.0 * s), ctr + Vector2(0, 4.0 * s), COL_DIM, 1.0 * s)
+		var scale_r: float = rad / maxf(float(d.RADIUS), 1.0)
+		# 本机(相对起点的偏移;雷达按世界 +X 右 / +Z 下);越界时贴到圆周并标红
+		var off := Vector2(float(d.pos.x - d.origin.x), float(d.pos.z - d.origin.z)) * scale_r
+		var outside: bool = off.length() > rad
+		if outside:
+			off = off.normalized() * rad
+		var me := ctr + off
+		var hd := Vector2(-sin(float(d.yaw)), -cos(float(d.yaw)))
+		var tri := PackedVector2Array([
+			me + hd * 6.0 * s,
+			me + hd.rotated(2.4) * 4.5 * s,
+			me + hd.rotated(-2.4) * 4.5 * s])
+		draw_colored_polygon(tri, COL_BAD if outside else COL)
+		if outside:
+			# 越界:圆周上打断链警示弧
+			var ang := off.angle()
+			draw_arc(ctr, rad, ang - 0.5, ang + 0.5, 12, COL_BAD, 2.2 * s)
+		# 视场扇形
+		draw_line(me, me + hd.rotated(0.62) * 20.0 * s, Color(COL.r, COL.g, COL.b, 0.25), 1.0 * s)
+		draw_line(me, me + hd.rotated(-0.62) * 20.0 * s, Color(COL.r, COL.g, COL.b, 0.25), 1.0 * s)
+		# 已标记敌人
+		var my_team = G.player.team if G.player != null else "us"
+		for b in G.bots:
+			if not b.alive or b.team == my_team or float(b.spotted) <= 0.0:
+				continue
+			var bo := Vector2(float(b.pos.x - d.origin.x), float(b.pos.z - d.origin.z)) * scale_r
+			if bo.length() > rad:
+				continue
+			draw_rect(Rect2(ctr + bo - Vector2(2.0 * s, 2.0 * s), Vector2(4.0 * s, 4.0 * s)), COL_BAD, true)
+		draw_string(f, Vector2(ctr.x - rad, ctr.y + rad + 12.0 * s), "LINK RANGE %dM" % int(float(d.RADIUS)),
+			HORIZONTAL_ALIGNMENT_CENTER, rad * 2.0, fs, COL_DIM)
 
 
 # ==================== 顶部横条:据点字母芯片(灰=中立 / 青=己方 / 橙=敌方 / 占领=环形动画) ====================
@@ -529,7 +929,7 @@ class WorldOverlay extends Control:
 	func _draw() -> void:
 		if not is_visible_in_tree():
 			return
-		var cam: Camera3D = G.camera
+		var cam: Camera3D = G.view_camera()
 		var p = G.player
 		if cam == null or p == null or not p.alive or G.state != "playing":
 			return
@@ -773,7 +1173,7 @@ class DeploymentOverlay extends Control:
 		var dep = G.deployment
 		if dep == null or not dep.active or G.camera == null:
 			return
-		var cam: Camera3D = G.camera
+		var cam: Camera3D = G.view_camera()
 		var p = G.player
 		if p == null:
 			return
@@ -792,7 +1192,16 @@ class DeploymentOverlay extends Control:
 			var alpha: float = clampf(1.15 - dist / 550.0, 0.15, 1.0)
 			if _occluded(cam, cpos, t["pos"], dist):
 				alpha *= 0.5
-			var is_hover: bool = not hovered.is_empty() and hovered.get("ref") == t.get("ref") \
+			var hover_ref: Variant = hovered.get("ref") if not hovered.is_empty() else null
+			var target_ref: Variant = t.get("ref")
+			var same_ref := false
+			if hover_ref == null or target_ref == null:
+				same_ref = hover_ref == null and target_ref == null
+			elif typeof(hover_ref) != typeof(target_ref):
+				same_ref = false
+			else:
+				same_ref = hover_ref == target_ref
+			var is_hover: bool = not hovered.is_empty() and same_ref \
 				and hovered.get("kind") == t.get("kind")
 			match t["kind"]:
 				"mate":
@@ -988,7 +1397,7 @@ class NightVisionOverlay extends Control:
 	func _draw() -> void:
 		if not is_visible_in_tree():
 			return
-		var cam: Camera3D = G.camera
+		var cam: Camera3D = G.view_camera()
 		var p = G.player
 		if cam == null or p == null:
 			return
@@ -1186,7 +1595,7 @@ class CampaignIndicator extends Control:
 	func _draw() -> void:
 		if not show_mark or G.camera == null:
 			return
-		var cam: Camera3D = G.camera
+		var cam: Camera3D = G.view_camera()
 		var col := Color(0.16, 0.78, 0.86)
 		var sp: Vector2 = cam.unproject_position(target)
 		var center := size / 2.0
@@ -1247,7 +1656,7 @@ class BrZoneIndicator extends Control:
 	func _draw() -> void:
 		if not active or G.camera == null or G.player == null:
 			return
-		var cam: Camera3D = G.camera
+		var cam: Camera3D = G.view_camera()
 		var c := size / 2.0
 		var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.006)
 		var col := Color(1.0, 0.45, 0.2, 0.8 + 0.2 * pulse) if not inside else Color(0.05, 0.62, 0.6, 0.85)
@@ -1374,6 +1783,7 @@ var _class_icon: Label
 var _gadget_info: Label
 var _stance: Label
 var _wpn_panel: PanelContainer
+var _drone_hud: Control                # 无人侦察机 UAV 图传抬头显示
 var _weapon_name: Label
 var _weapon_icon: WeaponIcon
 var _attach_label: Label
@@ -1502,6 +1912,12 @@ func _build() -> void:
 	_veh_aim.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_veh_aim.visible = false
 	_hud_root.add_child(_veh_aim)
+	# ---- 无人侦察机抬头显示(现代军用 UAV 图传界面:仅操控时显示) ----
+	_drone_hud = DroneOverlay.new()
+	_drone_hud.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_drone_hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_drone_hud.visible = false
+	_hud_root.add_child(_drone_hud)
 	_scope = ScopeOverlay.new()
 	_scope.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_scope.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -2672,6 +3088,12 @@ func update_hud(dt: float) -> void:
 		_health_fill.color = base_col
 		_set_text(_health_num, str(int(ceil(_hp_show))))
 		var gun = p.gun()
+		# 无人侦察机图传:操控期间显示 UAV 抬头显示,并隐藏武器面板(枪在被冻结的本体上)
+		var drone_on: bool = G.drone != null and G.drone.piloting
+		if _drone_hud != null and _drone_hud.visible != drone_on:
+			_drone_hud.visible = drone_on
+		if drone_on and _wpn_panel != null and _wpn_panel.visible:
+			_wpn_panel.visible = false
 		# 载具 HUD 切换
 		if p.vehicle != null:
 			_update_vehicle_hud(p.vehicle)
@@ -2681,14 +3103,47 @@ func update_hud(dt: float) -> void:
 				_wpn_panel.visible = true
 			if gun == null:
 				return
+			if not drone_on and _wpn_panel != null and not _wpn_panel.visible:
+				_wpn_panel.visible = true
 			_update_weapon_hud(p, gun, dt)
 		# 准星扩散
 		var ch_op: float
 		var spread_px: float
 		var ret_style: String = ""
-		if p.vehicle != null:
+		var force_ret_redraw := false
+		if G.drone != null and G.drone.piloting:
+			# 无人机视角:武器准星属于被冻结的本体,不该画在无人机画面上
 			ch_op = 0.0
 			spread_px = 0.0
+		elif p.vehicle != null:
+			ch_op = 0.0
+			spread_px = 0.0
+		elif gun != null and gun.id == "rpg" and gun.ads_amount > 0.5:
+			# 毒刺导弹制导瞄准镜:固定屏幕中心,锁定进度由玩家锁定状态驱动
+			ret_style = "missile"
+			ch_op = 1.0
+			spread_px = 0.0
+			_crosshair.lock_progress = p.missile_lock_progress()
+			_crosshair.missile_locked = G.lock_target != null
+			# 火箭筒弹道等高线:无制导直射弹按圆弧弹道(R = 弹速 / 重力转向率)换算下压刻度;
+			# 镜内正切投影系数由 OpticScopeSystem 按当前镜片投影逐帧给出,标尺随镜片对齐。
+			var lens_k := 0.0
+			var lens_h := 0.0
+			if G.scope != null and G.scope.has_method("lens_px_per_tan"):
+				lens_k = float(G.scope.lens_px_per_tan())
+				lens_h = float(G.scope.lens_half_px.y)
+			# 弹道圆弧半径 R = 弹速² / 等效重力(与 effects 抛射物积分同源)
+			var rk_spd: float = maxf(float(gun.def.speed), 1.0)
+			_crosshair.bal_arc_r = rk_spd * rk_spd / maxf(float(gun.def.proj_grav), 0.5)
+			_crosshair.bal_px_per_tan = lens_k
+			_crosshair.bal_lens_half = lens_h
+			_crosshair.bal_show = lens_k > 1.0 and G.lock_target == null
+			_crosshair.mag_label = gun.zoom_label() if gun.has_method("zoom_label") else "4X"
+			# 瞄准点测距:给出当前视线落点距离,直接读对应等高线
+			var bal_hit = Utils.raycast_world(G.camera.global_position,
+				-G.camera.global_transform.basis.z, 300.0)
+			_crosshair.bal_range = float(bal_hit["dist"]) if bal_hit != null else 0.0
+			force_ret_redraw = true
 		elif gun == null or not gun.scope_sight() or gun.ads_amount < 0.7:
 			# 光学瞄具开镜:镜内准星(红点/全息/战术镜)固定屏幕中心,不随散布
 			if gun != null and gun.ads_amount > 0.6 and gun.ret_style() != "":
@@ -2704,7 +3159,9 @@ func update_hud(dt: float) -> void:
 		if _crosshair.kick_px > 0:
 			_crosshair.kick_px = maxf(_crosshair.kick_px - dt * 18.0, 0.0)
 		if absf(spread_px - _crosshair.spread_px) > 0.5 or ch_op != _crosshair.ch_opacity \
-				or _crosshair.kick_px > 0.01 or ret_style != _crosshair.ret_style:
+				or _crosshair.kick_px > 0.01 or ret_style != _crosshair.ret_style \
+				or absf(_crosshair.lock_progress - (p.missile_lock_progress() if p != null else 0.0)) > 0.001 \
+				or _crosshair.missile_locked != (G.lock_target != null) or force_ret_redraw:
 			_crosshair.spread_px = spread_px
 			_crosshair.ch_opacity = ch_op
 			_crosshair.ret_style = ret_style
@@ -2801,9 +3258,18 @@ func _update_weapon_hud(p, gun, dt: float) -> void:
 	_class_icon.add_theme_color_override("font_color", cls.color)
 	_gadget_info.visible = G.mode != "tdm"
 	if G.mode != "tdm":
-		_set_text(_gadget_info, "按 3 切换火箭筒" if p.gadget == "rpg" else (
-			("2 霰弹枪 · F " + cls.gadget_cn + " ×" + str(p.gadget_count)) if (not cls.shotguns.is_empty() and p.guns.size() > 2)
-			else ("F " + cls.gadget_cn + " ×" + str(p.gadget_count))))
+		# 兵种技能提示按所选技能显示(占武器槽者提示按 3;无人机操控中显示无人机状态)
+		var gcn: String = p.gadget_cn if String(p.gadget_cn) != "" else String(cls.gadget_cn)
+		var gtext := ""
+		if G.drone != null and G.drone.piloting:
+			gtext = G.drone.status_text()
+		elif p.gadget == "rpg" or p.gadget == "gl":
+			gtext = "按 3 切换" + gcn
+		elif not cls.shotguns.is_empty() and p.guns.size() > 2:
+			gtext = "2 霰弹枪 · F " + gcn + " ×" + str(p.gadget_count)
+		else:
+			gtext = "F " + gcn + " ×" + str(p.gadget_count)
+		_set_text(_gadget_info, gtext)
 	_set_text(_stance, "驾驶" if p.vehicle != null else ("滑铲" if p.slide_t > 0 else ("趴下" if p.prone else ("蹲下" if p.crouched else "站立"))))
 
 
@@ -2815,12 +3281,14 @@ func _tool_items(p) -> Array:
 	out.append({ "kind": "mine", "count": p.at_mines })
 	var gkind := "medkit"
 	match p.gadget:
-		"rpg":
+		"rpg", "gl":
 			gkind = "rpg"
-		"ammopack":
+		"ammopack", "ammobox":
 			gkind = "ammo"
-		"sensor":
+		"sensor", "drone", "beacon":
 			gkind = "sensor"
+		"coverkit":
+			gkind = "mine"
 	out.append({ "kind": gkind, "count": p.gadget_count })
 	return out
 

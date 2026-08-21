@@ -27,6 +27,8 @@ var active_amount := 0.0                # 平滑后的启用量(Gun.try_fire 使
 var aim_pos := Vector3.ZERO
 var debug_center := Vector2.ZERO        # QA:最近一帧镜片屏幕投影中心
 var debug_radius := 0.0                 # QA:最近一帧镜片屏幕投影半径
+var lens_half_px := Vector2.ZERO        # 镜片屏幕半宽/半高(与 PIP 着色器采样口径一致)
+var lens_fov_deg := 0.0                 # 镜内相机垂直 FOV(角度→像素换算基准)
 
 
 func _ready() -> void:
@@ -84,6 +86,8 @@ func _set_rendering(on: bool) -> void:
 		if vp.render_target_update_mode != SubViewport.UPDATE_DISABLED:
 			vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		active = false
+		lens_fov_deg = 0.0
+		lens_half_px = Vector2.ZERO
 
 
 ## 当前枪械的镜片锚点;无则返回 null
@@ -164,8 +168,12 @@ func _process(dt: float) -> void:
 	var eye_basis: Basis = eye.global_transform.basis.orthonormalized()
 	var px_r: Vector2 = vm_cam.unproject_position(eye_global + eye_basis.x * radius)
 	var px_u: Vector2 = vm_cam.unproject_position(eye_global + eye_basis.y * radius)
-	var radius_px := maxf(center.distance_to(px_r), center.distance_to(px_u))
+	var half_w := center.distance_to(px_r)
+	var half_h := center.distance_to(px_u)
+	var radius_px := maxf(half_w, half_h)
 	# 略微外扩,让镜片着色器与 3D 镜筒实体边缘重叠,消除接缝。
+	half_w *= 1.055
+	half_h *= 1.055
 	radius_px *= 1.055
 	# vm_camera.unproject_position 返回 vm_viewport 逻辑像素;着色器使用根视口
 	# UV × 逻辑分辨率,因此统一换算到根视口逻辑坐标,窗口物理缩放/DPI 不会造成偏移。
@@ -178,14 +186,21 @@ func _process(dt: float) -> void:
 	radius_px *= maxf(sx, sy)
 	var center_uv := Vector2(center.x / maxf(root_size.x, 1.0), center.y / maxf(root_size.y, 1.0))
 
-	var show := smoothstep(0.16, 0.72, ads)
-	var grow := smoothstep(0.30, 0.88, ads)
+	var show := smoothstep(0.22, 0.45, ads)
 	debug_center = center
 	debug_radius = maxf(radius_px, 2.0)
+	# 供 HUD 绘制镜内分划(火箭筒弹道等高线)换算角度→像素:
+	# 取与着色器同一口径的镜片半宽/半高与镜内 FOV,标尺才能与镜内画面严格对齐。
+	lens_half_px = Vector2(half_w, half_h) if gun.id == "rpg" else Vector2(debug_radius, debug_radius)
+	lens_fov_deg = cam.fov
 	mat.set_shader_parameter("center_uv", center_uv)
 	mat.set_shader_parameter("screen_size", root_size)
 	mat.set_shader_parameter("radius_px", debug_radius)
-	mat.set_shader_parameter("radius_scale", lerpf(0.52, 1.0, grow))
+	# 毒刺 CLU 使用方形/矩形镜片;狙击镜保持圆形
+	mat.set_shader_parameter("rect_mode", 1.0 if gun.id == "rpg" else 0.0)
+	mat.set_shader_parameter("rect_half_px", Vector2(half_w, half_h))
+	# 镜片投影始终固定大小,只做透明度淡入,避免“由小变大/贴图缩放”感
+	mat.set_shader_parameter("radius_scale", 1.0)
 	mat.set_shader_parameter("alpha", show)
 	mat.set_shader_parameter("time", G.time)
 
@@ -200,6 +215,15 @@ func aim_basis() -> Basis:
 
 func is_scope_aiming() -> bool:
 	return active and active_amount > 0.45
+
+
+## 镜内“正切→像素”换算系数:屏幕纵向像素偏移 = 该系数 × tan(俯角)。
+## PIP 是正切投影,大俯角(火箭筒 holdover 可达 15°+)不能用线性角度近似,
+## 否则等高线刻度会明显偏离真实落点。返回 0 表示当前无有效镜内渲染。
+func lens_px_per_tan() -> float:
+	if not active or lens_fov_deg <= 0.01 or lens_half_px.y <= 1.0:
+		return 0.0
+	return lens_half_px.y / maxf(tan(deg_to_rad(lens_fov_deg) * 0.5), 0.0001)
 
 
 ## QA 诊断:打印镜内相机/镜头投影状态(供 --test-ads-capture 等验证)

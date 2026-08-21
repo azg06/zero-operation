@@ -80,11 +80,17 @@ func setup_map(map_id: String) -> void:
 			G.vehicles.append(Vehicle.new(s["x"], s["z"], s["yaw"], s.get("type", "jeep")))
 	for v in G.vehicles:
 		G.main.add_child(v)
-	# 清理旧部署物
+	# 清理旧部署物(掩体需连带回收碰撞体,否则新地图会残留隐形墙)
+	var had_cover := false
 	for d in G.deployables:
+		if d.get("kind") == "cover" and d.get("coll") != null:
+			G.colliders.erase(d["coll"])
+			had_cover = true
 		if is_instance_valid(d["mesh"]):
 			d["mesh"].queue_free()
 	G.deployables = []
+	if had_cover:
+		Utils.rebuild_collider_grid()
 	for f in G.flags:
 		f.owner_team = null
 		f.progress = 0
@@ -456,10 +462,9 @@ func spawn_actor(actor) -> void:
 			beacons.append(d["pos"])
 	if not beacons.is_empty() and randf() < 0.4:
 		pos = Utils.choice(beacons)
-	elif G.mode == "breakthrough" and G.bt_spawns != null and G.bt != null:
-		var sec: int = mini(G.bt["sector"], G.bt_spawns["att"].size() - 1)
-		var arr: Array = G.bt_spawns["att"][sec] if team == "us" else G.bt_spawns["def"][sec]
-		pos = Utils.choice(arr)
+	elif G.mode == "breakthrough" and G.bt != null:
+		var bt_pts: Array = bt_deploy_spawn_points(team)
+		pos = Utils.choice(bt_pts) if not bt_pts.is_empty() else Utils.choice(G.spawns[team])
 	else:
 		var owned := []
 		for f in G.flags:
@@ -486,6 +491,17 @@ func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vecto
 	var hit_vehicle = hit.get("vehicle")
 	var hit_ds = hit.get("ds")
 	var wall = hit.get("wall")
+	var hit_dep = hit.get("deployable")
+	# ballistic_fire 的 pre 不含部署物:单独补扫,避免枪线穿过医疗箱/信标却只打墙
+	if not pre.is_empty() and hit_dep == null:
+		var dep_hit2 := _scan_deployable_hit(shooter, origin, dir, best_dist)
+		if dep_hit2.get("dep") != null and float(dep_hit2["dist"]) < best_dist:
+			best_dist = float(dep_hit2["dist"])
+			hit_dep = dep_hit2["dep"]
+			hit["dist"] = best_dist
+			hit_actor = null
+			hit_vehicle = null
+			hit_ds = null
 	# BR 下玩家可被任何非队友攻击(team 字段不参与判定);常规模式按阵营
 	var can_hit_player: bool = dget(shooter, "team") != G.player.team
 	if G.mode == "br":
@@ -505,7 +521,13 @@ func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vecto
 				G.player.suppression = minf(1, G.player.suppression + 0.22)
 				G.effects.shake(0.08)
 
-	if hit_actor != null:
+	if hit_dep != null:
+		# 敌方兵种道具中弹:按武器伤害扣血,击毁后移除
+		_damage_deployable(hit_dep, dget(def, "damage", 25.0), shooter, end, -dir)
+		if is_player(shooter):
+			G.hud.show_hitmarker(false, false)
+			AudioSys.hit(false)
+	elif hit_actor != null:
 		# 距离衰减
 		var rng: Array = dget(def, "rng", [50.0, 100.0, 0.5])
 		var falloff := 1.0
@@ -568,13 +590,56 @@ func fire_hitscan(shooter, def, origin: Vector3, dir: Vector3, muzzle_pos: Vecto
 		Utils._bfire_tick("hit", _bt0)
 
 
-## [PERF] hitscan 几何扫描(从 fire_hitscan 拆出):返回 {dist, actor, head, vehicle, ds, wall}
+## 扫描弹道上的敌方兵种道具(医疗/补给箱、重生信标、C5、地雷)。
+func _scan_deployable_hit(shooter, origin: Vector3, dir: Vector3, max_dist: float) -> Dictionary:
+	var best: Dictionary = { "dist": max_dist, "dep": null }
+	var s_team = dget(shooter, "team")
+	for dep in G.deployables:
+		if not dep.has("hp"):
+			continue
+		if s_team != null and dep.get("team") == s_team:
+			continue
+		var dpos: Vector3 = dep["pos"]
+		var drad := 0.45
+		var dy := 0.35
+		if dep["kind"] == "ammopack" or dep["kind"] == "medpack":
+			drad = 0.72
+			dy = 0.25
+		elif dep["kind"] == "beacon":
+			drad = 0.52
+			dy = 0.62
+		elif dep["kind"] == "cover":
+			continue   # 掩体是实体墙:子弹打在碰撞体上,不做球体命中(靠爆炸摧毁)
+		var dd := Utils.ray_sphere(origin, dir, dpos + Vector3(0, dy, 0), drad, best["dist"])
+		if dd >= 0.0 and dd < float(best["dist"]):
+			best = { "dist": dd, "dep": dep }
+	return best
+
+
+## 武器命中敌方兵种道具:扣血并在击毁时销毁
+func _damage_deployable(dep: Dictionary, dmg: float, _shooter, hit_pos: Vector3, normal: Vector3) -> void:
+	dep["hp"] = float(dep.get("hp", 50.0)) - dmg
+	G.effects.impact(hit_pos, normal)
+	if float(dep["hp"]) <= 0.0:
+		var mesh = dep.get("mesh")
+		if mesh != null and is_instance_valid(mesh):
+			mesh.queue_free()
+		G.effects.explosion(dep["pos"], 2.0)
+		G.deployables.erase(dep)
+
+
+## [PERF] hitscan 几何扫描(从 fire_hitscan 拆出):返回 {dist, actor, head, vehicle, ds, wall, deployable}
 ## 供 fire_hitscan 与 ballistic_fire 复用,消除每发子弹的双重全量扫描
 func _scan_hitscan(shooter, origin: Vector3, dir: Vector3) -> Dictionary:
 	var max_dist := 300.0
 	# 1. 墙体
 	var wall = Utils.raycast_world(origin, dir, max_dist)
 	var best_dist: float = wall["dist"] if wall != null else max_dist
+	# 1.5 敌方兵种道具(医疗/补给箱、重生信标、C5、地雷):可被枪械直接破坏
+	var dep_hit := _scan_deployable_hit(shooter, origin, dir, best_dist)
+	var hit_dep = dep_hit.get("dep")
+	if dep_hit.get("dist", best_dist) < best_dist:
+		best_dist = float(dep_hit["dist"])
 	# 2. 角色(敌方)
 	var hit_actor = null
 	var hit_head := false
@@ -665,7 +730,7 @@ func _scan_hitscan(shooter, origin: Vector3, dir: Vector3) -> Dictionary:
 				hit_ds = ds
 				hit_actor = null
 				hit_vehicle = null
-	return { "dist": best_dist, "actor": hit_actor, "head": hit_head, "vehicle": hit_vehicle, "ds": hit_ds, "wall": wall }
+	return { "dist": best_dist, "actor": hit_actor, "head": hit_head, "vehicle": hit_vehicle, "ds": hit_ds, "wall": wall, "deployable": hit_dep }
 
 
 ## ============ 重生信标(侦察兵:小队隐蔽重生点,持续 90 秒) ============
@@ -686,39 +751,94 @@ func _deploy_front_pos(p_owner, dist: float, lift: float) -> Vector3:
 func spawn_beacon(p_owner) -> void:
 	var pos: Vector3 = _deploy_front_pos(p_owner, 1.5, 0.0)
 	var g := Node3D.new()
-	# 信标杆
-	var pole := MeshInstance3D.new()
-	var pm := CylinderMesh.new()
-	pm.top_radius = 0.03
-	pm.bottom_radius = 0.05
-	pm.height = 1.1
-	pole.mesh = pm
-	var pmat := StandardMaterial3D.new()
-	pmat.albedo_color = Color.html("#2a3040")
-	pmat.roughness = 0.5
-	pmat.metallic = 0.6
-	pole.material_override = pmat
-	pole.position.y = 0.55
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	g.add_child(pole)
-	# 顶部呼吸灯
+	var en: bool = p_owner.team != (G.player.team if G.player != null else "us")
+	# 高科技雷达重生信标:三脚底座 + 设备舱 + 旋转相控阵天线 + 顶部状态灯
+	var dark_mat := StandardMaterial3D.new()
+	dark_mat.albedo_color = Color.html("#202632")
+	dark_mat.roughness = 0.45
+	dark_mat.metallic = 0.65
+	var metal_mat := StandardMaterial3D.new()
+	metal_mat.albedo_color = Color.html("#5c6874")
+	metal_mat.roughness = 0.35
+	metal_mat.metallic = 0.8
+	var base := MeshInstance3D.new()
+	var bcm := CylinderMesh.new()
+	bcm.top_radius = 0.17
+	bcm.bottom_radius = 0.24
+	bcm.height = 0.10
+	bcm.radial_segments = 12
+	base.mesh = bcm
+	base.material_override = dark_mat
+	base.position.y = 0.05
+	base.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	g.add_child(base)
+	for i in 3:
+		var a := float(i) * TAU / 3.0
+		var leg := MeshInstance3D.new()
+		var lcm := CylinderMesh.new()
+		lcm.top_radius = 0.012
+		lcm.bottom_radius = 0.016
+		lcm.height = 0.18
+		leg.mesh = lcm
+		leg.material_override = metal_mat
+		leg.position = Vector3(cos(a) * 0.13, 0.10, sin(a) * 0.13)
+		leg.rotation.z = cos(a) * 0.45
+		leg.rotation.x = -sin(a) * 0.45
+		g.add_child(leg)
+	var mast := MeshInstance3D.new()
+	var mcm := CylinderMesh.new()
+	mcm.top_radius = 0.024
+	mcm.bottom_radius = 0.032
+	mcm.height = 0.72
+	mast.mesh = mcm
+	mast.material_override = metal_mat
+	mast.position.y = 0.48
+	mast.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	g.add_child(mast)
+	var body := MeshInstance3D.new()
+	var bodm := BoxMesh.new()
+	bodm.size = Vector3(0.34, 0.30, 0.26)
+	body.mesh = bodm
+	body.material_override = dark_mat
+	body.position.y = 0.88
+	body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	g.add_child(body)
+	var rotor := Node3D.new()
+	rotor.position = Vector3(0, 0.88, 0)
+	var panel := MeshInstance3D.new()
+	var pnl := BoxMesh.new()
+	pnl.size = Vector3(0.52, 0.025, 0.16)
+	panel.mesh = pnl
+	panel.material_override = metal_mat
+	rotor.add_child(panel)
+	var panel2 := panel.duplicate() as MeshInstance3D
+	panel2.rotation.y = PI / 2.0
+	rotor.add_child(panel2)
+	g.add_child(rotor)
+	var antenna := MeshInstance3D.new()
+	var ant := CylinderMesh.new()
+	ant.top_radius = 0.004
+	ant.bottom_radius = 0.007
+	ant.height = 0.26
+	antenna.mesh = ant
+	antenna.material_override = metal_mat
+	antenna.position.y = 1.12
+	g.add_child(antenna)
 	var lamp := MeshInstance3D.new()
 	var lm := SphereMesh.new()
-	lm.radius = 0.07
-	lm.height = 0.14
+	lm.radius = 0.06
+	lm.height = 0.12
 	lamp.mesh = lm
 	var lamp_mat := StandardMaterial3D.new()
 	lamp_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	# 阵营区分:敌军道具整体红色
-	var en: bool = p_owner.team != (G.player.team if G.player != null else "us")
 	lamp_mat.albedo_color = Color(1, 0.2, 0.15) if en else Color(0.2, 1, 0.5)
 	lamp.material_override = lamp_mat
-	lamp.position.y = 1.15
+	lamp.position.y = 1.26
 	g.add_child(lamp)
 	g.position = pos
 	G.world_root.add_child(g)
-	G.deployables.append({ "kind": "beacon", "mesh": g, "lamp_mat": lamp_mat,
-		"team": p_owner.team, "en": en, "owner": p_owner, "pos": pos, "life": 90.0, "tick": 0.0, "t": 0.0, "arm": 0.0 })
+	G.deployables.append({ "kind": "beacon", "mesh": g, "lamp_mat": lamp_mat, "rotor": rotor,
+		"team": p_owner.team, "en": en, "owner": p_owner, "pos": pos, "life": 90.0, "tick": 0.0, "t": 0.0, "arm": 0.0, "hp": 80.0 })
 	AudioSys.reload(1)
 	if p_owner == G.player:
 		G.hud.hint("重生信标已部署:小队可在此重生(90 秒)")
@@ -758,7 +878,7 @@ func spawn_c5(p_owner) -> void:
 	g.position = pos
 	G.world_root.add_child(g)
 	G.deployables.append({ "kind": "c5", "mesh": g, "lamp_mat": lamp_mat,
-		"team": p_owner.team, "owner": p_owner, "pos": pos, "life": 4.0, "tick": 0.0, "t": 0.0, "arm": 0.0 })
+		"team": p_owner.team, "owner": p_owner, "pos": pos, "life": 4.0, "tick": 0.0, "t": 0.0, "arm": 0.0, "hp": 40.0 })
 	AudioSys.reload(0)
 	if p_owner == G.player:
 		G.hud.hint("C5 已放置:4 秒后引爆")
@@ -798,34 +918,85 @@ func spawn_at_mine(p_owner) -> void:
 	g.position = pos
 	G.world_root.add_child(g)
 	G.deployables.append({ "kind": "atmine", "mesh": g, "lamp_mat": lamp_mat,
-		"team": p_owner.team, "owner": p_owner, "pos": pos, "life": 90.0, "tick": 0.0, "t": 0.0, "arm": 1.5 })
+		"team": p_owner.team, "owner": p_owner, "pos": pos, "life": 90.0, "tick": 0.0, "t": 0.0, "arm": 1.5, "hp": 50.0 })
 	AudioSys.reload(0)
 	if p_owner == G.player:
 		G.hud.hint("反坦克地雷已部署:敌方载具靠近即爆")
 
 
-## ============ 工程兵弹药包(部署物:补给弹药 + 恢复生命) ============
+## ============ 支援兵补给包(医疗包=只治疗 / 弹药包=只补弹,两种功能不再合一) ============
+func spawn_med_pack(p_owner) -> void:
+	_spawn_supply_pack(p_owner, "medpack")
+
+
 func spawn_ammo_pack(p_owner) -> void:
+	_spawn_supply_pack(p_owner, "ammopack")
+
+
+func _spawn_supply_pack(p_owner, kind: String) -> void:
+	var med: bool = kind == "medpack"
 	var pos: Vector3 = _deploy_front_pos(p_owner, 1.4, 0.0)
-	# 建模:弹药箱(程序化)
+	# 建模:补给箱(箱体 + 提手 + 医疗十字/弹药双横标 + 指示灯 + 补给圈)
 	var g := Node3D.new()
+	var en: bool = p_owner.team != (G.player.team if G.player != null else "us")
 	var box := MeshInstance3D.new()
 	var bm := BoxMesh.new()
-	bm.size = Vector3(0.4, 0.25, 0.3)
+	bm.size = Vector3(0.78, 0.46, 0.56)
 	box.mesh = bm
 	var box_mat := StandardMaterial3D.new()
-	var en: bool = p_owner.team != (G.player.team if G.player != null else "us")
-	box_mat.albedo_color = Color.html("#5a2418") if en else Color.html("#4a5a3a")
+	box_mat.albedo_color = Color.html("#5a2418") if en else (Color.html("#3f5540") if med else Color.html("#5a4a22"))
 	box_mat.roughness = 0.75
 	box_mat.metallic = 0.1
 	box.material_override = box_mat
 	box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	g.add_child(box)
+	# 顶部提手
+	var handle := MeshInstance3D.new()
+	var hbm := BoxMesh.new()
+	hbm.size = Vector3(0.16, 0.05, 0.30)
+	handle.mesh = hbm
+	var hmat := StandardMaterial3D.new()
+	hmat.albedo_color = Color.html("#2c3338")
+	hmat.roughness = 0.4
+	hmat.metallic = 0.7
+	handle.material_override = hmat
+	handle.position.y = 0.28
+	g.add_child(handle)
+	# 正面标识:医疗包=白十字 / 弹药包=琥珀双横条
+	var cross_mat := StandardMaterial3D.new()
+	cross_mat.albedo_color = Color(0.95, 0.97, 1.0) if med else Color(1.0, 0.84, 0.32)
+	cross_mat.roughness = 0.5
+	var cv := MeshInstance3D.new()
+	var cbm := BoxMesh.new()
+	cbm.size = Vector3(0.10, 0.34, 0.02) if med else Vector3(0.34, 0.08, 0.02)
+	cv.mesh = cbm
+	cv.material_override = cross_mat
+	cv.position = Vector3(0.36, 0.12, 0.29) if med else Vector3(0.36, 0.01, 0.29)
+	g.add_child(cv)
+	var ch := MeshInstance3D.new()
+	var chm := BoxMesh.new()
+	chm.size = Vector3(0.34, 0.10, 0.02) if med else Vector3(0.34, 0.08, 0.02)
+	ch.mesh = chm
+	ch.material_override = cross_mat
+	ch.position = Vector3(0.36, 0.12, 0.29) if med else Vector3(0.36, 0.19, 0.29)
+	g.add_child(ch)
+	# 顶部状态灯
+	var lamp := MeshInstance3D.new()
+	var lm := SphereMesh.new()
+	lm.radius = 0.035
+	lm.height = 0.07
+	lamp.mesh = lm
+	var lamp_mat := StandardMaterial3D.new()
+	lamp_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	lamp_mat.albedo_color = Color(1, 0.22, 0.16) if en else Color(0.3, 1, 0.55)
+	lamp.material_override = lamp_mat
+	lamp.position.y = 0.33
+	g.add_child(lamp)
 	var ring := MeshInstance3D.new()
-	ring.mesh = Flag.make_ring_mesh(4.2, 4.5, 40)
+	ring.mesh = Flag.make_ring_mesh(6.2, 6.5, 48)
 	var ring_mat := StandardMaterial3D.new()
 	ring_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	ring_mat.albedo_color = Color(1, 0.28, 0.2, 0.35) if en else Color(0.62, 0.88, 0.54, 0.35)
+	ring_mat.albedo_color = Color(1, 0.28, 0.2, 0.35) if en else (Color(0.62, 0.88, 0.54, 0.35) if med else Color(1.0, 0.82, 0.35, 0.35))
 	ring_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	ring_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	ring.material_override = ring_mat
@@ -833,11 +1004,122 @@ func spawn_ammo_pack(p_owner) -> void:
 	g.add_child(ring)
 	g.position = pos
 	G.world_root.add_child(g)
-	G.deployables.append({ "kind": "ammopack", "mesh": g, "ring_mat": ring_mat,
-		"team": p_owner.team, "pos": pos, "life": 30.0, "tick": 0.0, "t": 0.0 })
+	G.deployables.append({ "kind": kind, "mesh": g, "ring_mat": ring_mat, "lamp_mat": lamp_mat,
+		"team": p_owner.team, "pos": pos, "life": 30.0, "tick": 0.0, "t": 0.0, "hp": 100.0 })
 	AudioSys.reload(1)
 	if p_owner == G.player:
-		G.hud.hint("弹药包已部署:圈内友军持续补给弹药并恢复生命")
+		G.hud.hint("医疗包已部署:圈内友军持续恢复生命(不补弹)" if med
+			else "弹药包已部署:圈内友军持续补充弹药与手雷(不回血)")
+
+
+## ============ 工程兵掩体制造器(部署物:半身高装甲掩体,真实碰撞体可挡枪) ============
+## 返回 false = 位置不合法(贴墙/悬空/已有掩体),调用方不扣技能次数。
+## 掩体高 1.15m(半身高):蹲下完全掩护,站起可越顶射击;碰撞体入 G.colliders,
+## 玩家/AI/子弹/视线全部按静态墙体处理(与战役封锁带同一套机制)。
+func spawn_cover(p_owner) -> bool:
+	var pos: Vector3 = _deploy_front_pos(p_owner, 2.0, 0.0)
+	var yaw: float = float(p_owner.yaw)
+	# 合法性:前方需要足够空地(不许怼在墙里),且不与已有掩体重叠
+	if Utils.raycast_world(p_owner.pos + Vector3(0, 1.0, 0),
+			Vector3(-sin(yaw), 0, -cos(yaw)), 2.4) != null:
+		if p_owner == G.player:
+			G.hud.hint("前方空间不足,无法架设掩体")
+		return false
+	for d in G.deployables:
+		if d["kind"] == "cover" and Vector2(d["pos"].x - pos.x, d["pos"].z - pos.z).length() < 1.6:
+			if p_owner == G.player:
+				G.hud.hint("此处已有掩体")
+			return false
+	var W := 1.9        # 掩体宽度
+	var H := 1.15       # 半身高
+	var T := 0.34       # 厚度
+	var en: bool = p_owner.team != (G.player.team if G.player != null else "us")
+	var g := Node3D.new()
+	# 主装甲板 + 上沿加强条 + 两侧支腿 + 沙袋垛(视觉分层,不额外注册碰撞)
+	var plate_mat := StandardMaterial3D.new()
+	plate_mat.albedo_color = Color.html("#4a3a24") if en else Color.html("#3d4a35")
+	plate_mat.roughness = 0.85
+	plate_mat.metallic = 0.25
+	var plate := MeshInstance3D.new()
+	var pbm := BoxMesh.new()
+	pbm.size = Vector3(W, H, T * 0.55)
+	plate.mesh = pbm
+	plate.material_override = plate_mat
+	plate.position = Vector3(0, H * 0.5, 0)
+	plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	g.add_child(plate)
+	var rail_mat := StandardMaterial3D.new()
+	rail_mat.albedo_color = Color.html("#2b3036")
+	rail_mat.roughness = 0.5
+	rail_mat.metallic = 0.6
+	var rail := MeshInstance3D.new()
+	var rbm := BoxMesh.new()
+	rbm.size = Vector3(W + 0.06, 0.1, T * 0.8)
+	rail.mesh = rbm
+	rail.material_override = rail_mat
+	rail.position = Vector3(0, H + 0.04, 0)
+	g.add_child(rail)
+	# 沙袋垛(前侧三段,给掩体体积感)
+	var bag_mat := StandardMaterial3D.new()
+	bag_mat.albedo_color = Color.html("#6b5a3c") if not en else Color.html("#6b4a3c")
+	bag_mat.roughness = 0.95
+	for bi in 3:
+		var bag := MeshInstance3D.new()
+		var bagm := BoxMesh.new()
+		bagm.size = Vector3(W / 3.0 - 0.06, 0.28, T * 0.9)
+		bag.mesh = bagm
+		bag.material_override = bag_mat
+		bag.position = Vector3(-W / 3.0 + float(bi) * (W / 3.0), 0.15, -T * 0.32)
+		bag.rotation.z = Utils.rand(-0.05, 0.05)
+		g.add_child(bag)
+	# 支腿
+	for sx in [-1.0, 1.0]:
+		var leg := MeshInstance3D.new()
+		var lbm := BoxMesh.new()
+		lbm.size = Vector3(0.08, H * 0.9, T)
+		leg.mesh = lbm
+		leg.material_override = rail_mat
+		leg.position = Vector3(sx * (W * 0.5 - 0.06), H * 0.45, T * 0.28)
+		g.add_child(leg)
+	# 阵营识别灯
+	var lamp := MeshInstance3D.new()
+	var lm := SphereMesh.new()
+	lm.radius = 0.032
+	lm.height = 0.064
+	lamp.mesh = lm
+	var lamp_mat := StandardMaterial3D.new()
+	lamp_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	lamp_mat.albedo_color = Color(1, 0.25, 0.18) if en else Color(0.35, 1, 0.6)
+	lamp.material_override = lamp_mat
+	lamp.position = Vector3(W * 0.5 - 0.12, H + 0.1, 0)
+	g.add_child(lamp)
+	g.position = pos
+	g.rotation.y = yaw
+	G.world_root.add_child(g)
+	# 碰撞体:按世界轴对齐的 AABB 包住旋转后的板面(略放宽,保证挡枪不漏)
+	var hw: float = absf(cos(yaw)) * W * 0.5 + absf(sin(yaw)) * T * 0.5
+	var hd: float = absf(sin(yaw)) * W * 0.5 + absf(cos(yaw)) * T * 0.5
+	var coll := AABB(Vector3(pos.x - hw, pos.y, pos.z - hd), Vector3(hw * 2.0, H, hd * 2.0))
+	G.colliders.append(coll)
+	Utils.rebuild_collider_grid()   # 射线/视线/避障立即识别新掩体
+	G.deployables.append({ "kind": "cover", "mesh": g, "lamp_mat": lamp_mat, "coll": coll,
+		"team": p_owner.team, "owner": p_owner, "pos": pos, "life": 150.0, "tick": 0.0, "t": 0.0, "hp": 320.0 })
+	AudioSys.reload(0)
+	if p_owner == G.player:
+		G.hud.hint("装甲掩体已架设:蹲下完全掩护,站起越顶射击")
+	return true
+
+
+## 掩体移除:碰撞体按值出栈并重建网格,视觉件销毁(与战役封锁带清理同一套流程)
+func _remove_cover(d: Dictionary) -> void:
+	var coll = d.get("coll")
+	if coll != null:
+		G.colliders.erase(coll)
+		Utils.rebuild_collider_grid()
+	var mesh = d.get("mesh")
+	if mesh != null and is_instance_valid(mesh):
+		mesh.queue_free()
+	G.effects.explosion(d["pos"] + Vector3(0, 0.5, 0), 1.6)
 
 
 func _update_deployables(dt: float) -> void:
@@ -886,36 +1168,55 @@ func _update_deployables(dt: float) -> void:
 				explode(d["pos"], 7.0, 250, d["owner"])
 			continue
 		if d["kind"] == "beacon":
-			# 重生信标:呼吸灯(按阵营色脉动,敌军红/友军绿);到期移除
+			# 重生信标:雷达天线持续旋转,呼吸灯(按阵营色脉动,敌军红/友军绿);到期移除
 			var bcol: Color = Color(1, 0.2, 0.15) if bool(d.get("en", false)) else Color(0.2, 1, 0.5)
 			(d["lamp_mat"] as StandardMaterial3D).albedo_color = bcol.lerp(bcol * 0.35, 0.5 + sin(d["t"] * 3) * 0.5)
+			var rotor = d.get("rotor")
+			if rotor != null and is_instance_valid(rotor):
+				rotor.rotation.y += dt * 2.6
 			if d["life"] <= 0:
 				if is_instance_valid(d["mesh"]):
 					d["mesh"].queue_free()
 				G.deployables.remove_at(i)
 			continue
+		if d["kind"] == "cover":
+			# 掩体:静态障碍(碰撞体已注册进 G.colliders),到期或被击毁时连同碰撞体一起移除
+			if float(d.get("hp", 1.0)) <= 0.0 or d["life"] <= 0:
+				_remove_cover(d)
+				G.deployables.remove_at(i)
+			continue
 		(d["ring_mat"] as StandardMaterial3D).albedo_color.a = 0.22 + sin(d["t"] * 4) * 0.13
+		var alamp = d.get("lamp_mat")
+		if alamp != null:
+			(alamp as StandardMaterial3D).albedo_color.a = 0.75 + sin(d["t"] * 5) * 0.25
 		if d["tick"] <= 0:
 			d["tick"] = 1.0
-			# 友军 AI:恢复生命
-			for b in G.bots:
-				if b.alive and b.team == d["team"] and b.pos.distance_to(d["pos"]) < 5:
-					b.health = minf(100, b.health + 14)
-					if b.hb_t > 0:
-						b.update_health_bar()
-			# 玩家:弹药补给 + 生命恢复
+			var is_med: bool = d["kind"] == "medpack"
+			# 友军 AI:仅医疗包恢复生命(弹药包对 AI 无治疗效果)
+			if is_med:
+				for b in G.bots:
+					if b.alive and b.team == d["team"] and b.pos.distance_to(d["pos"]) < 6.5:
+						b.health = minf(100, b.health + 14)
+						if b.hb_t > 0:
+							b.update_health_bar()
+			# 玩家:医疗包只治疗 / 弹药包只补弹(两种功能不合一)
 			var p = G.player
-			if p != null and p.alive and p.team == d["team"] and p.pos.distance_to(d["pos"]) < 5:
-				p.heal(14)
-				var resupplied := false
-				for gun in p.guns:
-					if gun.reserve < gun.def.reserve:
-						gun.reserve = mini(gun.def.reserve, gun.reserve + int(ceil(gun.def.reserve * 0.2)))
+			if p != null and p.alive and p.team == d["team"] and p.pos.distance_to(d["pos"]) < 6.5:
+				if is_med:
+					if p.health < 100.0:
+						p.heal(14)
+						G.hud.hint("医疗包:生命恢复中…")
+				else:
+					var resupplied := false
+					for gun in p.guns:
+						if gun.reserve < gun.def.reserve:
+							gun.reserve = mini(gun.def.reserve, gun.reserve + int(ceil(gun.def.reserve * 0.2)))
+							resupplied = true
+					if p.grenades < 2:
+						p.grenades += 1
 						resupplied = true
-				if p.grenades < 2:
-					p.grenades += 1
-					resupplied = true
-				G.hud.hint("弹药包:弹药补给 + 生命恢复中…" if resupplied else "弹药包:生命恢复中…")
+					if resupplied:
+						G.hud.hint("弹药包:弹药补给中…")
 		if d["life"] <= 0:
 			if is_instance_valid(d["mesh"]):
 				d["mesh"].queue_free()
@@ -926,6 +1227,17 @@ func _update_deployables(dt: float) -> void:
 func explode(pos: Vector3, radius: float, max_dmg: float, attacker) -> void:
 	G.effects.explosion(pos, radius)
 	var a_team = dget(attacker, "team")
+	# 部署掩体:爆炸是唯一能拆掉它的手段(子弹打在实体碰撞体上)
+	for ci in range(G.deployables.size() - 1, -1, -1):
+		var dep: Dictionary = G.deployables[ci]
+		if dep.get("kind") != "cover":
+			continue
+		var dc: float = dep["pos"].distance_to(pos)
+		if dc < radius + 1.2:
+			dep["hp"] = float(dep.get("hp", 320.0)) - max_dmg * (1.0 - dc / (radius + 1.2))
+			if float(dep["hp"]) <= 0.0:
+				_remove_cover(dep)
+				G.deployables.remove_at(ci)
 	for b in G.bots:
 		if not b.alive:
 			continue
@@ -994,6 +1306,11 @@ func on_kill(killer, victim, def, head: bool) -> void:
 	var in_portal: bool = pm != null and pm.active != null
 	# 开局 3D 部署(state=deploy)期间 AI 已实时交战,但兵力值/胜负判定须等对局正式开始
 	var in_match: bool = G.state == "playing" or G.state == "dead"
+	# 实时 3D 战场部署(征服/突破):玩家死亡后进入部署观察/选择出生点期间,
+	# 世界仍在实时交战;此时 NPC/玩家死亡也必须正常扣票,不能因为 state=deploy 跳过。
+	var battlefield_live: bool = G.deployment != null and G.deployment.active
+	if G.state == "deploy" and battlefield_live:
+		in_match = true
 	if not in_portal and in_match:
 		# 兵力值(突破模式防守方兵力无限,不扣减)
 		# [BALANCE 24v24] 击杀扣票 1→0.5:48 人局击杀频率翻倍,扣票减半抵消,
@@ -1184,6 +1501,93 @@ func _update_breakthrough(dt: float) -> void:
 		for b in G.bots:
 			b.pick_objective(true)
 
+
+
+## ============ 突破模式:动态部署点规则 ============
+## 3 个区域 + 双方基地,按当前交战区域推进:
+##   sector 0(第一区域):攻方只能在我方基地,守方只在第二区域 A 点
+##   sector 1(第二区域):攻方可在第一区域 A/B,守方只在第三区域 A/B
+##   sector 2(第三区域):攻方只在第二区域 A 点,守方只在守方基地
+## 这些规则同时用于 AI 出生、玩家 3D 部署与 2D 部署地图。
+
+
+func _bt_flag_points(sector: int, id_filter := "") -> Array:
+	var pts: Array = []
+	for f in G.flags:
+		if f == null or not is_instance_valid(f):
+			continue
+		if f.sector != sector:
+			continue
+		if id_filter != "" and f.id != id_filter:
+			continue
+		pts.append(f.pos)
+	return pts
+
+
+func bt_deploy_spawn_points(team: String) -> Array:
+	if G.mode != "breakthrough" or G.bt == null:
+		return G.spawns.get(team, [])
+	var sec: int = G.bt["sector"]
+	if team == "us":
+		# 已占领的点都可以作为友方部署点(战地式:占点即可在该点重生)
+		var owned_pts: Array = []
+		for f in G.flags:
+			if f != null and is_instance_valid(f) and f.owner_team == "us":
+				owned_pts.append(f.pos)
+		if not owned_pts.is_empty():
+			return owned_pts
+		match sec:
+			0:
+				return G.spawns.get("us", [])
+			1:
+				return _bt_flag_points(0)
+			2:
+				return _bt_flag_points(1, "A")
+	else:
+		match sec:
+			0:
+				return _bt_flag_points(1, "A")
+			1:
+				return _bt_flag_points(2)
+			2:
+				return G.spawns.get("ru", [])
+	return G.spawns.get(team, [])
+
+
+## 部署点合法性(玩家 3D/2D 部署 UI 共用)
+func bt_deploy_allowed(team: String, kind: String, ref: Variant) -> bool:
+	if G.mode != "breakthrough" or G.bt == null:
+		return true
+	var sec: int = G.bt["sector"]
+	match kind:
+		"base":
+			if team == "us":
+				return sec == 0
+			return sec == 2
+		"flag":
+			var f = ref
+			if f == null or not is_instance_valid(f):
+				return false
+			if team == "us":
+				# 战地规则:只要友方已占领该点,就可以在该点部署
+				if f.owner_team == "us":
+					return true
+				match sec:
+					0:
+						return false
+					1:
+						return f.sector == 0
+					2:
+						return f.sector == 1 and f.id == "A"
+			else:
+				match sec:
+					0:
+						return f.sector == 1 and f.id == "A"
+					1:
+						return f.sector == 2
+					2:
+						return false
+	return true
 
 ## ============ 突破模式:区域封锁(未解锁区域禁止进入/部署) ============
 ## 前沿封锁线:当前区域与下一区域之间的分界线(双方都不可越过)
@@ -1379,9 +1783,12 @@ func _update_flag_capture(f: Flag, dt: float, verb: String) -> void:
 func check_end() -> void:
 	if G.state == "over" or G.state == "end":
 		return
-	# 开局 3D 部署(state=deploy)期间不判胜负(对局尚未正式开始)
+	# 开局 3D 部署(state=deploy)期间不判胜负(对局尚未正式开始);
+	# 但玩家死亡后的实时部署观察/选点期间战场仍实时运行,票数耗尽应正常结算。
 	if G.state != "playing" and G.state != "dead":
-		return
+		var battle_live: bool = G.deployment != null and G.deployment.active
+		if not (G.state == "deploy" and battle_live):
+			return
 	if G.mode == "campaign":
 		return  # 战役胜负由 campaign 控制器负责(避免票数/旗帜提前结束)
 	if G.mode == "tdm" or G.mode == "br":
