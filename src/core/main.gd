@@ -887,6 +887,49 @@ func _ready() -> void:
 			sm.rotation.y = G.player.yaw + PI  # 面向玩家
 			G.world_root.add_child(sm)
 		print("[CLASSES] 已生成四兵种模型合影")
+	# 菜单导航回归:--test-menu-nav(主菜单 → 战役/门户 → 返回主菜单,断言返回后始终有可见 UI)
+	# 复现历史 bug:_hide_screen 加的 UI 锁挡住随后的 _show_screen,导致所有页面消失、无法退出
+	if ua.has("--test-menu-nav"):
+		await get_tree().create_timer(0.6).timeout
+		var mn = _menus
+		# 深路径:若当前在对局里(配合 --test-play),先走暂停菜单「返回主菜单」再验菜单可用
+		if G.state != "menu" and mn.on_quit.is_valid():
+			mn.on_quit.call()
+			await get_tree().create_timer(0.5).timeout
+			var vq: String = mn.qa_visible_screens()
+			print("[NAV] 对局中退回主菜单 → %s %s" % [
+				("OK" if vq.find("menu") >= 0 else "X 失败(空白/无主菜单)"), mn.qa_nav_state()])
+		print("[NAV] 起始 ", mn.qa_nav_state())
+		for step in [["战争故事", "campaign"], ["门户", "portal"]]:
+			var entry: String = step[0]
+			var screen: String = step[1]
+			var ok_in: bool = mn.qa_press_button("menu", entry)
+			await get_tree().create_timer(0.45).timeout
+			print("[NAV] 进入 %s(命中=%s) %s" % [entry, str(ok_in), mn.qa_nav_state()])
+			var ok_back: bool = mn.qa_press_button(screen, "返回主菜单")
+			await get_tree().create_timer(0.45).timeout
+			print("[NAV] 返回(命中=%s) %s" % [str(ok_back), mn.qa_nav_state()])
+			var vis: String = mn.qa_visible_screens()
+			if vis == "":
+				print("[NAV] X 失败:返回后没有任何可见页面(玩家卡在空白界面)")
+			elif vis.find("menu") < 0:
+				print("[NAV] X 失败:返回后主菜单不可见,可见页=", vis)
+			else:
+				print("[NAV] OK:主菜单已回到可见")
+		print("[NAV] 菜单导航回归结束")
+		# 全页面「返回/取消」按钮清扫:任何一条返回路径都不许留下空白界面
+		print("[NAV] ---- 返回按钮全量清扫 ----")
+		for line in String(mn.qa_back_button_sweep()).split("\n"):
+			print("[NAV] ", line)
+		await get_tree().create_timer(0.3).timeout
+		print("[NAV] 清扫后 ", mn.qa_nav_state())
+		# 兜底看门狗:人为制造"菜单态全页面隐藏"的空白态,0.5s 后应自动恢复主菜单
+		mn.hide_all()
+		await get_tree().create_timer(0.15).timeout
+		print("[NAV] 人为空白 ", mn.qa_nav_state())
+		await get_tree().create_timer(0.8).timeout
+		var vw: String = mn.qa_visible_screens()
+		print("[NAV] 看门狗 %s %s" % [("OK:已自动恢复主菜单" if vw.find("menu") >= 0 else "X 失败:仍空白"), mn.qa_nav_state()])
 	# 兵种第二技能冒烟测试:--test-gadgets(配合 --test-play)
 	# 逐兵种切换到第二技能并真实调用 use_gadget,断言:武器槽/部署物/碰撞体/无人机接管全部生效
 	if ua.has("--test-gadgets"):

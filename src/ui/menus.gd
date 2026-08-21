@@ -134,7 +134,29 @@ func _ready() -> void:
 		_open_tdm_loadout()
 
 
+## 空白界面兜底:菜单态(未进入对局)下若所有页面都不可见,说明 UI 状态机出了岔子,
+## 玩家会卡在没有 UI、也退不出去的黑屏里。持续 0.5s 仍为空白就强制恢复主菜单。
+## 0.5s 去抖是为了避开"hide_all → start_match"这一帧的正常空窗,不会误盖游戏画面。
+var _blank_t := 0.0
+
+func _watchdog_blank_ui(dt: float) -> void:
+	if G.state != "menu" or _ui_lock or _ui_state == "closing":
+		_blank_t = 0.0
+		return
+	for k in _screens:
+		if _screens[k].visible:
+			_blank_t = 0.0
+			return
+	_blank_t += dt
+	if _blank_t < 0.5:
+		return
+	_blank_t = 0.0
+	G.log_err("UI", "菜单态下所有页面均不可见,已自动恢复主菜单", _ui_state + "/" + _active_screen)
+	_show_screen("menu", true)
+
+
 func _process(dt: float) -> void:
+	_watchdog_blank_ui(dt)
 	# 战役 signal 懒连接(campaign 由 main 在 Menus 之后创建);
 	# 实例变化(切换/重建 Campaign)时先断开旧实例再重连,防结算信号挂到废弃实例上
 	if G.campaign != null and G.campaign != _campaign_src:
@@ -223,9 +245,10 @@ func _show_screen(id: String, instant := false) -> void:
 	if not _screens.has(id):
 		G.log_err("UI", "尝试打开不存在的页面: " + id, _active_screen)
 		return
-	# 正在播放关闭动画时,禁止中途再开别的页面,避免两个页面同时抢输入
-	if _ui_lock and _active_screen != id:
-		return
+	# 正在播放关闭动画时,不能因此拒绝打开新页面:
+	# 「旧页面已淡出 + 新页面被 UI 锁挡住」会留下没有任何 UI、也退不出去的空白画面
+	# (战役/门户「返回主菜单」历史 bug 即此)。打开动作直接接管状态机 ——
+	# 下面会强制隐藏其它页面,不存在两个页面同时抢输入的问题。
 	if _active_screen == id and _screens[id].visible:
 		return
 	_ui_lock = true
@@ -235,6 +258,9 @@ func _show_screen(id: String, instant := false) -> void:
 	for k in _screens:
 		if k != id and _screens[k].visible:
 			_screens[k].visible = false
+			# 上一次淡出可能把 alpha 停在 0:一并复位,避免下次打开时"可见但全透明"
+			_screens[k].modulate.a = 1.0
+			_screens[k].scale = Vector2.ONE
 	var sc: Control = _screens[id]
 	if instant:
 		sc.visible = true
@@ -1314,7 +1340,7 @@ func _build_campaign_select() -> void:
 	back.custom_minimum_size = Vector2(200, 38)
 	back.pressed.connect(func():
 		AudioSys.ui()
-		_hide_screen("campaign")
+		# 只需 _show_screen:它会自行隐藏其它页面。先 _hide_screen 会加锁挡住打开(空白界面 bug)
 		_show_screen("menu"))
 	v.add_child(back)
 
@@ -1386,6 +1412,71 @@ func _open_campaign_select() -> void:
 	_campaign_load_save()
 	_refresh_campaign_cards()
 	_show_screen("campaign")
+
+
+## QA:当前可见页面列表(空 = 没有任何 UI,玩家会被卡在空白画面里)
+func qa_visible_screens() -> String:
+	var out: PackedStringArray = PackedStringArray()
+	for k in _screens:
+		if _screens[k].visible and _screens[k].modulate.a > 0.01:
+			out.append(k)
+	return ", ".join(out)
+
+
+## QA:按标题找页面里的按钮并真实触发 pressed(走玩家点击的同一条回调)
+func qa_press_button(screen_id: String, label: String) -> bool:
+	if not _screens.has(screen_id):
+		return false
+	for node in _screens[screen_id].find_children("*", "Button", true, false):
+		var b := node as Button
+		if b != null and String(b.text).begins_with(label):
+			b.pressed.emit()
+			return true
+	return false
+
+
+## QA 诊断:菜单导航状态机快照(锁/状态/活动页/可见页)
+func qa_nav_state() -> String:
+	return "lock=%s state=%s active=%s visible=[%s]" % [
+		str(_ui_lock), _ui_state, _active_screen, qa_visible_screens()]
+
+
+## QA:遍历所有菜单类页面的「返回/取消」按钮,逐个点击并断言点完仍有可见 UI。
+## 用于回归"点进子页面再返回 → 全部页面消失、无法退出"这类空白界面死锁。
+## 只覆盖不需要活体玩家的页面(deploy/death/pause/end/loading 依赖对局状态,跳过)。
+func qa_back_button_sweep() -> String:
+	const MENU_SCREENS := ["campaign", "portal", "tdm_loadout", "br_class",
+		"armory", "battlepass", "profile", "store", "settings", "help", "campaign_end"]
+	var report: PackedStringArray = PackedStringArray()
+	for id in MENU_SCREENS:
+		if not _screens.has(id):
+			continue
+		_show_screen(id, true)
+		if not _screens[id].visible:
+			report.append("%s → 打不开(跳过)" % id)
+			continue
+		var pressed := ""
+		for node in _screens[id].find_children("*", "Button", true, false):
+			var b := node as Button
+			if b == null:
+				continue
+			var t := String(b.text)
+			if t.find("返回") >= 0 or t.find("取消") >= 0:
+				pressed = t.replace("\n", " ")
+				b.pressed.emit()
+				break
+		if pressed == "":
+			report.append("%s → 无返回按钮(跳过)" % id)
+			continue
+		# 只看 visible:淡入首帧 alpha 仍为 0,而 bug 表现是所有页面 visible=false
+		var vis: PackedStringArray = PackedStringArray()
+		for k in _screens:
+			if _screens[k].visible:
+				vis.append(k)
+		var vtxt := ", ".join(vis)
+		report.append("%s -[%s]-> %s" % [id, pressed, vtxt if vtxt != "" else "空白!!(BUG)"])
+	_show_screen("menu", true)
+	return "\n".join(report)
 
 
 ## ==================== 战役结算屏 ====================
@@ -1602,7 +1693,7 @@ func _build_portal() -> void:
 	back.custom_minimum_size = Vector2(200, 38)
 	back.pressed.connect(func():
 		AudioSys.ui()
-		_hide_screen("portal")
+		# 只需 _show_screen(它会隐藏其它页面);先 _hide_screen 会加锁挡住打开
 		_show_screen("menu"))
 	v.add_child(back)
 
@@ -1689,7 +1780,6 @@ func _open_tdm_loadout() -> void:
 ## 返回门户模式选择页
 func _back_from_tdm_loadout() -> void:
 	AudioSys.ui()
-	_hide_screen("tdm_loadout")
 	_show_screen("portal")
 
 
@@ -1946,7 +2036,6 @@ func _br_card_start_click(mid: String) -> void:
 		_portal_start(mid)
 		return
 	_br_class_highlight()
-	_hide_screen("portal")
 	_show_screen("br_class")
 
 
@@ -2018,7 +2107,6 @@ func _build_br_class_select() -> void:
 	back.custom_minimum_size = Vector2(160, 42)
 	back.pressed.connect(func():
 		AudioSys.ui()
-		_hide_screen("br_class")
 		_show_screen("portal"))
 	row.add_child(back)
 	var confirm := UiTheme.make_cta("确认跳伞", 17)
