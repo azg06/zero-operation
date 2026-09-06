@@ -2835,6 +2835,17 @@ func _run_vehicle_qa(vtype: String) -> void:
 	await get_tree().create_timer(0.8).timeout
 	G.player.enter_vehicle(v)
 	print("[TEST] 已上车:", vtype)
+	# [FIX 船桨轮] 断言:轮自转节点名单不得混入轮拱/装饰件(WheelArch 等)
+	if v.mesh.has_meta("wheels"):
+		var wn := PackedStringArray()
+		for w in v.mesh.get_meta("wheels"):
+			wn.append(String(w.name))
+		var arch_bad := 0
+		for n in wn:
+			if n.contains("Arch"):
+				arch_bad += 1
+		print("[TEST] wheels(%d): %s" % [wn.size(), ", ".join(wn)])
+		print("[TEST] 轮名单断言: %s" % ["OK 无 Arch 误配" if arch_bad == 0 else "FAIL %d 个 Arch 误配" % arch_bad])
 	await get_tree().create_timer(1.6).timeout
 	await _qa_shot("veh_" + vtype + "_tp")
 	# TP 炮塔跟随实测:轨道相机左转 0.8rad → 炮塔应收敛到同向

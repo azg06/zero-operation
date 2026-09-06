@@ -271,11 +271,12 @@ def build_apc():
 # ============================================================ 自行防空炮
 def build_aa():
     reset()
-    # --- 6 轮底盘
+    # --- 6 轮底盘(命名用轴索引:旧版 abs(wz)*10 使 ±1.60 两轴重名 Wheel16,
+    #     Blender 自动派生 _001 后缀污染契约节点名)
     spins = []
-    for wz in (-1.60, 0.0, 1.60):
+    for ai, wz in enumerate((-1.60, 0.0, 1.60)):
         for sd, wx in ((-1, -1.02), (1, 1.02)):
-            sp, _ = _steer_wheel(wx, wz, 0.44, "Wheel%d%s" % (int(abs(wz) * 10), "L" if sd < 0 else "R"), wz < -1.0)
+            sp, _ = _steer_wheel(wx, wz, 0.44, "Wheel%d%s" % (ai, "L" if sd < 0 else "R"), wz < -1.0)
             spins.append(sp)
     # --- 车体:驾驶舱(前,带挡风玻璃+前墙) + 货斗侧板(中后)
     add_box("Hull", (2.12, 0.82, 5.0), (0, 1.10, -0.05), bevel=0.02)

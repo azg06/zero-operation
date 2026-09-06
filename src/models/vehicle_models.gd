@@ -646,7 +646,14 @@ static func _veh_wire(g: Node3D, has_turret: bool) -> void:
 	var fronts: Array = []
 	for c in g.find_children("*", "Node3D", true, false):
 		var nm := String(c.name)
-		if nm.begins_with("Wheel"):
+		# [FIX 船桨轮] 只收轮自转节点(spin)本身 ——
+		# ① WheelArch*(轮拱长板)也以 "Wheel" 开头,旧版 begins_with("Wheel")
+		#   把两块 4.4m 侧轮拱板误收进 wheels,行驶时随轮轴旋转 = 两侧"船桨";
+		# ② 递归查找会带出 spin 下的 *_Tire/*_Hub 子件(含 Blender 重名派生的
+		#   *_Hub_001 变体),它们已随 spin 转动,再单独转一次 = 轮胎双倍转速。
+		# 兼容 WheelFL(jeep) / Wheel0L~3R(apc/aa) 全部现有契约命名。
+		if nm.begins_with("Wheel") and not nm.contains("Arch") \
+				and not nm.contains("_Tire") and not nm.contains("_Hub"):
 			wheels.append(c)
 		elif nm.begins_with("Steer_"):
 			fronts.append(c)
