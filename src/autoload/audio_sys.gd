@@ -79,6 +79,10 @@ const RELOAD_ACTION_FILES := {
 	"belt_out_heavy": "belt_out_heavy",
 	"belt_in_heavy": "belt_in_heavy",
 	"belt_lock_heavy": "belt_lock_heavy",
+	# [9/10] 新泵动霰弹枪逐发装填独立采样
+	"shell_grab_rem870": "shell_grab_rem870", "shell_insert_rem870": "shell_insert_rem870",
+	"shell_grab_m590": "shell_grab_m590", "shell_insert_m590": "shell_insert_m590",
+	"shell_grab_win1897": "shell_grab_win1897", "shell_insert_win1897": "shell_insert_win1897",
 }
 ## 各动作采样的响度补偿:把合成素材拉到游戏内统一听感(峰值越低增益越大)
 const RELOAD_ACTION_GAIN := {
@@ -94,6 +98,45 @@ const RELOAD_ACTION_GAIN := {
 	"bolt_cycle_ak": 1.0, "bolt_cycle_smg": 1.4, "bolt_cycle_sniper": 1.2, "bolt_cycle_lmg": 1.0,
 	"cover_open_heavy": 1.0, "cover_close_heavy": 1.0, "belt_out_heavy": 1.0,
 	"belt_in_heavy": 1.0, "belt_lock_heavy": 1.3,
+	# [9/10] 新泵动/左轮动作采样响度补偿(按实测峰值统一到 -3~0 dBFS 听感)
+	"pump_back_rem870": 1.0, "pump_fwd_rem870": 1.0, "pump_finish_rem870": 1.3,
+	"pump_back_m590": 1.1, "pump_fwd_m590": 1.0, "pump_finish_m590": 1.7,
+	"pump_back_win1897": 1.1, "pump_fwd_win1897": 1.05, "pump_finish_win1897": 1.0,
+	"revolver_open_python": 1.2, "revolver_close_python": 1.4, "revolver_eject_python": 1.5,
+	"revolver_round_python": 2.2, "revolver_insert_python": 1.6, "revolver_loader_python": 1.0,
+	"revolver_hammer_python": 1.5, "revolver_rotate_python": 2.2,
+	"revolver_open_sw686": 1.7, "revolver_close_sw686": 2.2, "revolver_eject_sw686": 1.7,
+	"revolver_round_sw686": 2.8, "revolver_insert_sw686": 2.3, "revolver_loader_sw686": 1.6,
+	"revolver_hammer_sw686": 2.4, "revolver_rotate_sw686": 2.5,
+	"revolver_open_sw500": 1.1, "revolver_close_sw500": 1.8, "revolver_eject_sw500": 2.1,
+	"revolver_round_sw500": 1.6, "revolver_insert_sw500": 2.0, "revolver_loader_sw500": 2.5,
+	"revolver_hammer_sw500": 1.8, "revolver_rotate_sw500": 2.5,
+	"shell_grab_rem870": 5.5, "shell_insert_rem870": 1.4,
+	"shell_grab_m590": 2.9, "shell_insert_m590": 1.1,
+	"shell_grab_win1897": 4.8, "shell_insert_win1897": 1.4,
+}
+## [9/10] 程序化合成枪声/机械声(启动时一次性生成并缓存,零每帧开销,不占用磁盘资源)。
+## 每种新武器按名字确定性生成独立波形;不复制任何已有枪声文件。
+const GEN_GUN_IDS := {
+	"rem870": "shotgun_870", "m590": "shotgun_590", "win1897": "shotgun_1897",
+	"python": "revolver_357", "sw686": "revolver_357s", "sw500": "revolver_500",
+}
+const GEN_ACTION_NAMES := {
+	"pump_back_rem870": "mech_pump_back", "pump_fwd_rem870": "mech_pump_fwd", "pump_finish_rem870": "mech_pump_lock",
+	"pump_back_m590": "mech_pump_back_heavy", "pump_fwd_m590": "mech_pump_fwd_heavy", "pump_finish_m590": "mech_pump_lock_heavy",
+	"pump_back_win1897": "mech_pump_back_old", "pump_fwd_win1897": "mech_pump_fwd_old", "pump_finish_win1897": "mech_pump_lock_old",
+	"pump_back_m1014": "mech_pump_back", "pump_fwd_m1014": "mech_pump_fwd", "pump_finish_m1014": "mech_pump_lock",
+	"pump_back_spas12": "mech_pump_back_heavy", "pump_fwd_spas12": "mech_pump_fwd_heavy", "pump_finish_spas12": "mech_pump_lock_heavy",
+	"revolver_open_python": "rv_open", "revolver_close_python": "rv_close", "revolver_eject_python": "rv_eject",
+	"revolver_round_python": "rv_round", "revolver_loader_python": "rv_loader", "revolver_insert_python": "rv_insert",
+	"revolver_hammer_python": "rv_hammer", "revolver_rotate_python": "rv_rotate",
+	"revolver_open_sw686": "rv_open_light", "revolver_close_sw686": "rv_close_light", "revolver_eject_sw686": "rv_eject_light",
+	"revolver_round_sw686": "rv_round_light", "revolver_loader_sw686": "rv_loader_light", "revolver_insert_sw686": "rv_insert_light",
+	"revolver_hammer_sw686": "rv_hammer_light", "revolver_rotate_sw686": "rv_rotate_light",
+	"revolver_open_sw500": "rv_open_heavy", "revolver_close_sw500": "rv_close_heavy", "revolver_eject_sw500": "rv_eject_heavy",
+	"revolver_round_sw500": "rv_round_heavy", "revolver_loader_sw500": "rv_loader_heavy", "revolver_insert_sw500": "rv_insert_heavy",
+	"revolver_hammer_sw500": "rv_hammer_heavy", "revolver_rotate_sw500": "rv_rotate_heavy",
+	"inspect_grab": "inspect_grab",
 }
 ## 载具类型 → [音频文件, 参考距离, 最大距离](audio/vehicles 子目录)
 const VEH_SOUND_FILES := {
@@ -117,6 +160,7 @@ const STEP_TERRAIN := {
 }
 
 var _cache: Dictionary = {}
+var _gen_cache: Dictionary = {}
 var _players_2d: Array[AudioStreamPlayer] = []
 var _players_3d: Array[AudioStreamPlayer3D] = []
 var _step_players: Array[AudioStreamPlayer] = []  # 脚步专用小池:不与枪声/爆炸争抢共享 2D 池(避免互相截断爆音)
@@ -172,6 +216,17 @@ func _preload_hot() -> void:
 		_snd(v, "guns")
 	for v in RELOAD_ACTION_FILES.values():
 		_snd(v, "reload")
+	# [9/10] 新武器音效启动时预载:优先 audio/guns|reload 的 AI 合成文件,缺失回退程序化合成缓存
+	for wid in GEN_GUN_IDS:
+		if ResourceLoader.exists("res://audio/guns/" + wid + ".wav") or ResourceLoader.exists("res://audio/guns/" + wid + ".ogg"):
+			_snd(wid, "guns")
+		else:
+			_gen_snd("fire_" + wid)
+	for an in GEN_ACTION_NAMES:
+		if ResourceLoader.exists("res://audio/reload/" + an + ".wav") or ResourceLoader.exists("res://audio/reload/" + an + ".ogg"):
+			_snd(an, "reload")
+		else:
+			_gen_snd(an)
 	for k in ["shoot_rifle", "shoot_smg", "shoot_lmg", "shoot_sniper", "shoot_pistol", "shoot_shotgun", "shoot_dmr",
 			"hit", "hit_head", "kill", "kill_head", "dry_fire", "bolt",
 			"reload_0", "reload_1", "reload_2", "reload_3", "rpg_fire"]:
@@ -223,6 +278,8 @@ func _ensure_lowpass(bus: String, cutoff: float) -> void:
 ## 音频加载:优先 .ogg(体积压缩),缺失时回退 .wav(循环音效仍为 wav);两者都缺返回 null
 func _snd(snd_name: String, sub := "") -> AudioStream:
 	var key := (sub + "/" if sub != "" else "") + snd_name
+	if sub == "gen":
+		return _gen_snd(snd_name)
 	if not _cache.has(key):
 		var base := "res://audio/" + (sub + "/" if sub != "" else "") + snd_name
 		var p := ""
@@ -232,6 +289,138 @@ func _snd(snd_name: String, sub := "") -> AudioStream:
 			p = base + ".wav"
 		_cache[key] = load(p) if p != "" else null
 	return _cache[key]
+
+
+## [9/10] 名字确定性哈希:同一声源每次启动波形一致,不同武器/动作音色不同。
+func _gen_hash(s: String) -> int:
+	var h := 17
+	for i in s.length():
+		h = (h * 131 + s.unicode_at(i)) % 1000003
+	return h
+
+
+func _gen_snd(snd_name: String) -> AudioStream:
+	if _gen_cache.has(snd_name):
+		return _gen_cache[snd_name]
+	var s := _synth_gen(snd_name)
+	_gen_cache[snd_name] = s
+	return s
+
+
+## 程序化合成:枪声为低频爆鸣 + 噪声冲击 + 金属尾音;机械声为短促金属 click/rattle。
+## 16-bit 22.05kHz 单声道,启动时一次性构建并缓存,运行时零合成开销。
+func _synth_gen(snd_name: String) -> AudioStream:
+	var sr := 22050
+	var seed := _gen_hash(snd_name)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed
+	var dur := 0.42
+	var body := 0.0
+	var ring_f := 620.0
+	var ring_amp := 0.18
+	var low_f := 68.0
+	var low_amp := 0.55
+	var noise_env := 14.0
+	var noise_amp := 0.5
+	var attack := 0.003
+	var band := 0.72
+	if snd_name.begins_with("fire_"):
+		var wid := snd_name.trim_prefix("fire_")
+		var kind: String = GEN_GUN_IDS.get(wid, "shotgun")
+		if kind.begins_with("shotgun"):
+			dur = 0.52
+			body = 7.5
+			ring_f = 340.0 + float(seed % 90)
+			ring_amp = 0.12
+			low_f = 44.0 + float(seed % 21)
+			low_amp = 0.85
+			noise_env = 16.0
+			noise_amp = 0.38
+			band = 0.5
+		elif kind == "revolver_500":
+			dur = 0.46
+			body = 13.0
+			ring_f = 780.0
+			ring_amp = 0.22
+			low_f = 95.0
+			low_amp = 0.7
+			noise_env = 30.0
+			noise_amp = 0.85
+			band = 0.82
+		else:
+			dur = 0.4
+			body = 16.0
+			ring_f = 690.0 + float(seed % 130)
+			ring_amp = 0.2
+			low_f = 150.0
+			low_amp = 0.38
+			noise_env = 28.0
+			noise_amp = 0.82
+			band = 0.76
+	elif snd_name.begins_with("pump_"):
+		dur = 0.3
+		body = 26.0
+		ring_f = 290.0
+		ring_amp = 0.08
+		low_f = 80.0
+		low_amp = 0.32
+		noise_env = 40.0
+		noise_amp = 0.6
+		band = 0.4
+	elif snd_name.begins_with("revolver_"):
+		dur = 0.22 if "rotate" in snd_name or "round" in snd_name else 0.3
+		body = 34.0
+		ring_f = 980.0 + float(seed % 420)
+		ring_amp = 0.3 if "hammer" in snd_name else 0.16
+		low_f = 130.0
+		low_amp = 0.14
+		noise_env = 55.0
+		noise_amp = 0.55
+		band = 0.82
+	else:
+		dur = 0.16
+		body = 40.0
+		ring_f = 520.0
+		ring_amp = 0.1
+		low_f = 110.0
+		low_amp = 0.1
+		noise_env = 60.0
+		noise_amp = 0.3
+		band = 0.7
+	var n := int(sr * dur)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var lp := 0.0
+	var lp2 := 0.0
+	var phase := 0.0
+	var phase2 := 0.0
+	var t := 0.0
+	for i in n:
+		t = float(i) / float(sr)
+		var nz := rng.randf() * 2.0 - 1.0
+		lp += (nz - lp) * band
+		lp2 += (lp - lp2) * 0.35
+		var env := exp(-t * body)
+		var atk := clampf(t / maxf(attack, 0.0005), 0.0, 1.0)
+		phase = fmod(phase + TAU * low_f / float(sr), TAU)
+		phase2 = fmod(phase2 + TAU * ring_f / float(sr), TAU)
+		var v := lp * noise_amp * env * atk \
+			+ sin(phase) * low_amp * env \
+			+ sin(phase2) * ring_amp * exp(-t * (body * 0.55))
+		# 机械动作音在采样中段做第二声 click(开/关/装填的两段金属碰撞)
+		if not snd_name.begins_with("fire_"):
+			var t2 := t - dur * 0.44
+			if t2 >= 0.0 and t2 < 0.02:
+				var c := (1.0 - t2 / 0.02)
+				v += nz * c * 0.5
+		v = tanh(v * 1.15)
+		data.encode_s16(i * 2, clampi(int(v * 31500.0), -32768, 32767))
+	var s := AudioStreamWAV.new()
+	s.format = AudioStreamWAV.FORMAT_16_BITS
+	s.mix_rate = sr
+	s.stereo = false
+	s.data = data
+	return s
 
 
 func set_volume(v: float) -> void:
@@ -349,26 +538,29 @@ func shoot(kind: String, pos: Vector3, is_player: bool, suppressed := false) -> 
 ## 武器专属枪声:命中 GUN_SOUND_FILES 注册表的武器播放 audio/guns 专属采样,
 ## 参数与 shoot() 一致(音量/音高微随机 + 消音分支);无专属音的武器回退 shoot(kind)
 func shoot_weapon(weapon_id: String, kind: String, pos: Vector3, is_player: bool, suppressed := false) -> void:
-	var snd: String = GUN_SOUND_FILES.get(weapon_id, "")
+	var generated := GEN_GUN_IDS.has(weapon_id)
+	var file_name := weapon_id if generated else ""
+	var use_file: bool = generated and (ResourceLoader.exists("res://audio/guns/" + file_name + ".wav") or ResourceLoader.exists("res://audio/guns/" + file_name + ".ogg"))
+	var snd: String = file_name if use_file else (("fire_" + weapon_id) if generated else GUN_SOUND_FILES.get(weapon_id, ""))
+	var sub := "guns" if use_file else ("gen" if generated else "guns")
 	if snd.is_empty():
 		shoot(kind, pos, is_player, suppressed)
 		return
 	var pv := Utils.rand(0.94, 1.06)
 	var vv := Utils.rand(0.9, 1.1)
-	# 响度补偿:这 4 个低峰值枪声按 GUN_GAIN 增益(其余文件 gain=1 无变化),
-	# 玩家 2D 主体音、玩家 3D 尾音(按 0.9 基准等比例)、bot 3D 三处同步放大
+	# 响度补偿:低峰值枪声按 GUN_GAIN 增益;程序化枪声已按类型校准,无需文件级补偿
 	var gain: float = GUN_GAIN.get(snd, 1.0)
 	if is_player:
 		if suppressed:
 			# 消音器枪声:复用现有采样大幅降音量 + 降音高(亚音速闷响感),无独立消音采样
-			_play_2d(snd, 0.26 * vv, Utils.rand(0.78, 0.88), BUS_SFX, "guns")
-			_play_3d(snd, pos, 26, 150, 0.04, Utils.rand(0.8, 0.92), "guns")
+			_play_2d(snd, 0.26 * vv, Utils.rand(0.78, 0.88), BUS_SFX, sub)
+			_play_3d(snd, pos, 26, 150, 0.04, Utils.rand(0.8, 0.92), sub)
 		else:
-			_play_2d(snd, 0.9 * gain * vv, pv, BUS_SFX, "guns")
+			_play_2d(snd, 0.9 * gain * vv, pv, BUS_SFX, sub)
 			# 3D 环境尾音:玩家枪声也带空间反射,更有层次
-			_play_3d(snd, pos, 26, 150, 0.2 * gain / 0.9, Utils.rand(0.9, 1.08), "guns")
+			_play_3d(snd, pos, 26, 150, 0.2 * gain / 0.9, Utils.rand(0.9, 1.08), sub)
 	else:
-		_play_3d(snd, pos, 14, 160, vv * gain, pv, "guns")
+		_play_3d(snd, pos, 14, 160, vv * gain, pv, sub)
 
 
 ## 载具武器开火(坦克主炮/APC/AA 机炮/直升机机炮/战斗机导弹):audio/vehicles 专属采样
@@ -377,6 +569,19 @@ func veh_weapon(type: String, pos: Vector3) -> void:
 		return
 	var e: Array = VEH_SOUND_FILES[type]
 	_play_3d(e[0], pos, e[1], e[2], 1.0, Utils.rand(0.95, 1.05), "vehicles")
+
+
+## 载具内部机械声:炮闩闭锁/供弹机构/液压随动。
+## event 优先取 RELOAD_ACTION_FILES 中的机械采样;rumble 走低频冲击(爆炸同款)。
+func veh_mech(event: String, vol := 0.5) -> void:
+	var file: String = RELOAD_ACTION_FILES.get(event, "")
+	if file != "":
+		var gain: float = clampf(float(RELOAD_ACTION_GAIN.get(file, 1.0)) * 0.5 * vol, 0.05, 0.75)
+		_play_2d(file, gain, Utils.rand(0.9, 1.06), BUS_SFX, "reload")
+	elif event == "rumble":
+		_play_2d("rumble", clampf(vol, 0.1, 0.7), Utils.rand(0.5, 0.62))
+	elif event == "turret":
+		_play_2d("bolt_cycle", clampf(vol * 0.3, 0.05, 0.25), Utils.rand(0.82, 1.05), BUS_SFX, "reload")
 
 
 func rpg_fire(pos: Vector3) -> void:
@@ -401,11 +606,34 @@ func reload(stage: int) -> void:
 ## 换弹动作音效统一入口:每个动作播放 audio/reload 下对应的 AI 合成采样。
 ## pitch_scale 由 ReloadProfiles 按枪型传入(重型机枪更低沉,高射速机枪更清脆)。
 func reload_action(action: String, pitch_scale := 1.0) -> void:
+	if GEN_ACTION_NAMES.has(action):
+		var use_file: bool = ResourceLoader.exists("res://audio/reload/" + action + ".wav") or ResourceLoader.exists("res://audio/reload/" + action + ".ogg")
+		var gain: float = 1.0
+		if use_file:
+			gain = clampf(float(RELOAD_ACTION_GAIN.get(action, 1.0)), 0.4, 6.0)
+			_play_2d(action, gain, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "reload")
+		else:
+			_play_2d(action, 0.9, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "gen")
+		return
 	var snd: String = RELOAD_ACTION_FILES.get(action, "")
 	if snd.is_empty():
 		return
 	var gain: float = float(RELOAD_ACTION_GAIN.get(snd, 1.0))
 	_play_2d(snd, clampf(gain, 0.5, 5.0), clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "reload")
+
+
+## [9/10] 武器专属机械音:AI 合成动作文件优先,缺失时回退程序化合成。
+func weapon_mech(event: String, pitch_scale := 1.0, vol := 1.0) -> void:
+	if GEN_ACTION_NAMES.has(event):
+		var use_file: bool = ResourceLoader.exists("res://audio/reload/" + event + ".wav") or ResourceLoader.exists("res://audio/reload/" + event + ".ogg")
+		var gain: float = clampf(vol, 0.2, 1.4)
+		if use_file:
+			gain = clampf(float(RELOAD_ACTION_GAIN.get(event, 1.0)) * vol, 0.2, 3.5)
+			_play_2d(event, gain, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "reload")
+		else:
+			_play_2d(event, gain, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "gen")
+		return
+	reload_action(event, pitch_scale)
 
 
 ## 弹鼓/弹链轻机枪机械音效事件:直接路由到对应的 AI 合成动作采样。

@@ -27,6 +27,7 @@ const GRIP_PISTOL := Vector3(0.0, -0.045, 0.015)
 
 const HAND_GRIP_ROT := Vector3(-0.7, 0.25, PI - 0.38)
 const HAND_REST_ROT := Vector3(0.1, 0.0, PI - 0.15)
+const HAND_REVOLVER_GRIP_ROT := Vector3(-0.34, 0.16, PI - 0.3)
 
 
 var _gun_ref: WeakRef = null
@@ -46,6 +47,7 @@ var insert_swapped := false
 var _stage_event_done := false
 var started_empty := false
 var old_mag_dropped := false
+var old_mag_stowed := false
 var chamber_started := false
 
 var time := 0.0
@@ -62,6 +64,18 @@ var shells_needed := 0
 var shells_loaded := 0
 var _pump_wait := 0.0
 var _bolt_wait := 0.0
+var tube_first_chambered := false
+
+# [9/10] 左轮装填
+var revolver_mode := "single"          # single / quick
+var revolver_quick := false
+var revolver_eject_done := false
+var revolver_loader_done := false
+var revolver_load_count := 0
+var revolver_open := 0.0               # 当前弹巢开合量 0~1(平滑)
+var revolver_spin_wait := 0.0
+var revolver_target_shell := -1
+var revolver_cycle_idx := 0
 
 # 当前阶段动态记录的抓握点
 var hand_after_remove := Vector3.ZERO
@@ -80,7 +94,7 @@ var impulse_rot := Vector3.ZERO
 var mag: Node3D = null
 var bolt: Node3D = null
 var slide: MeshInstance3D = null
-var pump: MeshInstance3D = null
+var pump: Node3D = null
 var rocket: Node3D = null
 var breech: Node3D = null       # 中折式榴弹发射器可下折膛体(仅 GL 提供)
 var left_hand: Node3D = null
@@ -113,9 +127,19 @@ var _breech_snd_close := false
 var cover_base := Vector3.ZERO
 var belt_base := Vector3.ZERO
 var belt_base_rot := Vector3.ZERO
+# [9/10] 左轮动画件
+var revolver_crane: Node3D = null
+var revolver_cylinder: Node3D = null
+var revolver_hammer: Node3D = null
+var revolver_shells: Array = []
+var revolver_crane_base := Vector3.ZERO
+var revolver_cyl_base := Vector3.ZERO
+var revolver_cyl_pos_base := Vector3.ZERO
 
 # 霰弹枪可见弹壳(逐发装填视觉)
 var shell_mesh: MeshInstance3D = null
+# 左轮快速装弹器(独立视觉,装填完成后隐藏)
+var speedloader_mesh: Node3D = null
 # 战术换弹用“新弹匣/新弹鼓/新弹链箱”独立视觉:旧供弹具还在枪上时,新供弹具已在手上
 var new_mag: Node3D = null
 # 火箭筒装填用“新导弹筒”独立视觉
@@ -131,6 +155,7 @@ func _init(g: Gun) -> void:
 	_capture_rig()
 	_build_shell()
 	_build_new_mag()
+	_build_speedloader()
 
 
 ## 解析弱引用;Gun 存活期间调用,方法执行过程中不会被释放
@@ -169,6 +194,17 @@ func _capture_rig() -> void:
 		slide_base_z = slide.position.z
 	if pump != null:
 		pump_base = pump.position
+	if group != null and group.has_meta("crane"):
+		revolver_crane = group.get_meta("crane")
+		revolver_crane_base = revolver_crane.rotation
+	if group != null and group.has_meta("cylinder"):
+		revolver_cylinder = group.get_meta("cylinder")
+		revolver_cyl_base = revolver_cylinder.rotation
+		revolver_cyl_pos_base = revolver_cylinder.position
+	if group != null and group.has_meta("hammer"):
+		revolver_hammer = group.get_meta("hammer")
+	if group != null and group.has_meta("chamber_shells"):
+		revolver_shells = group.get_meta("chamber_shells")
 	if rocket != null:
 		rocket_base = rocket.position
 	if cover != null:
@@ -194,31 +230,88 @@ func _capture_rig() -> void:
 func _build_shell() -> void:
 	if shell_mesh != null or group == null:
 		return
-	if _g().def.pellets <= 1:
+	var is_revolver: bool = _g().def.get("revolver") == true
+	if _g().def.pellets <= 1 and not is_revolver:
 		return
 	var mi := MeshInstance3D.new()
 	var cm := CylinderMesh.new()
-	cm.top_radius = 0.011
-	cm.bottom_radius = 0.011
-	cm.height = 0.055
-	cm.radial_segments = 10
+	if is_revolver:
+		cm.top_radius = 0.005
+		cm.bottom_radius = 0.005
+		cm.height = 0.032
+		cm.radial_segments = 10
+	else:
+		cm.top_radius = 0.011
+		cm.bottom_radius = 0.011
+		cm.height = 0.055
+		cm.radial_segments = 10
 	mi.mesh = cm
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.75, 0.18, 0.15)
-	mat.metallic = 0.6
-	mat.roughness = 0.35
+	mat.albedo_color = Color(0.8, 0.62, 0.22) if is_revolver else Color(0.75, 0.18, 0.15)
+	mat.metallic = 0.75
+	mat.roughness = 0.3
 	mi.material_override = mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	mi.visible = false
+	if is_revolver:
+		mi.rotation.x = PI / 2.0
 	group.add_child(mi)
 	shell_mesh = mi
+
+
+## 左轮快速装弹器:圆形弹托 + 与弹巢容量一致的弹头簇,握在手中随装填路径运动。
+func _build_speedloader() -> void:
+	if speedloader_mesh != null or group == null:
+		return
+	if not _g().def.get("revolver") == true:
+		return
+	var root := Node3D.new()
+	root.name = "RevolverSpeedloader"
+	var cap: int = maxi(5, _g().mag_cap)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.28, 0.3, 0.34)
+	mat.metallic = 0.45
+	mat.roughness = 0.55
+	var hub := MeshInstance3D.new()
+	var hm := CylinderMesh.new()
+	hm.top_radius = 0.014
+	hm.bottom_radius = 0.014
+	hm.height = 0.02
+	hm.radial_segments = 14
+	hub.mesh = hm
+	hub.material_override = mat
+	hub.rotation.x = PI / 2.0
+	root.add_child(hub)
+	for i in cap:
+		var rd := MeshInstance3D.new()
+		var rm := CylinderMesh.new()
+		rm.top_radius = 0.0045
+		rm.bottom_radius = 0.0045
+		rm.height = 0.03
+		rm.radial_segments = 8
+		rd.mesh = rm
+		var bmat := StandardMaterial3D.new()
+		bmat.albedo_color = Color(0.78, 0.6, 0.2)
+		bmat.metallic = 0.8
+		bmat.roughness = 0.28
+		rd.material_override = bmat
+		rd.rotation.x = PI / 2.0
+		var ang := float(i) * TAU / float(cap)
+		rd.position = Vector3(sin(ang) * 0.0135, cos(ang) * 0.0135, -0.012)
+		root.add_child(rd)
+	root.visible = false
+	WeaponModels.set_shadow_recursive(root, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+	group.add_child(root)
+	speedloader_mesh = root
 
 
 func _build_new_mag() -> void:
 	if _g().def.pellets > 1:
 		return
 	if new_mag == null and mag != null:
-		var dup := mag.duplicate(true) as Node3D
+		# mag 可能是 GLB 场景实例节点(且被 hoist 动过子树),直接 duplicate 会
+		# 打穿实例缓存 —— 统一走 pack→instantiate 的安全复制
+		var dup := WeaponModels.safe_duplicate(mag) as Node3D
 		if dup != null:
 			dup.name = "NewMagReload"
 			dup.visible = false
@@ -227,7 +320,7 @@ func _build_new_mag() -> void:
 			new_mag = dup
 			new_belt = dup.get_node_or_null("BeltTail")
 	if new_rocket == null and rocket != null:
-		var rdup := rocket.duplicate(true) as Node3D
+		var rdup := WeaponModels.safe_duplicate(rocket) as Node3D
 		if rdup != null:
 			rdup.name = "NewRocketReload"
 			rdup.visible = false
@@ -249,7 +342,9 @@ func start() -> bool:
 	if _g().ammo >= _g().mag_cap or _g().reserve <= 0:
 		return false
 	reset_motion(false)
-	if _g().def.pellets > 1:
+	if _g().def.get("revolver") == true:
+		_start_revolver()
+	elif _g().def.pellets > 1:
 		_start_tube()
 	else:
 		_start_mag()
@@ -258,6 +353,7 @@ func start() -> bool:
 	committed = false
 	started_empty = _g().ammo == 0
 	old_mag_dropped = false
+	old_mag_stowed = false
 	chamber_started = false
 	time = 0.0
 	_g().reloading = true
@@ -278,7 +374,43 @@ func update(dt: float) -> void:
 		State.IDLE:
 			_update_idle(dt)
 	_follow_auxiliary_hands(dt)
+	_update_mag_slap(dt)
 	_update_breech_hinge(dt)
+
+
+## 插匣拍实动画。
+## 曾经绑在 INSERT 阶段的生命周期里:当弹匣轨迹拖到 p>=0.88 才提交时,
+## slap 刚起手阶段就切走了,抬起的弹匣(CHAMBER/RECOVER 没人管)永远停在
+## +slap 的残差上。现在作为独立动画挂在主 update —— 无论阶段怎么切都
+## 完整播完并保证归位,这是"拍匣"这种瞬时动作的正确挂法。
+func _update_mag_slap(dt: float) -> void:
+	if _insert_slap_t < 0.0 or mag == null or not is_instance_valid(mag):
+		return
+	_insert_slap_t += dt
+	var dur := 0.09
+	if _insert_slap_t >= dur:
+		# 播完强制归位:消掉浮点残差,也兜底任何中途切阶段的场景
+		mag.position = mag_base
+		mag.rotation = mag_base_rot
+		_insert_slap_t = -1.0
+		return
+	var s := sin(clampf(_insert_slap_t / dur, 0.0, 1.0) * PI)
+	var slap: float = float(cfg.get("slap", 0.018))
+	match String(cfg.get("mag", "down")):
+		"side":
+			mag.position.x += s * slap * 0.4
+		"top":
+			mag.position.y -= s * slap * 0.8
+		"p90":
+			# P90 压尾入扣:最后一下把弹匣后部向下拍实
+			mag.position.y -= s * slap
+			mag.rotation.x = maxf(0.0, mag.rotation.x - s * slap * 0.4)
+		_:
+			mag.position.y += s * slap
+	if left_hand != null and state == State.ACTIVE \
+			and stage < phase_names.size() and String(phase_names[stage]) == "insert":
+		# 手跟随只属于 INSERT 阶段;其他阶段的手由各自的阶段逻辑接管
+		left_hand.position = mag.position + _grip_offset()
 
 
 ## QA 诊断:当前换弹阶段名("" = 空闲)
@@ -329,6 +461,8 @@ func cancel(reason := "fire") -> void:
 	# 枪机/泵动循环动画不能因取消瞬移,由 Gun 的 bolt_t/pump_t 自然收尾
 	if shell_mesh != null:
 		shell_mesh.visible = false
+	if speedloader_mesh != null:
+		speedloader_mesh.visible = false
 	if new_mag != null:
 		new_mag.visible = false
 	if new_rocket != null:
@@ -347,7 +481,9 @@ func cancel(reason := "fire") -> void:
 
 
 func is_busy_cycle() -> bool:
-	return _pump_wait > 0.0 or _bolt_wait > 0.0
+	if _g().pump_t > 0.0 or _g().semi_t > 0.0 or _g().bolt_t > 0.0 or _g().cylinder_t > 0.0:
+		return true
+	return _pump_wait > 0.0 or _bolt_wait > 0.0 or revolver_spin_wait > 0.0
 
 
 ## 是否还在播放换弹/取消/收尾动画:用于 ADS 状态下禁止换弹未播完就开火。
@@ -365,6 +501,9 @@ func can_fire_interrupt() -> bool:
 	# 腰射状态仍保留 COD 式“早期/入匣后”可打断逻辑。
 	if _g().ads_held or _g().ads_amount > 0.35:
 		return false
+	# 左轮弹巢未关闭时物理上无法击发;闭锁末段/恢复阶段允许开火打断并保留已装弹
+	if _g().def.get("revolver") == true:
+		return _g().ammo > 0 and revolver_open < 0.22
 	if _g().def.pellets > 1:
 		return _g().ammo > 0
 	if committed:
@@ -401,13 +540,20 @@ func reset_motion(snap := true) -> void:
 	insert_swapped = false
 	_stage_event_done = false
 	old_mag_dropped = false
+	old_mag_stowed = false
 	chamber_started = false
+	tube_first_chambered = false
 	time = 0.0
 	stage_time = 0.0
 	cancel_t = 0.0
 	finish_t = 0.0
 	_pump_wait = 0.0
 	_bolt_wait = 0.0
+	revolver_spin_wait = 0.0
+	revolver_eject_done = false
+	revolver_loader_done = false
+	revolver_load_count = 0
+	revolver_target_shell = -1
 	_insert_slap_t = -1.0
 	_chamber_hand_start = hand_grip_anchor
 	if snap:
@@ -417,6 +563,8 @@ func reset_motion(snap := true) -> void:
 		impulse_rot = Vector3.ZERO
 	if shell_mesh != null:
 		shell_mesh.visible = false
+	if speedloader_mesh != null:
+		speedloader_mesh.visible = false
 	if new_mag != null:
 		new_mag.visible = false
 	if new_rocket != null:
@@ -445,6 +593,8 @@ func on_holster() -> void:
 		new_belt.visible = false
 	if new_rocket != null:
 		new_rocket.visible = false
+	if speedloader_mesh != null:
+		speedloader_mesh.visible = false
 	if cover != null:
 		cover.visible = true
 	if rocket != null:
@@ -467,16 +617,31 @@ func _start_mag() -> void:
 	var weights: Array
 	match flow:
 		"drum":
-			# 弹鼓:解锁 → 抓取摘下 → 取新鼓 → 对位插入 → 固定/锁定 → 恢复
-			names = ["unlock", "remove", "fetch", "insert", "lock", "recover"]
-			weights = (cfg.get("drum_weights", [0.13, 0.18, 0.25, 0.18, 0.12, 0.14]) as Array).duplicate()
+			if tac:
+				# 战术换弹:旧弹鼓收入携行具,换上新鼓,旧鼓不丢
+				names = ["unlock", "remove", "stow", "fetch", "insert", "lock", "recover"]
+				weights = [0.11, 0.14, 0.12, 0.19, 0.17, 0.11, 0.16]
+			else:
+				# 弹鼓:解锁 → 抓取摘下 → 取新鼓 → 对位插入 → 固定/锁定 → 恢复
+				names = ["unlock", "remove", "fetch", "insert", "lock", "recover"]
+				weights = (cfg.get("drum_weights", [0.13, 0.18, 0.25, 0.18, 0.12, 0.14]) as Array).duplicate()
 		"belt":
-			# 弹链:开供弹盖 → 抽出旧链/旧箱 → 取新箱 → 新链入槽 → 关盖锁定 → 恢复
-			names = ["cover_open", "belt_out", "fetch", "belt_in", "cover_close", "recover"]
-			weights = (cfg.get("belt_weights", [0.17, 0.18, 0.24, 0.17, 0.13, 0.11]) as Array).duplicate()
+			if tac:
+				# 战术换弹:开盖后把旧弹链箱收入携行具,换新箱,旧箱保留
+				names = ["cover_open", "belt_out", "stow", "fetch", "belt_in", "cover_close", "recover"]
+				weights = [0.13, 0.14, 0.11, 0.19, 0.15, 0.11, 0.17]
+			else:
+				# 弹链:开供弹盖 → 抽出旧链/旧箱 → 取新箱 → 新链入槽 → 关盖锁定 → 恢复
+				names = ["cover_open", "belt_out", "fetch", "belt_in", "cover_close", "recover"]
+				weights = (cfg.get("belt_weights", [0.17, 0.18, 0.24, 0.17, 0.13, 0.11]) as Array).duplicate()
 		_:
-			names = ["prepare", "remove", "fetch", "insert", "recover"]
-			weights = (cfg.get("tac_weights", []) if tac else cfg.get("empty_weights", [])).duplicate()
+			if tac and _flow() == "mag" and not _g().def.projectile and String(cfg.get("mag", "down")) != "none":
+				# 战术换弹保留旧弹匣:拔下 → 收入胸前弹袋 → 取新匣 → 插入,不再把旧匣丢地上
+				names = ["prepare", "remove", "stow", "fetch", "insert", "recover"]
+				weights = (cfg.get("tac_weights", [0.13, 0.16, 0.16, 0.22, 0.18, 0.15]) as Array).duplicate()
+			else:
+				names = ["prepare", "remove", "fetch", "insert", "recover"]
+				weights = (cfg.get("tac_weights", []) if tac else cfg.get("empty_weights", [])).duplicate()
 			if weights.is_empty():
 				weights = [0.16, 0.2, 0.32, 0.18, 0.14]
 			if not tac and String(cfg.get("chamber_style", "pull")) != "none":
@@ -497,17 +662,322 @@ func _start_mag() -> void:
 
 
 func _start_tube() -> void:
-	var shell_time: float = maxf(0.3, float(cfg.get("shell_time", 0.7)) * _g()._reload_mult / maxf(0.1, float(cfg.get("anim_speed", 1.0))))
+	var base_shell: float = float(cfg.get("shell_time", 0.7))
+	# 战术换弹(膛内仍有弹)只补管式弹仓,节奏比空仓(含首壳上膛泵动)更快
+	if _g().ammo > 0 and float(cfg.get("tac_shell_time", base_shell)) > 0.0:
+		base_shell = float(cfg.get("tac_shell_time", base_shell))
+	var shell_time: float = maxf(0.3, base_shell * _g()._reload_mult / maxf(0.1, float(cfg.get("anim_speed", 1.0))))
 	shells_needed = mini(_g().mag_cap - _g().ammo, _g().reserve)
 	shells_loaded = 0
+	tube_first_chambered = false
 	total = float(shells_needed) * shell_time
 	var tube_weights_v: Array = cfg.get("tube_weights", [0.32, 0.3, 0.38])
 	var weights := tube_weights_v.duplicate()
 	_build_phases(["reach", "push", "return"], weights, shell_time)
-	# 刚开火后的泵动循环先自然收尾,再开始逐发装填;避免左手同时"泵动+塞弹"
-	_pump_wait = maxf(0.0, 0.45 - _g().pump_t) if _g().pump_t > 0.0 else 0.0
+	# 刚开火后的泵动/半自动枪机循环先自然收尾,再开始逐发装填;避免动作重叠
+	var pump_dur_wait: float = float(cfg.get("pump_dur", 0.45))
+	_pump_wait = 0.0
+	if _g().pump_t > 0.0:
+		_pump_wait = maxf(0.0, pump_dur_wait - _g().pump_t)
+	elif _g().semi_t > 0.0:
+		_pump_wait = maxf(0.0, 0.24 - _g().semi_t)
 	if _pump_wait <= 0.0:
-		AudioSys.reload_action("shell_grab")
+		AudioSys.reload_action(String(cfg.get("shell_grab_snd", "shell_grab")))
+
+
+# ============================================================
+# [9/10] 左轮手枪:快速装弹器 / 逐发装填(实际弹巢状态同步)
+# ============================================================
+func _start_revolver() -> void:
+	_g()._normalize_revolver_chambers()
+	revolver_quick = _g().ammo == 0
+	revolver_mode = "quick" if revolver_quick else "single"
+	revolver_eject_done = false
+	revolver_loader_done = false
+	revolver_load_count = 0
+	revolver_target_shell = -1
+	revolver_cycle_idx = 0
+	revolver_open = 0.0
+	revolver_spin_wait = 0.0
+	if _g().cylinder_t > 0.0:
+		revolver_spin_wait = maxf(0.0, 0.16 - _g().cylinder_t)
+	if _g().hammer_t > 0.0:
+		revolver_spin_wait = maxf(revolver_spin_wait, 0.22 - _g().hammer_t)
+	var mult: float = _g()._reload_mult / maxf(0.1, float(cfg.get("anim_speed", 1.0)))
+	var names: Array = []
+	var durs: Array = []
+	if revolver_quick:
+		var total: float = maxf(0.8, float(cfg.get("quick_time", 2.0)) * mult)
+		var qw: Array = (cfg.get("quick_weights", [0.16, 0.15, 0.20, 0.18, 0.16, 0.15]) as Array).duplicate()
+		var wsum := 0.0
+		for w in qw:
+			wsum += float(w)
+		names = ["rv_open", "rv_eject", "rv_fetch_loader", "rv_load_loader", "rv_close", "rv_recover"]
+		for w in qw:
+			durs.append(total * float(w) / maxf(wsum, 0.0001))
+		revolver_load_count = mini(_g().mag_cap, _g().ammo + _g().reserve)
+	else:
+		var need := mini(_g().mag_cap - _g().ammo, _g().reserve)
+		shells_needed = need
+		shells_loaded = 0
+		var open_t := clampf(float(cfg.get("single_time", 3.0)) * mult * 0.14, 0.32, 0.5)
+		var eject_t := clampf(float(cfg.get("single_time", 3.0)) * mult * 0.12, 0.24, 0.42)
+		var close_t := clampf(float(cfg.get("single_time", 3.0)) * mult * 0.16, 0.32, 0.5)
+		var recover_t := 0.24
+		var remain := maxf(0.05, float(cfg.get("single_time", 3.0)) * mult - open_t - eject_t - close_t - recover_t)
+		var cycle_t := maxf(0.46, remain / float(maxi(1, need)))
+		names = ["rv_open", "rv_eject"]
+		durs = [open_t, eject_t]
+		for i in need:
+			names.append("rv_reach")
+			names.append("rv_insert")
+			names.append("rv_return")
+			durs.append(cycle_t * 0.24)
+			durs.append(cycle_t * 0.42)
+			durs.append(cycle_t * 0.34)
+		names.append("rv_close")
+		names.append("rv_recover")
+		durs.append(close_t)
+		durs.append(recover_t)
+	# 直接展开阶段,不做循环特殊推进;阶段时长就是真实换弹节奏
+	phase_names = names
+	phase_durs = durs
+	var ttl := 0.0
+	for d in phase_durs:
+		ttl += float(d)
+	total = ttl
+	stage = 0
+	stage_time = 0.0
+	stage_dur = float(phase_durs[0]) if phase_durs.size() > 0 else 0.2
+	stage_p = 0.0
+	_on_stage_enter(0)
+
+
+## 快速/逐发模式切换:弹巢尚未甩出前按 B 可切换(装填方式不冲突)。
+func toggle_revolver_mode() -> bool:
+	if not active or not _g().def.get("revolver") == true:
+		return false
+	if stage >= phase_names.size():
+		return false
+	var nm := String(phase_names[stage])
+	if nm not in ["rv_open", "rv_eject"]:
+		return false
+	revolver_quick = not revolver_quick
+	var keep_open := revolver_open
+	_start_revolver()
+	revolver_open = keep_open
+	return true
+
+
+func _finish_revolver() -> void:
+	active = false
+	_g().reloading = false
+	_g().reload_t = time
+	state = State.FINISH
+	finish_t = 0.0
+	finish_dur = float(cfg.get("finish_dur", 0.26))
+	if revolver_hammer != null and _g().hammer_t <= 0.0:
+		_g().hammer_t = 0.0001
+		AudioSys.weapon_mech(String(cfg.get("cock_snd", "revolver_hammer")), float(cfg.get("mech_pitch", 1.0)))
+
+
+func _revolver_want_open() -> float:
+	if state == State.IDLE or state == State.CANCEL:
+		return 0.0
+	if stage >= phase_names.size():
+		return 0.0
+	var nm := String(phase_names[stage])
+	match nm:
+		"rv_open":
+			return _ez(stage_p)
+		"rv_eject", "rv_fetch_loader", "rv_load_loader", "rv_reach", "rv_insert", "rv_return":
+			return 1.0
+		"rv_close":
+			return 1.0 - _ez(stage_p)
+	return 0.0
+
+
+func _revolver_cyl_center() -> Vector3:
+	if revolver_crane == null or revolver_cylinder == null:
+		return Vector3(0.0, 0.03, -0.08)
+	return revolver_crane.transform * revolver_cylinder.position
+
+
+func _revolver_chamber_pos(idx: int) -> Vector3:
+	if revolver_crane == null or revolver_cylinder == null:
+		return Vector3(0.0, 0.015, -0.06)
+	if idx < 0 or idx >= revolver_shells.size() or not revolver_shells[idx] is Node3D:
+		return _revolver_cyl_center()
+	var shell: Node3D = revolver_shells[idx] as Node3D
+	return revolver_crane.transform * (revolver_cylinder.transform * shell.position)
+
+
+func _next_empty_chamber() -> int:
+	var arr: Array = _g()._chamber_loaded
+	var n: int = arr.size()
+	if n <= 0:
+		return -1
+	var start: int = _g()._chamber_index
+	for step in n:
+		var idx := (start + step) % n
+		if arr[idx] != true:
+			return idx
+	return -1
+
+
+func _commit_revolver_round() -> void:
+	var idx := revolver_target_shell
+	if idx < 0:
+		idx = _next_empty_chamber()
+		revolver_target_shell = idx
+	if idx < 0 or idx >= _g()._chamber_loaded.size() or shells_loaded >= shells_needed:
+		return
+	_g()._chamber_loaded[idx] = true
+	_g().ammo = mini(_g().ammo + 1, _g().mag_cap)
+	_g().reserve = maxi(0, _g().reserve - 1)
+	_g()._sync_revolver_chambers()
+	shells_loaded += 1
+	revolver_load_count += 1
+	revolver_target_shell = -1
+	AudioSys.weapon_mech(String(cfg.get("insert_snd", "revolver_insert_" + _g().id)), float(cfg.get("mech_pitch", 1.0)))
+	_impulse(float(cfg.get("insert_impact", 0.006)), 0.7)
+	_camera_kick(0.65, 0.45)
+
+
+func _commit_revolver_speedloader() -> void:
+	if revolver_loader_done:
+		return
+	revolver_loader_done = true
+	# 快速换弹:甩出时已把剩余实弹归还备弹;这里一次性压入全新弹巢
+	var take := mini(_g().mag_cap, _g().reserve)
+	var start_idx: int = _g()._chamber_index
+	for i in _g()._chamber_loaded.size():
+		_g()._chamber_loaded[i] = false
+	for i in take:
+		_g()._chamber_loaded[(start_idx + i) % _g()._chamber_loaded.size()] = true
+	_g().ammo = take
+	_g().reserve = maxi(0, _g().reserve - take)
+	_g()._sync_revolver_chambers()
+	shells_loaded = take
+	revolver_load_count = take
+	AudioSys.weapon_mech(String(cfg.get("insert_snd", "revolver_insert_" + _g().id)), float(cfg.get("mech_pitch", 1.0)))
+	_impulse(float(cfg.get("insert_impact", 0.009)), 0.9)
+	_camera_kick(0.9, 0.55)
+
+
+func _commit_revolver_eject() -> void:
+	if revolver_eject_done:
+		return
+	revolver_eject_done = true
+	if revolver_quick:
+		var live := _g().ammo
+		_g().reserve += live
+		_g().ammo = 0
+		for i in _g()._chamber_loaded.size():
+			_g()._chamber_loaded[i] = false
+		_g()._sync_revolver_chambers()
+	# 弹巢甩空时用现有效果系统抛出几枚铜壳(不新建粒子/物体,复用 casing 池)
+	if G.effects != null and G.camera != null:
+		for i in 3:
+			G.effects.casing(_g().muzzle_world_main(), G.camera.global_transform.basis, 3, 0.8 + i * 0.12)
+	_impulse(0.005, 0.55)
+	_camera_kick(0.5, 0.4)
+
+
+func _update_revolver(dt: float, _env: float) -> void:
+	if stage >= phase_names.size():
+		return
+	var nm := String(phase_names[stage])
+	var p := stage_p
+	# 弹巢开合:所有阶段共用平滑插值,取消/换枪时也由 _recover_anim_parts 连续关闭
+	var want := _revolver_want_open()
+	revolver_open = Utils.damp(revolver_open, want, 14.0, dt)
+	# 弹巢保持与枪身平行,直接向左侧(-X)平移滚出;铰链节点本身不再绕 Y 旋转
+	if revolver_cylinder != null:
+		var open_dist := 0.052
+		revolver_cylinder.position = revolver_cyl_pos_base + Vector3(
+			-open_dist * revolver_open,
+			-0.004 * revolver_open,
+			0.008 * revolver_open)
+	if revolver_crane != null:
+		revolver_crane.rotation = revolver_crane_base
+	# 甩出弹巢/压入装弹时的枪身倾斜(叠加在换弹总姿态上,不会瞬移)
+	if nm in ["rv_eject"]:
+		pose_rot.x += sin(p * PI) * 0.14
+		pose_rot.z += sin(p * PI) * 0.05
+	elif nm in ["rv_insert", "rv_load_loader"]:
+		pose_rot.x += 0.05
+	if left_hand == null:
+		return
+	var cyl_pos: Vector3 = _revolver_cyl_center()
+	var support := cyl_pos + Vector3(0.0, -0.035, 0.035)
+	match nm:
+		"rv_open":
+			# 左手离开护木,抓住弹巢后缘把弹巢向左侧拨出(手部缩到 0.88 并留出安全间隙)
+			var e := _ez(p)
+			var arc := Vector3(-sin(e * PI) * 0.03, sin(e * PI) * 0.012, 0.0)
+			left_hand.position = hand_rest.lerp(cyl_pos + Vector3(0.0, -0.022, 0.045), e) + arc
+		"rv_eject":
+			# 右手保持握把,左手拍退壳杆/弹巢前缘,弹出全部空壳(或快速换弹清膛)
+			left_hand.position = support + Vector3(sin(p * PI) * 0.018, 0.0, sin(p * PI) * 0.012)
+			if p >= 0.55:
+				_commit_revolver_eject()
+		"rv_fetch_loader":
+			var pocket := _chest_pocket()
+			if p < 0.4:
+				var e := _ez(p / 0.4)
+				left_hand.position = support.lerp(pocket, e) + Vector3(-sin(e * PI) * 0.04, 0.0, -sin(e * PI) * 0.03)
+			else:
+				var e := _ez((p - 0.4) / 0.6)
+				left_hand.position = pocket.lerp(cyl_pos + Vector3(0.0, 0.0, 0.045), e) + Vector3(-sin(e * PI) * 0.03, 0.0, -sin(e * PI) * 0.03)
+				if speedloader_mesh != null and e > 0.06:
+					speedloader_mesh.visible = true
+					speedloader_mesh.position = left_hand.position + Vector3(0.0, 0.012, -0.01)
+					speedloader_mesh.rotation = Vector3(0.0, 0.0, e * 0.4)
+		"rv_load_loader":
+			var target := _revolver_cyl_center() + Vector3(0.0, 0.016, 0.055)
+			var e := _ez(p)
+			left_hand.position = (support + Vector3(0.0, 0.1, 0.06)).lerp(target, e)
+			if speedloader_mesh != null:
+				speedloader_mesh.visible = not revolver_loader_done
+				speedloader_mesh.position = left_hand.position + Vector3(0.0, 0.012, -0.01)
+				speedloader_mesh.rotation = Vector3(0.0, 0.0, 0.4 * (1.0 - e))
+			if p >= 0.55:
+				_commit_revolver_speedloader()
+		"rv_reach":
+			# 逐发:从弹药袋取出一发,手指/弹头一起回到空膛位置
+			var pocket := _chest_pocket()
+			var e := _ez(p)
+			left_hand.position = support.lerp(pocket, e) + Vector3(-sin(e * PI) * 0.04, 0.0, -sin(e * PI) * 0.03)
+			if shell_mesh != null:
+				if p >= 0.42:
+					shell_mesh.visible = true
+					shell_mesh.position = left_hand.position + Vector3(0.0, 0.014, -0.012)
+		"rv_insert":
+			if revolver_target_shell < 0:
+				revolver_target_shell = _next_empty_chamber()
+			var chamber: Vector3 = _revolver_chamber_pos(revolver_target_shell)
+			var target := chamber + Vector3(0.0, 0.014, 0.045)
+			var e := _ez(p)
+			left_hand.position = (_chest_pocket() + Vector3(0.0, 0.04, 0.02)).lerp(target, e) + Vector3(-sin(e * PI) * 0.025, 0.0, -sin(e * PI) * 0.02)
+			if shell_mesh != null:
+				shell_mesh.visible = p < 0.62
+				shell_mesh.position = left_hand.position + Vector3(0.0, 0.012, -0.01)
+			if p >= 0.62:
+				_commit_revolver_round()
+				if shell_mesh != null:
+					shell_mesh.visible = false
+		"rv_return":
+			left_hand.position = support.lerp(hand_rest, _ez(p))
+			if shell_mesh != null:
+				shell_mesh.visible = false
+		"rv_close":
+			# 左手把弹巢推回枪身,闭锁后拇指扳下击锤(hammer_t 在 _finish_revolver 触发)
+			var e := _ez(p)
+			left_hand.position = (cyl_pos + Vector3(0.0, -0.022, 0.05)).lerp(hand_rest, e) + Vector3(sin(e * PI) * 0.025, 0.0, 0.0)
+		"rv_recover":
+			_recover_hands(dt)
+	_update_hand_rotation(dt)
 
 
 func _build_phases(names: Array, weights: Array, duration: float) -> void:
@@ -540,7 +1010,15 @@ func _update_active(dt: float) -> void:
 		_update_camera(0.0, dt)
 		_recover_hands(dt)
 		if _pump_wait <= 0.0:
-			AudioSys.reload_action("shell_grab")
+			AudioSys.reload_action(String(cfg.get("shell_grab_snd", "shell_grab")))
+		return
+	# 左轮:等待开火后的换膛/击锤动画收尾,再开弹巢
+	if _g().def.get("revolver") == true and revolver_spin_wait > 0.0:
+		revolver_spin_wait -= dt
+		_g().reload_t = time
+		_update_pose(0.0, dt)
+		_update_camera(0.0, dt)
+		_recover_hands(dt)
 		return
 	# 栓动狙:等待拉栓循环收尾,右手跟栓完成后才开始卸弹
 	if _bolt_wait > 0.0:
@@ -557,7 +1035,9 @@ func _update_active(dt: float) -> void:
 	var env := _pose_envelope()
 	_update_pose(env, dt)
 	_update_camera(env, dt)
-	if _g().def.pellets > 1:
+	if _g().def.get("revolver") == true:
+		_update_revolver(dt, env)
+	elif _g().def.pellets > 1:
 		_update_tube(dt, env)
 	else:
 		_update_mag_reload(dt, env)
@@ -567,6 +1047,18 @@ func _update_active(dt: float) -> void:
 
 
 func _next_stage() -> void:
+	# 左轮阶段已按快速/逐发流程静态展开:直接顺序推进,循环轮次就包含在 phase_names 中
+	if _g().def.get("revolver") == true:
+		var ridx := stage + 1
+		if ridx >= phase_names.size():
+			_finish_revolver()
+			return
+		stage = ridx
+		stage_time = 0.0
+		stage_dur = float(phase_durs[ridx])
+		stage_p = 0.0
+		_on_stage_enter(ridx)
+		return
 	if _g().def.pellets > 1:
 		var tube_idx := stage + 1
 		if tube_idx < phase_names.size():
@@ -595,6 +1087,23 @@ func _on_stage_enter(idx: int) -> void:
 	var pitch := float(cfg.get("mech_pitch", 1.0))
 	_stage_event_done = false
 	match nm:
+		"rv_open":
+			AudioSys.weapon_mech(String(cfg.get("open_snd", "revolver_open")), pitch)
+		"rv_eject":
+			AudioSys.weapon_mech(String(cfg.get("eject_snd", "revolver_eject")), pitch)
+		"rv_fetch_loader":
+			AudioSys.weapon_mech(String(cfg.get("loader_snd", "revolver_loader")), pitch)
+		"rv_load_loader":
+			pass
+		"rv_reach":
+			revolver_target_shell = _next_empty_chamber()
+			AudioSys.weapon_mech(String(cfg.get("round_snd", "revolver_round")), pitch)
+		"rv_insert":
+			pass
+		"rv_return":
+			pass
+		"rv_close":
+			AudioSys.weapon_mech(String(cfg.get("close_snd", "revolver_close")), pitch)
 		"unlock":
 			# 手已抓住弹鼓锁扣,开始解锁(音效在阶段开始,鼓身抖动在 update 中)
 			AudioSys.mech("drum_unlock", pitch)
@@ -607,6 +1116,10 @@ func _on_stage_enter(idx: int) -> void:
 			else:
 				# 手已接触到弹匣/释放钮,开始卸弹:按枪族使用不同拔弹匣采样
 				AudioSys.reload_action(String(cfg.get("mag_out_snd", "mag_out")), pitch)
+		"stow":
+			# 战术换弹:旧供弹具收入携行具(弹匣/弹鼓/弹链箱各自用对应取物声)
+			var stow_snd: String = "belt_pouch" if flow == "belt" else ("drum_pouch" if flow == "drum" else String(cfg.get("pouch_snd", "ammo_pouch")))
+			AudioSys.reload_action(stow_snd, pitch * 0.94)
 		"cover_open":
 			AudioSys.mech(_belt_action("cover_open"), pitch)
 		"belt_out":
@@ -709,6 +1222,8 @@ func _update_mag_reload(dt: float, _env: float) -> void:
 						_update_rocket_remove()
 					else:
 						_update_mag_remove()
+		"stow":
+			_update_mag_stow()
 		"cover_open":
 			_update_cover_open()
 		"belt_out":
@@ -782,7 +1297,7 @@ func _tube_next_cycle() -> void:
 	stage_dur = float(phase_durs[0]) if phase_durs.size() > 0 else 0.2
 	tube_stage = TubeStage.REACH
 	committed = false
-	AudioSys.reload_action("shell_grab")
+	AudioSys.reload_action(String(cfg.get("shell_grab_snd", "shell_grab")))
 	if shell_mesh != null:
 		shell_mesh.visible = false
 
@@ -835,9 +1350,19 @@ func _commit_shell() -> void:
 	shells_loaded += 1
 	_g().ammo = mini(_g().ammo + 1, _g().mag_cap)
 	_g().reserve = maxi(0, _g().reserve - 1)
-	AudioSys.reload_action("shell_insert")
+	AudioSys.reload_action(String(cfg.get("shell_insert_snd", "shell_insert")))
 	_impulse(float(cfg.get("insert_impact", 0.008)) * 0.8, 0.7)
 	_camera_kick(0.7, 0.5)
+	# 空仓逐发装填:第一发入膛后泵动枪上膛、半自动枪机自动回位,然后才继续补管式弹仓
+	if started_empty and shells_loaded == 1 and not tube_first_chambered:
+		tube_first_chambered = true
+		if _g()._pump != null and _g().def.get("pump_action") == true:
+			_g()._start_pump_cycle()
+			var pump_dur: float = float(cfg.get("pump_dur", 0.45))
+			_pump_wait = maxf(_pump_wait, pump_dur)
+		elif _g()._bolt != null:
+			_g()._start_semi_auto_cycle()
+			_pump_wait = maxf(_pump_wait, 0.24)
 	if shells_loaded >= shells_needed:
 		_finish_tube()
 
@@ -850,12 +1375,19 @@ func _finish_tube() -> void:
 	state = State.FINISH
 	finish_t = 0.0
 	finish_dur = float(cfg.get("finish_dur", 0.26))
-	if started_empty and pump != null and _g().pump_t <= 0.0:
-		_g().pump_t = 0.0001
+	# 第一发已在 _commit_shell 触发真实泵动;这里只为仍缺泵动的空仓换弹补一次
+	if started_empty and pump != null and not tube_first_chambered and _g().pump_t <= 0.0:
+		_g()._start_pump_cycle()
 		finish_dur = 0.55
 		_camera_kick(1.0, 0.8)
 		_impulse(float(cfg.get("chamber_impact", 0.014)), 1.0)
-		AudioSys.reload_action("shotgun_pump")
+		AudioSys.weapon_mech("pump_finish_" + _g().id, 1.0)
+	elif started_empty and pump != null and tube_first_chambered:
+		# 让首壳泵动完整播完再回正,避免换弹结束瞬间跳变
+		finish_dur = maxf(finish_dur, float(cfg.get("pump_dur", 0.45)) + 0.1)
+	elif started_empty and pump == null and _g()._bolt != null and tube_first_chambered:
+		# 半自动霰弹枪:等自动枪机循环收尾
+		finish_dur = maxf(finish_dur, 0.34)
 	elif started_empty and pump == null:
 		_camera_kick(0.6, 0.4)
 
@@ -879,6 +1411,9 @@ func _update_mag_prepare() -> void:
 
 func _update_mag_remove() -> void:
 	var p := stage_p
+	if _tac_retain_active():
+		_update_tac_retain_remove(p)
+		return
 	if mag != null:
 		var pose := _mag_remove_pose(p)
 		mag.position = pose.get("pos", mag_base)
@@ -893,6 +1428,52 @@ func _update_mag_remove() -> void:
 		elif mag != null:
 			left_hand.position = mag.position + _grip_offset()
 	hand_after_remove = left_hand.position if left_hand != null else hand_grip_anchor
+
+
+## 战术换弹保留弹匣:拔下旧匣后向胸前弹袋移动,旧匣始终在手里,不触发掉落
+func _update_tac_retain_remove(p: float) -> void:
+	if mag != null:
+		var pose := _mag_remove_pose(p)
+		var pos: Vector3 = pose.get("pos", mag_base)
+		var rot: Vector3 = pose.get("rot", Vector3.ZERO)
+		# 保留路径:拔出距离略短,旋转略小,避免和接下来的“收入弹袋”动作跳变
+		var e := _ez(p)
+		pos = mag_base.lerp(pos, 0.82)
+		rot *= 0.8
+		pos += Vector3(-e * 0.012, -e * 0.01, e * 0.012)
+		mag.position = pos
+		mag.rotation = rot
+	if left_hand != null:
+		if mag != null:
+			left_hand.position = mag.position + _grip_offset()
+		hand_after_remove = left_hand.position
+
+
+## 战术换弹保留弹匣:手与旧匣一起进入胸前弹袋,进袋后隐藏(弹匣被保留,不是丢地)
+func _update_mag_stow() -> void:
+	var p := stage_p
+	var e := _ez(p)
+	var sb: Vector3 = cfg.get("stow_bias", Vector3.ZERO)
+	var pocket := _chest_pocket() + sb
+	var start := hand_after_remove
+	var stow_arc: float = float(cfg.get("stow_arc", 0.07))
+	if left_hand != null:
+		var arc := sin(e * PI) * stow_arc
+		left_hand.position = start.lerp(pocket, e) + Vector3(-arc, arc * 0.4, -arc * 0.3)
+		if mag != null and not old_mag_stowed:
+			mag.position = left_hand.position - _grip_offset()
+			mag.rotation = mag.rotation.lerp(mag_base_rot * 0.4, 1.0 - exp(-12.0 * 0.016))
+	if mag != null and not old_mag_stowed and p >= float(cfg.get("drop_point", 0.55)):
+		old_mag_stowed = true
+		old_mag_dropped = true
+		hand_after_remove = left_hand.position if left_hand != null else pocket
+		mag.visible = false
+		_g().grip_amt = 0.15
+
+
+## 当前是否处于“战术换弹保留旧弹匣”流程(阶段表里包含 stow)
+func _tac_retain_active() -> bool:
+	return not started_empty and phase_names.has("stow")
 
 
 ## COD 战术换弹:新弹匣从腰间上提到弹匣井下方,把旧弹匣从弹匣井“顶掉”后直接推入
@@ -928,17 +1509,18 @@ func _update_mag_fetch() -> void:
 	var p := stage_p
 	var pocket: Vector3 = _chest_pocket()
 	var fetch_start := hand_after_remove
+	var fetch_arc: float = float(cfg.get("fetch_arc", 0.09))
 	if p < 0.42:
 		# 旧弹匣脱手后手收回胸口/屏外,随后从胸口取出新弹匣
 		var e := _ez(p / 0.42)
-		var arc := sin(e * PI) * 0.07
+		var arc := sin(e * PI) * fetch_arc * 0.8
 		left_hand.position = fetch_start.lerp(pocket, e) + Vector3(-arc, 0.0, -arc * 0.5)
 		if mag != null:
 			mag.visible = false
 	else:
 		var e := _ez((p - 0.42) / 0.58)
 		var target := insert_start + _grip_offset()
-		var arc := sin(e * PI) * float(cfg.get("hand_arc", 0.09))
+		var arc := sin(e * PI) * fetch_arc
 		left_hand.position = pocket.lerp(target, e) + Vector3(-arc, 0.0, -arc * 0.5)
 		# 新弹匣从屏外跟着手回来:出现、移动、旋转都是连续的
 		if mag != null and e > 0.06:
@@ -976,20 +1558,8 @@ func _update_mag_insert(dt: float) -> void:
 			near_enough = p >= commit_frac
 		if near_enough or p >= 0.88:
 			_commit_mag()
-	if committed and _insert_slap_t >= 0.0 and mag != null:
-		# 拍实动作从 0 起幅,避免 committed 翻转瞬间弹匣/手臂跳变
-		_insert_slap_t += dt
-		var s := sin(clampf(_insert_slap_t / 0.09, 0.0, 1.0) * PI)
-		var slap: float = float(cfg.get("slap", 0.018))
-		match String(cfg.get("mag", "down")):
-			"side":
-				mag.position.x += s * slap * 0.4
-			"top":
-				mag.position.y -= s * slap * 0.8
-			_:
-				mag.position.y += s * slap
-		if left_hand != null:
-			left_hand.position = mag.position + _grip_offset()
+	# 拍实(slap)动画已上移到主循环 _update_mag_slap:它必须跨阶段完整播完,
+	# 不能随 INSERT 结束被截断(截断就是 m4 弹匣停在 +0.019 的根因)。
 
 
 func _commit_mag() -> void:
@@ -1195,11 +1765,12 @@ func _drum_remove_pose(p: float) -> Dictionary:
 
 func _update_drum_remove() -> void:
 	var p := stage_p
+	var retain := _tac_retain_active()
 	if mag != null:
 		var pose := _drum_remove_pose(p)
 		mag.position = pose.get("pos", mag_base)
 		mag.rotation = pose.get("rot", Vector3.ZERO)
-		if p >= float(cfg.get("drop_point", 0.62)) and not old_mag_dropped:
+		if p >= float(cfg.get("drop_point", 0.62)) and not old_mag_dropped and not retain:
 			_drop_old_mag()
 			_impulse(0.005, 0.5)
 			_camera_kick(0.5, 0.35)
@@ -1322,7 +1893,7 @@ func _update_cover_open() -> void:
 		var open_at := float(cfg.get("cover_open_at", 0.10))
 		var span := maxf(float(cfg.get("cover_open_span", 0.74)), 0.01)
 		var k := _ez(clampf((p - open_at) / span, 0.0, 1.0))
-		cover.rotation = cover_base + Vector3(float(cfg.get("cover_angle", 1.05)) * k, 0.0, 0.0)
+		cover.rotation = cover_base + Vector3(float(cfg.get("cover_angle", 0.85)) * k, 0.0, 0.0)
 	if left_hand != null:
 		var latch := _cover_latch_pos()
 		if p < 0.18:
@@ -1330,6 +1901,20 @@ func _update_cover_open() -> void:
 			var e := _ez(p / 0.18)
 			var arc := Vector3(_side_sign() * sin(e * PI) * 0.04, sin(e * PI) * 0.025, 0.0)
 			left_hand.position = hand_rest.lerp(latch + Vector3(0.0, -0.02, 0.0), e) + arc
+		elif started_empty and p >= 0.55:
+			# 空仓换弹的标志性动作:开盖后拨一下受弹口,确认没有滞留空链节/断链
+			# (实机操作规范,用户明确要求)。战术换弹膛内仍有弹,跳过检查直接拆箱。
+			var hold := latch + Vector3(0.0, -0.025, 0.0)
+			var port := Vector3(0.0, -0.01, -0.16)
+			if group != null and group.has_meta("feed_port"):
+				var fp: Node3D = group.get_meta("feed_port")
+				port = fp.position if fp != null else port
+			var chk := _ez(clampf((p - 0.55) / 0.30, 0.0, 1.0))
+			left_hand.position = hold.lerp(port + Vector3(_side_sign() * 0.03, -0.02, 0.0), chk) \
+				+ Vector3(0.0, 0.0, sin(chk * PI) * 0.012)
+			if p > 0.72 and not _stage_event_done:
+				_stage_event_done = true
+				AudioSys.reload_action("mag_out", 1.18)
 		else:
 			# 抓扣随供弹盖一起抬起,手腕与机盖保持真实联动
 			left_hand.position = latch + Vector3(0.0, -0.025, 0.0)
@@ -1350,6 +1935,7 @@ func _belt_remove_pose(p: float) -> Dictionary:
 
 func _update_belt_out() -> void:
 	var p := stage_p
+	var retain := _tac_retain_active()
 	# 前 22% 时间用于手从供弹盖锁扣移到弹链箱提手;箱体在此之后才开始脱出,
 	# 保证“先抓稳再拆”,不会出现手瞬移或弹链箱自己飞走。
 	var move_p := clampf((p - 0.22) / 0.78, 0.0, 1.0)
@@ -1361,7 +1947,7 @@ func _update_belt_out() -> void:
 		if belt != null:
 			var e := _ez(move_p)
 			belt.position = belt_base + Vector3(_side_sign() * 0.012, -sin(e * PI) * 0.018, 0.01 * e)
-		if move_p >= float(cfg.get("drop_point", 0.62)) and not old_mag_dropped:
+		if move_p >= float(cfg.get("drop_point", 0.62)) and not old_mag_dropped and not retain:
 			_drop_old_mag()
 			_impulse(0.006, 0.55)
 			_camera_kick(0.55, 0.4)
@@ -1551,6 +2137,65 @@ func _update_chamber(dt: float) -> void:
 	var amp: float = float(cfg.get("chamber_amp", 0.045))
 	var curve := _chamber_curve(p)
 	match String(cfg.get("chamber_style", "pull")):
+		"ar_release":
+			# AR 系空仓:左手拍左侧空挂释放钮,枪机自行复进(不拉拉机柄)
+			if left_hand != null:
+				var tap := Vector3(-0.026, -0.032, -0.05)
+				var e := _ez(minf(p * 1.5, 1.0))
+				left_hand.position = _chamber_hand_start.lerp(tap, e) + Vector3(0.0, sin(e * PI) * 0.012, 0.0)
+				if p > 0.45:
+					left_hand.position = left_hand.position.lerp(hand_rest, 1.0 - exp(-11.0 * dt))
+		"bullpup_tap":
+			# AUG/FAMAS 空仓:左手绕到枪托后部拍空挂释放钮,枪身轻微前冲
+			if left_hand != null:
+				var tap := (bolt.position + Vector3(-0.022, 0.02, 0.04)) if bolt != null else Vector3(-0.022, -0.04, 0.18)
+				var e := _ez(minf(p * 1.5, 1.0))
+				left_hand.position = _chamber_hand_start.lerp(tap, e) + Vector3(sin(e * PI) * 0.015, 0.0, 0.0)
+				if p > 0.42:
+					left_hand.position = left_hand.position.lerp(hand_rest, 1.0 - exp(-11.0 * dt))
+		"hk_slap":
+			# MP5 空仓:H&K 经典拍拉机柄,左手向下拍击前部拉机柄后收回
+			if bolt != null:
+				bolt.position.z = bolt_base.z + curve * amp
+			if left_hand != null and bolt != null:
+				var side := 1.0 if bolt_base.x >= 0.0 else -1.0
+				var target := bolt.position + Vector3(side * 0.02, 0.055, 0.0)
+				var e := _ez(minf(p * 1.4, 1.0))
+				left_hand.position = _chamber_hand_start.lerp(target, e) + Vector3(0.0, -sin(e * PI) * 0.018, 0.0)
+				if p > 0.58:
+					left_hand.position = left_hand.position.lerp(hand_rest, 1.0 - exp(-11.0 * dt))
+		"g3_pull":
+			# G3 空仓:左手抓住左前折叠拉机柄,向后长拉再送开
+			if bolt != null:
+				bolt.position.z = bolt_base.z + curve * amp * 1.15
+			if left_hand != null and bolt != null:
+				var side := 1.0 if bolt_base.x >= 0.0 else -1.0
+				var target := bolt.position + Vector3(side * 0.018, 0.025, 0.0)
+				var e := _ez(minf(p * 1.3, 1.0))
+				left_hand.position = _chamber_hand_start.lerp(target, e) + Vector3(0.0, sin(e * PI) * 0.01, 0.0)
+				if p > 0.56:
+					left_hand.position = left_hand.position.lerp(hand_rest, 1.0 - exp(-10.0 * dt))
+		"right_tap":
+			# M14/M1A/SKS/FAL 空仓:右手短暂离开握把,拍右侧枪机柄后回握把
+			if right_hand != null:
+				var tap := (bolt.position + Vector3(0.022, 0.022, 0.01)) if bolt != null else Vector3(0.024, -0.03, 0.02)
+				var e := _ez(minf(p * 1.5, 1.0))
+				right_hand.position = right_base.lerp(tap, e) + Vector3(0.0, sin(e * PI) * 0.012, 0.0)
+				if p > 0.46:
+					right_hand.position = right_hand.position.lerp(right_base, 1.0 - exp(-11.0 * dt))
+			if left_hand != null:
+				left_hand.position = left_hand.position.lerp(hand_rest, 1.0 - exp(-9.0 * dt))
+		"p90_charge":
+			# P90 空仓:左手抓左后侧拉机柄向后拉,再松手复位(双侧拉机柄随枪机一起动)
+			if bolt != null:
+				bolt.position.z = bolt_base.z + curve * amp * 1.25
+			if left_hand != null and bolt != null:
+				var side := 1.0 if bolt_base.x >= 0.0 else -1.0
+				var target := bolt.position + Vector3(side * 0.02, 0.02, 0.0)
+				var e := _ez(minf(p * 1.4, 1.0))
+				left_hand.position = _chamber_hand_start.lerp(target, e) + Vector3(0.0, sin(e * PI) * 0.01, 0.0)
+				if p > 0.52:
+					left_hand.position = left_hand.position.lerp(hand_rest, 1.0 - exp(-11.0 * dt))
 		"pull", "pull_heavy", "pull_ak", "release":
 			if bolt != null:
 				bolt.position = bolt_base + Vector3(0.0, 0.0, curve * amp)
@@ -1696,6 +2341,21 @@ func _snap_rig_to_base() -> void:
 		slide.position = slide_base
 	if pump != null:
 		pump.position = pump_base
+	if revolver_crane != null:
+		revolver_crane.rotation = revolver_crane_base
+	if revolver_cylinder != null:
+		revolver_cylinder.position = revolver_cyl_pos_base
+		var chamber_count: int = _g()._chamber_loaded.size()
+		if chamber_count > 0:
+			var idx_rot := float(_g()._chamber_index) * TAU / float(chamber_count)
+			revolver_cylinder.rotation = revolver_cyl_base + Vector3(0.0, 0.0, idx_rot)
+			_g()._cyl_from = revolver_cylinder.rotation.z
+			_g()._cyl_to = revolver_cylinder.rotation.z
+		else:
+			revolver_cylinder.rotation = revolver_cyl_base
+	if revolver_hammer != null:
+		revolver_hammer.rotation = Vector3.ZERO
+	revolver_open = 0.0
 	if left_hand != null:
 		left_hand.position = hand_rest
 		left_hand.rotation = hand_rest_rot
@@ -1739,6 +2399,10 @@ func _update_idle(dt: float) -> void:
 		new_mag.visible = false
 	if new_rocket != null:
 		new_rocket.visible = false
+	if speedloader_mesh != null:
+		speedloader_mesh.visible = false
+	if _g().def.get("revolver") == true:
+		_g()._sync_revolver_chambers()
 
 
 func _recover_anim_parts(dt: float) -> void:
@@ -1772,6 +2436,16 @@ func _recover_anim_parts(dt: float) -> void:
 		rocket.visible = true
 	if new_rocket != null:
 		new_rocket.visible = false
+	# 左轮:取消/收尾时弹巢连续平移回闭锁位,速度与换弹姿态恢复一致
+	if revolver_crane != null:
+		revolver_crane.rotation = revolver_crane.rotation.lerp(revolver_crane_base, k)
+		revolver_open = Utils.damp(revolver_open, 0.0, 10.0, dt)
+	if revolver_cylinder != null:
+		revolver_cylinder.position = revolver_cylinder.position.lerp(revolver_cyl_pos_base, k)
+	if revolver_hammer != null:
+		revolver_hammer.rotation = revolver_hammer.rotation.lerp(Vector3.ZERO, k)
+	if speedloader_mesh != null:
+		speedloader_mesh.visible = false
 
 
 func _recover_hands(dt: float) -> void:
@@ -1890,8 +2564,9 @@ func _rot_slerp(n: Node3D, target_rot: Vector3, t: float) -> void:
 
 
 func _chest_pocket() -> Vector3:
-	# 新弹匣从胸口/胸前取出,符合“取下旧弹匣 → 扔地 → 从胸口拿新弹匣”的换弹流程
-	return Vector3(0.02, -0.20, 0.10)
+	# 每把枪的携行具位置由换弹签名决定,保证“旧匣收哪里”每把枪都不一样
+	var def_pocket := Vector3(0.02, -0.20, 0.10)
+	return cfg.get("pouch", def_pocket) as Vector3
 
 
 func _grip_offset() -> Vector3:
@@ -1906,6 +2581,8 @@ func _grip_offset() -> Vector3:
 			return GRIP_BELT
 		"top":
 			return GRIP_TOP
+		"p90":
+			return Vector3(0.0, -0.055, 0.018)
 		"pistol":
 			return GRIP_PISTOL
 	return GRIP_DOWN
@@ -1959,42 +2636,62 @@ func _mag_remove_pose(p: float) -> Dictionary:
 	var e := _ez(p)
 	var dist: float = float(cfg.get("drop_dist", 0.16))
 	var rot: float = float(cfg.get("mag_rot", 0.13))
+	var rb: Vector3 = cfg.get("remove_bias", Vector3.ZERO)
+	var rr: Vector3 = cfg.get("remove_rot_bias", Vector3.ZERO)
 	match String(cfg.get("mag", "down")):
 		"side":
-			# AK/SVD 前挂后卡:向下 + 沿枪口方向前送拔出,不再横向右甩
-			return { "pos": mag_base + Vector3(0.0, -e * 0.10, -e * 0.06), "rot": Vector3(e * 0.35, 0.0, 0.0) }
+			# AK/SVD 前挂后卡:向下 + 沿枪口方向前送拔出,不再横向右甩;每把 AK 系再叠加自身签名
+			return { "pos": mag_base + Vector3(0.0, -e * 0.10, -e * 0.06) + rb * e, "rot": Vector3(e * 0.35, 0.0, 0.0) + rr * e }
 		"drum":
-			return { "pos": mag_base + Vector3(0.0, -e * 0.09, 0.0), "rot": Vector3(0.0, 0.0, e * 0.85) }
+			return { "pos": mag_base + Vector3(0.0, -e * 0.09, 0.0) + rb * e, "rot": Vector3(0.0, 0.0, e * 0.85) + rr * e }
 		"belt":
 			var belt_side := -1.0 if mag_base.x < -0.01 else 1.0
-			return { "pos": mag_base + Vector3(belt_side * e * 0.05, -e * 0.08, 0.0), "rot": Vector3(0.0, 0.0, e * 0.5) }
+			return { "pos": mag_base + Vector3(belt_side * e * 0.05, -e * 0.08, 0.0) + rb * e, "rot": Vector3(0.0, 0.0, e * 0.5) + rr * e }
+		"p90":
+			# P90:先按前端两侧弹匣扣,弹匣整体向后方抽出(前卡头先脱出前卡槽),再离枪
+			return { "pos": mag_base + Vector3(0.0, e * 0.10, e * 0.10) + rb * e, "rot": Vector3(-e * 0.22, 0.0, sin(e * PI) * 0.04) + rr * e }
 		"top":
-			return { "pos": mag_base + Vector3(0.0, e * 0.13, 0.0), "rot": Vector3(0.0, 0.0, sin(e * PI * 2.0) * 0.14) }
+			return { "pos": mag_base + Vector3(0.0, e * 0.13, 0.0) + rb * e, "rot": Vector3(0.0, 0.0, sin(e * PI * 2.0) * 0.14) + rr * e }
 		"none":
 			return { "pos": mag_base, "rot": mag_base_rot }
-	return { "pos": mag_base + Vector3(sin(e * PI) * 0.012, -e * dist, 0.0), "rot": Vector3(0.0, 0.0, sin(e * PI) * rot) }
+	return { "pos": mag_base + Vector3(sin(e * PI) * 0.012, -e * dist, 0.0) + rb * e, "rot": Vector3(0.0, 0.0, sin(e * PI) * rot) + rr * e }
 
 
 func _mag_insert_start() -> Dictionary:
-	# 从卸弹终态出发:新弹匣先出现在弹匣井外,再沿手部路径进入
+	# 从卸弹终态出发:新弹匣先出现在弹匣井外,再沿手部路径进入;每把枪的起始偏移不同
 	var dist: float = float(cfg.get("drop_dist", 0.16))
 	var rot: float = float(cfg.get("mag_rot", 0.13))
+	var ib: Vector3 = cfg.get("insert_bias", Vector3.ZERO)
 	match String(cfg.get("mag", "down")):
 		"side":
-			return { "pos": mag_base + Vector3(0.0, -0.10, -0.06), "rot": Vector3(0.3, 0.0, 0.0) }
+			return { "pos": mag_base + Vector3(0.0, -0.10, -0.06) + ib, "rot": Vector3(0.3, 0.0, 0.0) }
 		"drum":
-			return { "pos": mag_base + Vector3(0.0, -0.09, 0.0), "rot": Vector3(0.0, 0.0, 0.8) }
+			return { "pos": mag_base + Vector3(0.0, -0.09, 0.0) + ib, "rot": Vector3(0.0, 0.0, 0.8) }
 		"belt":
 			var belt_side := -1.0 if mag_base.x < -0.01 else 1.0
-			return { "pos": mag_base + Vector3(belt_side * 0.05, -0.08, 0.0), "rot": Vector3(0.0, 0.0, 0.45) }
+			return { "pos": mag_base + Vector3(belt_side * 0.05, -0.08, 0.0) + ib, "rot": Vector3(0.0, 0.0, 0.45) }
+		"p90":
+			return { "pos": mag_base + Vector3(0.0, 0.12, 0.10) + ib, "rot": Vector3(-0.14, 0.0, 0.02) }
 		"top":
-			return { "pos": mag_base + Vector3(0.0, 0.13, 0.0), "rot": Vector3(0.0, 0.0, 0.3) }
+			return { "pos": mag_base + Vector3(0.0, 0.13, 0.0) + ib, "rot": Vector3(0.0, 0.0, 0.3) }
 		"none":
 			return { "pos": mag_base, "rot": mag_base_rot }
-	return { "pos": mag_base + Vector3(0.0, -dist, 0.0), "rot": Vector3(0.0, 0.0, rot) }
+	return { "pos": mag_base + Vector3(0.0, -dist, 0.0) + ib, "rot": Vector3(0.0, 0.0, rot) }
 
 
 func _mag_insert_pose(p: float) -> Dictionary:
+	# P90 专属插匣:新匣先向后/上方进入,前端卡头先向前滑入前卡槽,后部再旋转压入弹匣扣
+	if String(cfg.get("mag", "down")) == "p90":
+		var start_pose := _mag_insert_start()
+		var start_pos: Vector3 = start_pose.get("pos", mag_base)
+		var start_rot: Vector3 = start_pose.get("rot", Vector3.ZERO)
+		var align := mag_base + Vector3(0.0, 0.05, 0.0)
+		var align_rot := Vector3(0.0, 0.0, 0.0)
+		if p < 0.5:
+			var e := _ez(p / 0.5)
+			return { "pos": start_pos.lerp(align, e), "rot": start_rot.lerp(align_rot, e) }
+		var e2 := _ez((p - 0.5) / 0.5)
+		return { "pos": align.lerp(mag_base, e2), "rot": align_rot * (1.0 - e2) }
 	var insert_pose := _mag_insert_start()
 	var e := _ez(p)
 	var pos: Vector3 = insert_pose.get("pos", mag_base)
@@ -2009,7 +2706,16 @@ func _update_hand_rotation(dt: float) -> void:
 		return
 	var grip := 0.0
 	if state == State.ACTIVE:
-		if _g().def.pellets > 1:
+		if _g().def.get("revolver") == true:
+			if stage < phase_names.size():
+				match String(phase_names[stage]):
+					"rv_reach", "rv_insert":
+						grip = 1.0
+					"rv_open", "rv_eject", "rv_fetch_loader", "rv_load_loader", "rv_close":
+						grip = 0.9
+					_:
+						grip = 0.2
+		elif _g().def.pellets > 1:
 			grip = 1.0 if tube_stage == TubeStage.PUSH else (0.5 if tube_stage == TubeStage.REACH and stage_p > 0.6 else 0.15)
 		elif stage < phase_names.size():
 			match String(phase_names[stage]):
@@ -2019,6 +2725,8 @@ func _update_hand_rotation(dt: float) -> void:
 					grip = _ez(stage_p)
 				"remove", "belt_out":
 					grip = 1.0
+				"stow":
+					grip = 0.7
 				"fetch":
 					grip = 0.8 if stage_p > 0.42 else 0.2
 				"insert", "belt_in":
@@ -2026,12 +2734,12 @@ func _update_hand_rotation(dt: float) -> void:
 				"lock", "cover_open", "cover_close":
 					grip = 1.0
 				"chamber", "charge":
-					var left_pull := bolt != null and bolt_base.x < 0.0 and String(cfg.get("chamber_style", "pull")) in ["pull", "pull_heavy", "pull_ak", "release"]
+					var left_pull := bolt != null and bolt_base.x < 0.0 and String(cfg.get("chamber_style", "pull")) in ["pull", "pull_heavy", "pull_ak", "release", "g3_pull", "hk_slap", "ar_release", "bullpup_tap", "p90_charge"]
 					grip = 0.9 if left_pull or String(cfg.get("chamber_style", "pull")) in ["slide", "belt_slap", "top_slap"] else 0.3
 				"recover":
 					grip = 0.0
 	var rest_q := Quaternion.from_euler(hand_rest_rot)
-	var grip_q := Quaternion.from_euler(HAND_GRIP_ROT)
+	var grip_q := Quaternion.from_euler(HAND_REVOLVER_GRIP_ROT if _g().def.get("revolver") == true else HAND_GRIP_ROT)
 	var target_q := rest_q.slerp(grip_q, grip).normalized()
 	left_hand.quaternion = left_hand.quaternion.slerp(target_q, 1.0 - exp(-14.0 * dt)).normalized()
 	_g().grip_amt = grip
@@ -2050,7 +2758,9 @@ func _follow_auxiliary_hands(dt: float) -> void:
 		return
 	# 泵动护木:左手必须真正抓住护木跟随后拉/前推
 	if pump != null and _g().pump_t > 0.0 and left_hand != null:
-		var off := Vector3(0.0, 0.015, 0.0)
+		var off: Vector3 = Vector3(0.0, 0.015, 0.0)
+		if group != null and group.has_meta("pump_grip_offset"):
+			off = group.get_meta("pump_grip_offset") as Vector3
 		left_hand.position = pump.position + off
 		_rot_slerp(left_hand, HAND_GRIP_ROT, 1.0 - exp(-16.0 * dt))
 		_g().grip_amt = 1.0
@@ -2076,6 +2786,8 @@ func stage_name() -> String:
 		return "cancel"
 	if state == State.FINISH:
 		return "finish"
+	if _g().def.get("revolver") == true:
+		return String(phase_names[stage]) if stage < phase_names.size() else "rv_recover"
 	if _g().def.pellets > 1:
 		match tube_stage:
 			TubeStage.REACH:

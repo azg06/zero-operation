@@ -36,6 +36,10 @@ var _nvg_layer: CanvasLayer
 var _nvg_rect: ColorRect
 var _nvg_vg: TextureRect
 
+# ---- 载具热成像层(白热/琥珀单色 + 扫描线;与夜视层互斥) ----
+var _thermal_layer: CanvasLayer
+var _thermal_rect: ColorRect
+
 # ---- 粒子池(MultiMesh 公告牌) ----
 var _sparks_mm: MultiMesh
 var _smoke_mm: MultiMesh
@@ -314,6 +318,16 @@ func _build_screen_fx() -> void:
 	_nvg_vg.stretch_mode = TextureRect.STRETCH_SCALE
 	_nvg_vg.modulate = Color(1, 1, 1, 0)
 	_nvg_layer.add_child(_nvg_vg)
+	# 载具热成像:层 91(压过夜视层,但低于爆闪/受伤),琥珀色滤镜,默认隐藏
+	_thermal_layer = CanvasLayer.new()
+	_thermal_layer.layer = 91
+	add_child(_thermal_layer)
+	_thermal_rect = ColorRect.new()
+	_thermal_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_thermal_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_thermal_rect.color = Color(0.62, 0.34, 0.10, 0.16)
+	_thermal_rect.modulate = Color(1, 1, 1, 0)
+	_thermal_layer.add_child(_thermal_rect)
 
 
 ## 径向渐变贴图生成(受伤红边 / HUD 白色蒙版共用,像素级行为一致)
@@ -1054,12 +1068,22 @@ func spawn_dropped_weapon(weapon_id: String, pos: Vector3) -> void:
 	var holder: Node3D = d["holder"]
 	for c in holder.get_children():
 		c.queue_free()
-	# [PERF] 掉落武器按 weapon_id 缓存模板:首次 build 后 duplicate(共享 mesh/材质)复用,免每次死亡重建(~150µs→~10µs)
-	var tmpl: Node3D = _drop_cache.get(weapon_id)
-	if tmpl == null:
-		tmpl = WeaponModels.build(weapon_id, false, WeaponModsData.load_cfg(weapon_id))
-		_drop_cache[weapon_id] = tmpl
-	holder.add_child(tmpl.duplicate(Node.DUPLICATE_USE_INSTANTIATION))
+	# [PERF] 掉落武器按 weapon_id 缓存 PackedScene:首次 build 后 pack 一次,
+	# 之后 instantiate 复用。旧版对 GLB 场景实例节点直接 duplicate 会被打穿
+	# 内部缓存("Child node disappeared while duplicating" 崩溃,用户日志实锤),
+	# pack→instantiate 走干净序列化路径,成本相当但正确。
+	var ps: PackedScene = _drop_cache.get(weapon_id)
+	if ps == null:
+		var tmpl: Node3D = WeaponModels.build(weapon_id, false, WeaponModsData.load_cfg(weapon_id))
+		ps = PackedScene.new()
+		WeaponModels.prepare_for_pack(tmpl)
+		if ps.pack(tmpl) != OK:
+			push_warning("[Effects] 掉落武器打包失败: " + weapon_id)
+			tmpl.free()
+			return
+		tmpl.free()
+		_drop_cache[weapon_id] = ps
+	holder.add_child(ps.instantiate())
 	holder.position = pos
 	holder.rotation = Vector3(Utils.rand(-0.15, 0.15), Utils.rand(TAU), PI / 2.0 * 0.92)
 	d["vel"] = Vector3(Utils.rand(-0.9, 0.9), Utils.rand(1.4, 2.4), Utils.rand(-0.9, 0.9))
@@ -1307,6 +1331,20 @@ func set_night_vision(on: bool) -> void:
 	_nvg_vg.modulate.a = 1.0 if on else 0.0
 	if G.world_env != null and G.world_env.environment != null:
 		G.world_env.environment.adjustment_brightness = 1.35 if on else 1.0
+
+
+## 载具热成像(白热/琥珀单色):去饱和 + 提对比/亮度 + 琥珀滤镜。
+## 与夜视仪互斥,调用方先关夜视再开热成像。
+func set_thermal_vision(on: bool) -> void:
+	if _thermal_rect == null:
+		return
+	_thermal_rect.modulate.a = 1.0 if on else 0.0
+	if G.world_env != null and G.world_env.environment != null:
+		var env: Environment = G.world_env.environment
+		env.adjustment_enabled = true
+		env.adjustment_brightness = 1.22 if on else 1.0
+		env.adjustment_contrast = 1.18 if on else 1.0
+		env.adjustment_saturation = 0.0 if on else 1.0
 
 
 # ==================== 每帧更新 ====================

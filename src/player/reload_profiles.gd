@@ -22,6 +22,8 @@ static func _ez(x: float) -> float:
 static func _style_for(id: String, def) -> String:
 	if def.pellets > 1:
 		return "shotgun"
+	if def.get("revolver") == true:
+		return "revolver"
 	if def.projectile:
 		return "rocket"
 	if def.kind == "pistol":
@@ -44,12 +46,12 @@ static func _style_for(id: String, def) -> String:
 
 ## 弹匣运动类型:与 WeaponModels 的实际模型结构对应
 static func _mag_style_for(id: String, def) -> String:
-	if def.pellets > 1 or def.projectile:
+	if def.pellets > 1 or def.projectile or def.get("revolver") == true:
 		return "none"
 	if def.kind == "pistol":
 		return "pistol"
 	if id == "p90":
-		return "top"
+		return "p90"
 	if id in ["ak", "ak74", "svd"]:
 		return "side"
 	if id == "rpd":
@@ -60,7 +62,7 @@ static func _mag_style_for(id: String, def) -> String:
 		return "down"
 	if id in ["m249", "pkm", "mg42", "m60", "mk48", "negev", "mg3"]:
 		return "belt"
-	if id in ["m24"]:
+	if id in ["m24", "m40", "sks"]:
 		return "none"
 	return "down"
 
@@ -69,6 +71,8 @@ static func _mag_style_for(id: String, def) -> String:
 static func _snd_family_for(id: String, def) -> String:
 	if def.pellets > 1:
 		return "shotgun"
+	if def.get("revolver") == true:
+		return "revolver"
 	if def.kind == "pistol":
 		return "pistol"
 	if id in ["ak", "ak74", "svd"]:
@@ -91,6 +95,8 @@ static func _belt_snd_set_for(id: String) -> String:
 static func _chamber_for(id: String, def) -> String:
 	if def.pellets > 1:
 		return "pump"
+	if def.get("revolver") == true:
+		return "none"
 	if def.kind == "pistol":
 		return "slide"
 	if def.projectile:
@@ -98,7 +104,7 @@ static func _chamber_for(id: String, def) -> String:
 	if id in ["awm", "m24", "m40", "l115", "sv98", "m2010"]:
 		return "bolt_cycle"
 	if id == "p90":
-		return "top_slap"
+		return "p90_charge"
 	if id in ["ak", "ak74", "svd"]:
 		return "pull_ak"
 	if def.kind == "lmg":
@@ -122,12 +128,12 @@ static func _base(style: String) -> Dictionary:
 		"reload_flow": "mag",
 		"tac_time": 0.0,
 		"empty_time": 0.0,
-		"tac_weights": [0.16, 0.20, 0.32, 0.18, 0.14],
+		"tac_weights": [0.13, 0.16, 0.15, 0.21, 0.20, 0.15],
 		"empty_weights": [0.12, 0.15, 0.26, 0.15, 0.18, 0.14],
 		"drum_weights": [0.13, 0.18, 0.25, 0.18, 0.12, 0.14],
 		"belt_weights": [0.17, 0.18, 0.24, 0.17, 0.13, 0.11],
 		"charge_weight": 0.14,
-		"cover_angle": 0.62,
+		"cover_angle": 0.85,
 		"cover_open_at": 0.10,
 		"cover_open_span": 0.74,
 		"cover_close_at": 0.08,
@@ -228,7 +234,7 @@ static func _base(style: String) -> Dictionary:
 		"pistol":
 			p["pose_pos"] = Vector3(0.030, 0.020, 0.030)
 			p["pose_rot"] = Vector3(0.06, -0.12, -0.10)
-			p["tac_weights"] = [0.18, 0.20, 0.30, 0.18, 0.14]
+			p["tac_weights"] = [0.16, 0.18, 0.14, 0.20, 0.18, 0.14]
 			p["empty_weights"] = [0.14, 0.16, 0.27, 0.16, 0.15, 0.12]
 			p["drop_dist"] = 0.10
 			p["mag_rot"] = 0.08
@@ -249,6 +255,24 @@ static func _base(style: String) -> Dictionary:
 			p["chamber_impact"] = 0.014
 			p["inertia_strength"] = 1.15
 			p["shell_time"] = 0.7
+		"revolver":
+			# 左轮:枪身倾斜展示弹巢,手臂动作幅度小但镜头反馈清晰;换弹流程由控制器按 quick/single 展开
+			p["pose_pos"] = Vector3(0.024, 0.018, 0.044)
+			p["pose_rot"] = Vector3(0.07, -0.13, -0.16)
+			p["sway_amp"] = 0.0032
+			p["sway_freq"] = 0.95
+			p["insert_impact"] = 0.006
+			p["chamber_impact"] = 0.010
+			p["inertia_strength"] = 0.62
+			p["cam_strength"] = 0.85
+			p["anim_speed"] = 1.0
+			p["hand_arc"] = 0.055
+			p["reload_flow"] = "revolver"
+			p["mag"] = "none"
+			p["chamber_style"] = "none"
+			p["cylinder_angle"] = 0.92
+			p["quick_weights"] = [0.16, 0.15, 0.2, 0.18, 0.16, 0.15]
+			p["single_weights"] = [0.16, 0.14, 0.22, 0.28, 0.20]
 		"rocket":
 			p["pose_pos"] = Vector3(0.0, -0.030, 0.080)
 			p["pose_rot"] = Vector3(0.05, -0.08, -0.10)
@@ -407,9 +431,126 @@ static func _override(id: String, p: Dictionary) -> void:
 			p["inertia_strength"] = 1.25
 		"m1014":
 			p["shell_time"] = maxf(0.52, float(p.get("shell_time", 0.7)))
+			p["tac_shell_time"] = maxf(0.46, float(p.get("tac_shell_time", 0.6)))
+			p["pump_dur"] = 0.45
+			p["pump_stroke"] = 0.06
+			p["mech_pitch"] = 1.0
 		"spas12":
 			p["shell_time"] = maxf(0.52, float(p.get("shell_time", 0.7)))
+			p["tac_shell_time"] = maxf(0.46, float(p.get("tac_shell_time", 0.6)))
+			p["pump_dur"] = 0.5
+			p["pump_stroke"] = 0.065
+			p["mech_pitch"] = 0.94
+		# [9/10] 泵动霰弹枪:每把独立壳入膛节奏/泵动行程/机械音高
+		"rem870":
+			p["shell_time"] = maxf(0.48, float(p.get("shell_time", 0.65)))
+			p["tac_shell_time"] = maxf(0.44, float(p.get("tac_shell_time", 0.58)))
+			p["pump_dur"] = 0.46
+			p["pump_stroke"] = 0.065
+			p["mech_pitch"] = 0.98
+			p["shell_grab_snd"] = "shell_grab_rem870"
+			p["shell_insert_snd"] = "shell_insert_rem870"
+		"m590":
+			p["shell_time"] = maxf(0.52, float(p.get("shell_time", 0.72)))
+			p["tac_shell_time"] = maxf(0.46, float(p.get("tac_shell_time", 0.62)))
+			p["pump_dur"] = 0.5
+			p["pump_stroke"] = 0.075
+			p["mech_pitch"] = 0.92
+			p["shell_grab_snd"] = "shell_grab_m590"
+			p["shell_insert_snd"] = "shell_insert_m590"
+		"win1897":
+			p["shell_time"] = maxf(0.56, float(p.get("shell_time", 0.78)))
+			p["tac_shell_time"] = maxf(0.5, float(p.get("tac_shell_time", 0.68)))
+			p["pump_dur"] = 0.52
+			p["pump_stroke"] = 0.07
+			p["mech_pitch"] = 0.9
+			p["shell_grab_snd"] = "shell_grab_win1897"
+			p["shell_insert_snd"] = "shell_insert_win1897"
 	return
+
+
+## 稳定字符串哈希:换弹签名种子(同一把枪永远得到同一组动作差异)
+static func _hash_sig(s: String) -> int:
+	var h := 17
+	for i in s.length():
+		h = (h * 131 + s.unicode_at(i)) % 1000000007
+	return h
+
+
+## 对阶段权重做确定性抖动:同一把枪节奏固定,不同枪之间永远不同(_build_phases 会归一化)
+static func _jitter_weights(w: Array, h: int) -> Array:
+	# 相对抖动:每个权重乘 0.78~1.22,再归一化回总和 1(总时长不变,节奏签名保留)。
+	# 旧版是绝对加减 ±0.18 —— 和权重本身(0.13~0.21)同量级,个别阶段会被压到 0.02
+	# 的钳底:插匣阶段只剩 2~3 帧,拍匣动画被整个吞掉(mp5/vector 战术换弹翻车根因)。
+	var out: Array = []
+	var sum := 0.0
+	for i in w.size():
+		var v := float(w[i])
+		var j := 0.78 + 0.44 * float(((h / int(1 + i * 13)) % 9)) / 8.0
+		v *= j
+		out.append(v)
+		sum += v
+	if sum <= 0.0001:
+		return w
+	for i in out.size():
+		out[i] = float(out[i]) / sum
+	return out
+
+
+## 每把枪的换弹签名:决定取/收/插弹匣的三段弧线、弹匣旋转、携行具位置、
+## 枪身姿态、镜头惯性、拍匣力度与枪机行程。结构相同但动作绝不雷同。
+static func _signature(id: String, p: Dictionary) -> void:
+	var h := _hash_sig(id)
+	var ax := float((h % 13) - 6) / 6.0
+	var ay := float(((h / 13) % 11) - 5) / 5.0
+	var az := float(((h / 143) % 17) - 8) / 8.0
+	p["sig_id"] = id
+	p["pouch"] = Vector3(0.02 + ax * 0.055, -0.20 + ay * 0.07, 0.10 + az * 0.06)
+	p["remove_bias"] = Vector3(ax * 0.028, ay * 0.02, az * 0.026)
+	p["remove_rot_bias"] = Vector3(ax * 0.11, ay * 0.09, az * 0.16)
+	p["insert_bias"] = Vector3(-ax * 0.02, -ay * 0.014, -az * 0.02)
+	p["stow_bias"] = Vector3(-ax * 0.045, -ay * 0.035, az * 0.05)
+	p["fetch_arc"] = maxf(0.035, float(p.get("hand_arc", 0.09)) * (0.82 + 0.36 * float((h % 9)) / 8.0))
+	p["stow_arc"] = maxf(0.03, float(p.get("hand_arc", 0.09)) * (0.75 + 0.42 * float((h % 7)) / 6.0))
+	p["drop_dist"] = maxf(0.05, float(p.get("drop_dist", 0.16)) * (0.9 + 0.22 * float((h % 7)) / 6.0))
+	p["mag_rot"] = float(p.get("mag_rot", 0.13)) * (0.8 + 0.44 * float((h % 5)) / 4.0)
+	p["slap"] = float(p.get("slap", 0.018)) * (0.72 + 0.56 * float((h % 5)) / 4.0)
+	p["pose_pos"] = (p.get("pose_pos", Vector3.ZERO) as Vector3) + Vector3(ax * 0.007, ay * 0.006, az * 0.007)
+	p["pose_rot"] = (p.get("pose_rot", Vector3.ZERO) as Vector3) + Vector3(ax * 0.022, ay * 0.016, az * 0.022)
+	p["anim_speed"] = float(p.get("anim_speed", 1.0)) * (0.965 + 0.07 * float((h % 5)) / 4.0)
+	p["inertia_strength"] = float(p.get("inertia_strength", 1.0)) * (0.94 + 0.12 * float((h % 5)) / 4.0)
+	p["cam_strength"] = float(p.get("cam_strength", 1.0)) * (0.94 + 0.12 * float((h % 5)) / 4.0)
+	p["chamber_amp"] = float(p.get("chamber_amp", 0.05)) * (0.88 + 0.24 * float((h % 5)) / 4.0)
+	p["mech_pitch"] = float(p.get("mech_pitch", 1.0)) * (0.96 + 0.08 * float((h % 5)) / 4.0)
+	p["sway_amp"] = float(p.get("sway_amp", 0.0045)) * (0.9 + 0.2 * float((h % 5)) / 4.0)
+	p["sway_freq"] = float(p.get("sway_freq", 1.35)) * (0.94 + 0.12 * float((h % 5)) / 4.0)
+	p["pose_damp"] = float(p.get("pose_damp", 11.0)) * (0.94 + 0.12 * float((h % 5)) / 4.0)
+	if p.has("tac_weights"):
+		p["tac_weights"] = _jitter_weights(p["tac_weights"], h)
+	if p.has("empty_weights"):
+		p["empty_weights"] = _jitter_weights(p["empty_weights"], h)
+	if p.has("drum_weights"):
+		p["drum_weights"] = _jitter_weights(p["drum_weights"], h)
+	if p.has("belt_weights"):
+		p["belt_weights"] = _jitter_weights(p["belt_weights"], h)
+	# 标志性枪机动作(空仓收尾)。每个枪族/枪型不同,避免所有枪都做同一个“拉拉机柄”。
+	match id:
+		"m4", "scar", "mpx", "ar10", "m110", "g28", "mk14":
+			p["chamber_style"] = "ar_release"
+		"aug", "famas":
+			p["chamber_style"] = "bullpup_tap"
+		"g3":
+			p["chamber_style"] = "g3_pull"
+		"mp5":
+			p["chamber_style"] = "hk_slap"
+		"p90":
+			p["chamber_style"] = "p90_charge"
+		"m14", "m1a", "sks", "fal":
+			p["chamber_style"] = "right_tap"
+
+
+## 无需每枪签名的枪(已单独完整制作的换弹系统):3 把左轮 + 5 把霰弹枪
+const _SIG_SKIP := ["python", "sw686", "sw500", "m1014", "spas12", "rem870", "m590", "win1897"]
 
 
 static func profile_for(id: String, def) -> Dictionary:
@@ -454,11 +595,36 @@ static func profile_for(id: String, def) -> Dictionary:
 	if def.kind == "lmg":
 		p["bolt_snd"] = "bolt_cycle_lmg"
 		p["belt_snd_set"] = _belt_snd_set_for(id)
+	# 左轮:快速装弹器与逐发装填两套时长/流程全部由数据驱动
+	if def.get("revolver") == true:
+		var qr := 2.0
+		var sr := 3.0
+		if def.get("quick_reload") != null:
+			qr = float(def.get("quick_reload"))
+		if def.get("single_reload") != null:
+			sr = float(def.get("single_reload"))
+		p["quick_time"] = maxf(0.8, qr)
+		p["single_time"] = maxf(1.0, sr)
+		p["round_time"] = maxf(0.42, (p["single_time"] - 0.85) / maxf(1.0, float(def.mag)))
+		p["single_weights"] = [0.16, 0.14, 0.22, 0.28, 0.20]
+		p["quick_weights"] = [0.16, 0.15, 0.20, 0.18, 0.16, 0.15]
+		p["open_snd"] = "revolver_open_" + id
+		p["close_snd"] = "revolver_close_" + id
+		p["eject_snd"] = "revolver_eject_" + id
+		p["round_snd"] = "revolver_round_" + id
+		p["loader_snd"] = "revolver_loader_" + id
+		p["cock_snd"] = "revolver_hammer_" + id
+		p["insert_snd"] = "revolver_insert_" + id
+		_override(id, p)
+		return p
 	# 换弹总时长:优先 WeaponDef 的专用战术时长,否则按 78% 折算
 	if def.pellets > 1:
+		p["reload_flow"] = "tube"
 		p["shell_time"] = maxf(0.45, float(def.reload_time) / float(maxi(1, def.mag)))
+		var tac_time: float = float(def.reload_tac) if float(def.reload_tac) > 0.0 else float(def.reload_time) * 0.78
+		p["tac_shell_time"] = maxf(0.45, tac_time / float(maxi(1, def.mag)))
 		p["empty_time"] = float(def.reload_time)
-		p["tac_time"] = float(def.reload_time)
+		p["tac_time"] = tac_time
 		var tube_weights: Array = p["tube_weights"]
 		p["insert_time"] = float(p["shell_time"]) * float(tube_weights[1])
 		p["chamber_time"] = 0.45
@@ -475,4 +641,6 @@ static func profile_for(id: String, def) -> Dictionary:
 		p["insert_time"] = float(p["empty_time"]) * float(ew[3])
 		p["chamber_time"] = float(p["empty_time"]) * float(ew[4]) if ew.size() > 4 else 0.0
 	_override(id, p)
+	if not _SIG_SKIP.has(id):
+		_signature(id, p)
 	return p

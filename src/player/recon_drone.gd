@@ -28,8 +28,12 @@ const CAM_FOV := 78.0
 const CAM_FWD := 0.52          # 云台相机前伸量(m):前旋翼叶尖到 z≈-0.45,必须越过它否则挡视野
 const CAM_DOWN := -0.06        # 云台相机相对机身中心的高度偏移(略低于旋翼平面)
 
-var piloting := false
-var actor = null                # 操控者(Player)
+var piloting := false           # 玩家操控中 —— 此标志会把玩家本体 update 冻结,严禁被 AI 起飞占用
+var ai_flying := false          # AI 无人机的实体在飞(不冻结玩家,不接管相机)
+var actor = null                # 操控者(Player 或 Bot)
+var ai_mode := false            # true = AI 侦察兵起飞(不接管玩家相机,自动盘旋侦察)
+var ai_turn_t := 0.0            # AI 自动转向计时
+var ai_turn_dir := 1.0          # AI 盘旋方向
 var origin := Vector3.ZERO      # 起飞点(圆心)
 var pos := Vector3.ZERO
 var vel := Vector3.ZERO         # 当前速度(惯性模型:目标速度阻尼趋近)
@@ -90,6 +94,42 @@ func launch(p_actor) -> bool:
 	return true
 
 
+## AI 侦察兵起飞:不接管玩家相机,只生成四旋翼实体并自动盘旋标记敌人。
+func launch_ai(p_actor) -> bool:
+	if piloting:
+		return false
+	if p_actor == null or not p_actor.alive:
+		return false
+	if p_actor.vehicle != null:
+		return false
+	if G.mode == "tdm" or G.mode == "br":
+		return false
+	actor = p_actor
+	ai_mode = true
+	origin = p_actor.pos
+	pos = origin + Vector3(0, 18.0, 0)
+	vel = Vector3.ZERO
+	yaw = p_actor.yaw
+	pitch = -0.35
+	yaw_target = yaw
+	pitch_target = pitch
+	life = 30.0
+	lost_t = 0.0
+	blackout_t = 0.0
+	_spot_t = 0.0
+	_warn_t = 0.0
+	_edge = false
+	ai_turn_t = Utils.rand(2.0, 5.0)
+	ai_turn_dir = Utils.choice([-1.0, 1.0])
+	_build_mesh()
+	# 关键修复:AI 起飞绝不能置 piloting —— G.drone 是全局单例,player.gd 每帧
+	# 检查 piloting 决定是否把输入交给无人机并冻结本体。友军 AI 一起飞,
+	# 玩家就会被冻在原地,体感等同"视角被切到无人机"(实机已验证的 bug)。
+	ai_flying = true
+	AudioSys.capture(true)
+	return true
+
+
 ## 失联/黑屏全屏层(CanvasLayer 95:压住 HUD,低于爆闪层 100),惰性创建复用
 func _build_fx() -> void:
 	if _fx_layer != null and is_instance_valid(_fx_layer):
@@ -122,7 +162,7 @@ func lost_countdown() -> float:
 
 
 ## 全屏效果:越界 → 灰白雪花逐渐吃掉画面;断链 → 纯黑
-func _update_fx(dt: float) -> void:
+func _update_fx(_dt: float) -> void:
 	if _fx_rect == null or not is_instance_valid(_fx_rect):
 		return
 	if blackout_t > 0.0:
@@ -143,9 +183,11 @@ func _update_fx(dt: float) -> void:
 
 ## 召回:视角交还主相机,模型与相机销毁,状态复位(幂等)
 func recall(reason := "") -> void:
-	if not piloting:
+	if not piloting and not ai_flying:
 		return
+	var was_ai := ai_mode
 	piloting = false
+	ai_flying = false
 	lost_t = 0.0
 	blackout_t = 0.0
 	if _fx_rect != null and is_instance_valid(_fx_rect):
@@ -159,19 +201,34 @@ func recall(reason := "") -> void:
 		mesh.queue_free()
 	mesh = null
 	_rotors.clear()
-	if G.camera != null and is_instance_valid(G.camera):
+	if not was_ai and G.camera != null and is_instance_valid(G.camera):
 		G.camera.current = true
-	if actor != null and actor.gun() != null and actor.gun().group != null \
-			and is_instance_valid(actor.gun().group):
-		actor.gun().group.visible = true
+	if actor != null and actor.has_method("gun"):
+		var ag = actor.gun()
+		if ag != null and ag.group != null and is_instance_valid(ag.group):
+			ag.group.visible = true
 	actor = null
+	ai_mode = false
 	AudioSys.reload(0)
-	if reason != "":
+	if reason != "" and not was_ai:
 		G.hud.hint("无人侦察机已回收:" + reason)
 
 
 func _process(dt: float) -> void:
-	if not piloting:
+	if not piloting and not ai_flying:
+		return
+	# AI 无人机:自动盘旋侦察,不读取玩家输入、不接管主相机、无图传 UI
+	if ai_flying:
+		if actor == null or not actor.alive or actor.vehicle != null or G.state != "playing":
+			recall("链路中断")
+			return
+		life -= dt
+		if life <= 0.0:
+			recall("电池耗尽")
+			return
+		_fly_ai(dt)
+		_update_mesh(dt)
+		_auto_spot(dt)
 		return
 	# 断链黑屏:黑屏走完才把视角交还本体(不再接受操控输入)
 	if blackout_t > 0.0:
@@ -201,6 +258,35 @@ func _process(dt: float) -> void:
 		blackout_t = BLACKOUT
 		AudioSys.dry_fire()
 		G.hud.hint("图传断链:无人机已失联")
+
+
+## AI 自动飞行:在起飞点半径内盘旋,定期随机转向;始终限制在链路范围内。
+func _fly_ai(dt: float) -> void:
+	ai_turn_t -= dt
+	if ai_turn_t <= 0.0:
+		ai_turn_t = Utils.rand(3.0, 6.5)
+		ai_turn_dir = Utils.choice([-1.0, 1.0])
+	yaw_target += ai_turn_dir * 0.55 * dt
+	yaw = lerp_angle(yaw, yaw_target, 1.0 - exp(-YAW_SMOOTH * dt))
+	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
+	var flat := Vector2(pos.x - origin.x, pos.z - origin.z)
+	var want := fwd * SPEED
+	if flat.length() > RADIUS * 0.78:
+		var home := Vector2(origin.x - pos.x, origin.z - pos.z).normalized()
+		want = Vector3(home.x, 0, home.y) * SPEED
+		yaw_target = atan2(-home.x, -home.y)
+	vel = vel.lerp(want, 1.0 - exp(-ACCEL * dt))
+	pos += vel * dt
+	dist_to_origin = Vector2(pos.x - origin.x, pos.z - origin.z).length()
+	var gy: float = G.ground_h.call(pos.x, pos.z) if G.ground_h.is_valid() else 0.0
+	pos.y = clampf(pos.y, gy + 14.0, gy + 40.0)
+	if vel.length() > 0.001:
+		var dirn := vel.normalized()
+		var hit = Utils.raycast_world(pos, dirn, 1.2)
+		if hit != null:
+			pos -= dirn * (1.2 - float(hit["dist"]))
+			vel *= 0.25
+			ai_turn_t = 0.0
 
 
 ## 飞行操控:鼠标转向 + WASD 水平移动 + 空格/Ctrl 升降,150m 圆形电子围栏。
@@ -328,7 +414,7 @@ func _auto_spot(dt: float) -> void:
 			continue
 		b.spotted = maxf(3.0, float(b.spotted))
 		n += 1
-	if n > 0:
+	if n > 0 and not ai_mode:
 		G.hud.hint("无人机侦察:已标记 %d 名敌人" % n)
 
 

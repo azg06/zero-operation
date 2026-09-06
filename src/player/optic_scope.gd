@@ -139,7 +139,12 @@ func _process(dt: float) -> void:
 	# basis,所以 eye_global.normalized() 就是主世界中的视线方向;再乘 main_basis
 	# 会双重旋转,导致镜内画面不是正前方且不随鼠标上下移动。
 	var main_basis: Basis = G.camera.global_transform.basis.orthonormalized()
-	var fwd := eye_global.normalized()
+	# [FIX] 镜内视线 = 玩家主视轴(-main_basis.z)。旧 eye_global.normalized() 是
+	# "世界原点→目镜"的方向向量,只在玩家贴近原点时碰巧近似视线;站位一远
+	# (如城市 (6,1.6,-146))镜内相机就偏向地面 —— 毒刺 CLU"只有半边"、
+	# APC 观瞄"看不清任何东西"的共同根因(实锤:cam_pitch=-0.71 vs main_pitch=0)。
+	# 目镜节点的世界位置仍然只用于屏幕空间取景框投影,不参与视线构建。
+	var fwd: Vector3 = -main_basis.z
 	var up := main_basis.y
 	var z := -fwd
 	var x := up.cross(z)

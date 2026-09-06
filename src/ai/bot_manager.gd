@@ -32,6 +32,9 @@ func reset(per_team := 11, ru_bonus := 1) -> void:
 	enemy_skill_mod = 0.0
 	enemy_respawn_mod = 1.0
 	Bot._noise_log = []  # 换图:清空战场噪音日志,防止 AI 听到上一张图的枪声
+	# [PERF 9/6] 换图清空阵亡检测表(审计 P3-13:旧 bot instance_id key 永久残留,每次换图泄漏)
+	if G.effects != null and G.effects.has_method("death_dust"):
+		G.effects._bot_alive.clear()
 	for b in bots:
 		b.queue_free()
 	bots = []
@@ -155,7 +158,8 @@ func update_bots(dt: float) -> void:
 	if _ai_dbg:
 		_update_ai_debug(dt)
 	# [PERF-AUDIT] --noai 临时禁用 AI 更新(仅性能审计用,测量 AI 占 CPU 比例)
-	if OS.get_cmdline_user_args().has("--noai"):
+	# [PERF 9/6] 开关静态缓存,免每帧新建字符串数组(审计 P1-7)
+	if Utils.FLAG_NOAI:
 		return
 	var _bt0 := 0
 	if _bb_on:
@@ -176,8 +180,9 @@ func update_bots(dt: float) -> void:
 				_set_shadow_recursive(b.mesh, near)
 	for b in bots:
 		if not b.alive:
-			if b.mesh.visible:
-				b.update_bot(dt)  # 死亡动画
+			# [修] 无条件跑死亡动画:旧版 mesh 隐藏时跳过(载具乘员/过场隐形时死亡),
+			# 若死亡期间 mesh 被外部重新点亮会留下"直立/趴姿定格"的不动尸体
+			b.update_bot(dt)
 			b.respawn_t -= dt
 			# 实时 3D 战场部署(征服/突破):玩家死亡观察期间战场持续运转,AI 正常补充
 			var battlefield_live: bool = G.deployment != null and G.deployment.active

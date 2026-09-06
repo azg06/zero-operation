@@ -1,4 +1,4 @@
-﻿class_name MapsData
+class_name MapsData
 ## 地图主题数据(对应 map.js 中的 MAPS)
 
 class MapDef extends RefCounted:
@@ -156,6 +156,10 @@ static func build_maps() -> Dictionary:
 			{ "x": -150.0, "z": 40.0 },
 			{ "x": 160.0, "z": -50.0 },
 			{ "x": 20.0, "z": 235.0 },
+			{ "x": -270.0, "z": -275.0 },
+			{ "x": -245.0, "z": 270.0 },
+			{ "x": 270.0, "z": 190.0 },
+			{ "x": 150.0, "z": -305.0 },
 		],
 		"roads": [
 			[0.0, -240.0, -150.0, 40.0],
@@ -164,25 +168,35 @@ static func build_maps() -> Dictionary:
 			[160.0, -50.0, 0.0, -240.0],
 			[160.0, -50.0, 215.0, 45.0],       # 村庄3 → 城市西缘(接入街道 z=45)
 			[20.0, 235.0, 215.0, 225.0],       # 村庄4 → 城市北缘(接入街道 z=225)
+			[0.0, -240.0, -270.0, -275.0],
+			[-270.0, -275.0, -150.0, 40.0],
+			[-150.0, 40.0, -245.0, 270.0],
+			[-245.0, 270.0, 20.0, 235.0],
+			[20.0, 235.0, 270.0, 190.0],
+			[270.0, 190.0, 160.0, -50.0],
+			[160.0, -50.0, 150.0, -305.0],
+			[150.0, -305.0, 0.0, -240.0],
+			[-270.0, -275.0, -245.0, 270.0],
 		],
 		"loot_points": [],
 		"vehicle_points": [],
 		"drop_zone": Rect2(-200, -370, 400, 740),   # 跳伞航线参考区:地图中线纵向带
 		"zone_bounds": 390.0,                        # 毒圈计算区域 = G.bounds(800m 地图半宽)
 	}
-	# ---- 城市区(东北部密集街区:5 排 × 5-6 栋 + 街道 + 广场;可进入房 5 栋,固定种子可复现) ----
+	# ---- 城市区(东北部高密度街区:8 排 × 6-8 栋 + 横竖街道 + 广场;可进入房 16 栋,固定种子) ----
 	var crng := RandomNumberGenerator.new()
 	crng.seed = 20240808
 	var city_blocks := []
-	var city_streets := [-225.0, -135.0, -45.0, 45.0, 135.0, 225.0, -315.0, 315.0]
-	var city_rows := [-180.0, -90.0, 0.0, 90.0, 180.0]
+	var city_streets := [-360.0, -315.0, -225.0, -135.0, -45.0, 45.0, 135.0, 225.0, 315.0, 360.0]
+	var city_rows := [-315.0, -225.0, -135.0, -45.0, 45.0, 135.0, 225.0, 315.0]
+	var city_avenues := [225.0, 315.0]
 	var ent_city := 0
 	for ri in city_rows.size():
-		var rx := 205.0 + crng.randf_range(0, 10)
+		var rx := 190.0 + crng.randf_range(0, 8)
 		var guard := 0
-		while rx < 345.0 and guard < 40:
+		while rx < 365.0 and guard < 60:
 			guard += 1
-			var ent: bool = crng.randf() < 0.42 and ent_city < 5
+			var ent: bool = crng.randf() < 0.5 and ent_city < 16
 			var bw := 0.0
 			var bd := 0.0
 			var bh := 0.0
@@ -192,81 +206,69 @@ static func build_maps() -> Dictionary:
 				bd = crng.randf_range(6.6, 8.0)
 				bh = 3.3
 			else:
-				bw = crng.randf_range(14.0, 19.0)
-				bd = crng.randf_range(17.0, 24.0)
-				bh = crng.randf_range(8.0, 15.0)
+				bw = crng.randf_range(12.0, 18.0)
+				bd = crng.randf_range(16.0, 23.0)
+				bh = crng.randf_range(10.0, 26.0)
 			var cx := rx + bw / 2.0
 			var cz: float = float(city_rows[ri]) + crng.randf_range(-2.0, 2.0)
 			city_blocks.append({
 				"x": cx, "z": cz, "w": bw, "d": bd, "h": bh, "enter": ent,
 				"street": city_streets[ri],  # 南侧临街(门朝向/物资贴街)
 			})
-			rx += bw + crng.randf_range(4.0, 8.0)
-	# 追加 2 排街区(z=-270/+270,街道 ±315;沿用同一 crng,旧 5 排布局不变;每排固定 1 栋可进入 → 城市可进入 5+2)
-	var extra_rows := [[-270.0, -315.0], [270.0, 315.0]]
-	for nr_i in extra_rows.size():
-		var nz: float = extra_rows[nr_i][0]
-		var nst: float = extra_rows[nr_i][1]
-		var rx2 := 206.0 + (24.0 if nr_i == 1 else 0.0)
-		var guard2 := 0
-		var bi := 0
-		while rx2 < 345.0 and guard2 < 40:
-			guard2 += 1
-			var ent2: bool = (nr_i == 0 and bi == 2) or (nr_i == 1 and bi == 4)
-			var bw2 := 0.0
-			var bd2 := 0.0
-			var bh2 := 0.0
-			if ent2:
-				bw2 = crng.randf_range(8.0, 10.0)
-				bd2 = crng.randf_range(6.6, 8.0)
-				bh2 = 3.3
-			else:
-				bw2 = crng.randf_range(14.0, 19.0)
-				bd2 = crng.randf_range(17.0, 24.0)
-				bh2 = crng.randf_range(8.0, 15.0)
-			city_blocks.append({
-				"x": rx2 + bw2 / 2.0, "z": nz + crng.randf_range(-2.0, 2.0),
-				"w": bw2, "d": bd2, "h": bh2, "enter": ent2, "street": nst,
-			})
-			rx2 += bw2 + crng.randf_range(4.0, 8.0)
-			bi += 1
-	# 沿街填充:新区街道(±315)外侧 4 座小商店(网格外沿,避让路灯/街面道具)
-	for sk in [[-315.0, -1.0], [315.0, 1.0]]:
+			rx += bw + crng.randf_range(3.0, 6.0)
+	# 沿街填充:新区街道(±360)外侧 4 座小商店(网格外沿,避让路灯/街面道具)
+	for sk in [[-360.0, -1.0], [360.0, 1.0]]:
 		for sx4 in [230.0, 300.0]:
 			city_blocks.append({
 				"x": sx4 + crng.randf_range(-3.0, 3.0),
 				"z": sk[0] + sk[1] * 14.0 + crng.randf_range(-2.0, 2.0),
 				"w": crng.randf_range(6.0, 9.0), "d": crng.randf_range(6.0, 9.0),
-				"h": crng.randf_range(4.0, 6.0), "enter": false, "street": sk[0],
+				"h": crng.randf_range(5.0, 9.0), "enter": false, "street": sk[0],
 			})
 	br_valley.extra["city_blocks"] = city_blocks
 	br_valley.extra["city_streets"] = city_streets
-	# ---- 野外农场(西/外围散落;1 栋可进入农舍) ----
+	br_valley.extra["city_avenues"] = city_avenues
+	# ---- 野外农场(西/外围散落;4 栋可进入农舍) ----
 	br_valley.extra["farms"] = [
 		{ "x": -245.0, "z": -150.0, "style": 1 },
 		{ "x": -265.0, "z": 60.0, "style": 0 },
 		{ "x": -225.0, "z": 210.0, "style": 1 },
 		{ "x": 250.0, "z": -265.0, "style": 0, "enter": true },
 		{ "x": 170.0, "z": 265.0, "style": 1 },
+		{ "x": -320.0, "z": -310.0, "style": 0, "enter": true },
+		{ "x": -330.0, "z": 320.0, "style": 1, "enter": true },
+		{ "x": 330.0, "z": -330.0, "style": 0, "enter": true },
+		{ "x": 320.0, "z": 330.0, "style": 1 },
+		{ "x": -30.0, "z": -350.0, "style": 0 },
 	]
-	# 物资点:每村 13 个 + 道路沿线 8 个 = 60 个(固定种子,可复现)
+	# 物资点:每村 16 个 + 道路沿线 14 个 + 野外网格 24 个(固定种子,可复现;地图不再空旷)
 	var br_rng := RandomNumberGenerator.new()
 	br_rng.seed = 20240807
 	for v in br_valley.extra["villages"]:
-		for k in 13:
+		for k in 16:
 			br_valley.extra["loot_points"].append(Vector3(
 				v["x"] + br_rng.randf_range(-26, 26), 0.0,
 				v["z"] + br_rng.randf_range(-26, 26)))
-	for k in 8:
+	for k in 14:
 		br_valley.extra["loot_points"].append(Vector3(
 			br_rng.randf_range(-180, 180), 0.0,
 			br_rng.randf_range(-340, 340)))
+	# 野外网格物资:把物资铺到远离聚落的空地(网格 + 抖动,保证全图可搜)
+	for gy in 4:
+		for gx in 4:
+			br_valley.extra["loot_points"].append(Vector3(
+				-280.0 + gx * 180.0 + br_rng.randf_range(-30, 30), 0.0,
+				-280.0 + gy * 180.0 + br_rng.randf_range(-30, 30)))
 	# 村庄新楼配套物资点(每村 2 个,聚落外环 28-34m,避开河道/城市区)
 	var v_extra := [
 		[28.0, 0.0], [-28.0, 0.0],       # 村1(0,-240) 东西侧
 		[0.0, 30.0], [0.0, -30.0],       # 村2(-150,40) 南北侧
 		[-34.0, 0.0], [-26.0, 14.0],     # 村3(160,-50) 西/西南(避城市)
 		[30.0, 0.0], [-30.0, 0.0],       # 村4(20,235) 东西侧
+		[0.0, 34.0], [0.0, -34.0],       # 村5(-270,-275) 南北侧
+		[-34.0, 0.0], [34.0, 0.0],       # 村6(-245,270) 东西侧
+		[0.0, -32.0], [26.0, 18.0],      # 村7(270,190) 南/西南(避城市)
+		[-30.0, 0.0], [30.0, 0.0],       # 村8(150,-305) 东西侧
 	]
 	for vi2 in br_valley.extra["villages"].size():
 		var vv2: Dictionary = br_valley.extra["villages"][vi2]
@@ -274,29 +276,31 @@ static func build_maps() -> Dictionary:
 			br_valley.extra["loot_points"].append(Vector3(
 				vv2["x"] + v_extra[vi2 * 2 + k2][0], 0.0,
 				vv2["z"] + v_extra[vi2 * 2 + k2][1]))
-	# 城市物资点:约 2/3 栋临街 1 个 + 可进入房内 1 个 + 广场 4 个(贴合街区布局)
+	# 城市物资点:约 85% 栋临街 1 个 + 可进入房内 2 个 + 广场 8 个(贴合街区布局)
 	var cr2 := RandomNumberGenerator.new()
 	cr2.seed = 20240809
 	var city_loot := 0
 	for blk in city_blocks:
-		if cr2.randf() < 0.72:
+		if cr2.randf() < 0.85:
 			br_valley.extra["loot_points"].append(Vector3(
 				blk["x"] + cr2.randf_range(-5, 5), 0.0,
 				blk["street"] + 5.0))
 			city_loot += 1
 		if blk["enter"]:
 			br_valley.extra["loot_points"].append(Vector3(blk["x"], 0.0, blk["z"]))
-			city_loot += 1
-	for k in 4:
+			br_valley.extra["loot_points"].append(Vector3(blk["x"] + 2.0, 0.0, blk["z"] + 2.0))
+			city_loot += 2
+	for k in 8:
 		br_valley.extra["loot_points"].append(Vector3(275.0 + cr2.randf_range(-8, 8), 0.0, 45.0 + cr2.randf_range(-6, 6)))
-	# 农场物资点:每农场 2 个(谷仓/农舍旁 + 草垛旁)
+	# 农场物资点:每农场 3 个(谷仓/农舍旁 + 草垛旁 + 场院入口)
 	for f in br_valley.extra["farms"]:
 		br_valley.extra["loot_points"].append(Vector3(f["x"] + 4.0, 0.0, f["z"]))
 		br_valley.extra["loot_points"].append(Vector3(f["x"] - 6.0, 0.0, f["z"] - 5.0))
+		br_valley.extra["loot_points"].append(Vector3(f["x"] + 2.0, 0.0, f["z"] + 8.0))
 	# 城市接驳道路口 2 个
 	br_valley.extra["loot_points"].append(Vector3(190.0, 0.0, 40.0))
 	br_valley.extra["loot_points"].append(Vector3(190.0, 0.0, 220.0))
-	print("[MAPS] br_valley 城市区: 街区=", city_blocks.size(), " 可进入房=", ent_city + 2, " 城市物资点=", city_loot,
+	print("[MAPS] br_valley 城市区: 街区=", city_blocks.size(), " 可进入房=", ent_city + 4, " 城市物资点=", city_loot,
 		" 物资总数=", br_valley.extra["loot_points"].size())
 	# 载具点:每村外围 2 个 + 道路旁 2 个 + 城市外围 4 个 = 14 个
 	for v in br_valley.extra["villages"]:

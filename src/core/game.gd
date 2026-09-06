@@ -67,7 +67,9 @@ func setup_map(map_id: String) -> void:
 	var dep_was_active: bool = G.deployment != null and G.deployment.active
 	if dep_was_active:
 		G.deployment._setup_view_cleanup(false)
+	var _t0 := Time.get_ticks_msec()
 	WorldBuilder.build_world(G.world_root, map_id)
+	print("[PERF] build_world(%s) 耗时 %d ms" % [map_id, Time.get_ticks_msec() - _t0])
 	GraphicsQuality.reapply()  # 环境被重建,重挂画质预设(SSIL/SSR/glow 等)
 	if dep_was_active:
 		G.deployment._setup_view_cleanup(true)
@@ -77,7 +79,10 @@ func setup_map(map_id: String) -> void:
 	# 载具(战役模式纯净:不生成任何可驾驶载具;空中单位见下方征服分支)
 	if G.mode != "campaign":
 		for s in G.vehicle_spawns:
-			G.vehicles.append(Vehicle.new(s["x"], s["z"], s["yaw"], s.get("type", "jeep")))
+			var ptype: String = str(s.get("type", "jeep"))
+			var vdef: Dictionary = Vehicle.TYPES().get(ptype, Vehicle.TYPES()["jeep"])
+			var spawn_p: Vector3 = Vehicle.safe_spawn_pos(Vector3(float(s["x"]), 0.0, float(s["z"])), float(vdef["radius"]))
+			G.vehicles.append(Vehicle.new(spawn_p.x, spawn_p.z, float(s["yaw"]), ptype))
 	for v in G.vehicles:
 		G.main.add_child(v)
 	# 清理旧部署物(掩体需连带回收碰撞体,否则新地图会残留隐形墙)
@@ -1192,13 +1197,18 @@ func _update_deployables(dt: float) -> void:
 		if d["tick"] <= 0:
 			d["tick"] = 1.0
 			var is_med: bool = d["kind"] == "medpack"
-			# 友军 AI:仅医疗包恢复生命(弹药包对 AI 无治疗效果)
+			# 友军 AI:医疗包恢复生命;弹药包为附近 AI 补充当前弹匣(两者功能分离)
 			if is_med:
 				for b in G.bots:
 					if b.alive and b.team == d["team"] and b.pos.distance_to(d["pos"]) < 6.5:
 						b.health = minf(100, b.health + 14)
 						if b.hb_t > 0:
 							b.update_health_bar()
+			else:
+				for b in G.bots:
+					if b.alive and b.team == d["team"] and b.pos.distance_to(d["pos"]) < 6.5 \
+							and b.ammo < b.def.mag:
+						b.ammo = mini(b.def.mag, b.ammo + maxi(1, int(ceil(float(b.def.mag) * 0.22))))
 			# 玩家:医疗包只治疗 / 弹药包只补弹(两种功能不合一)
 			var p = G.player
 			if p != null and p.alive and p.team == d["team"] and p.pos.distance_to(d["pos"]) < 6.5:

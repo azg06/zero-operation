@@ -8,8 +8,13 @@ static func _photo(name: String) -> Image:
 	# [FIX 8/9] 不加载 4K HD 贴图:get_image() 需把大纹理从 VRAM 读回,
 	# 在导出版(exe,贴图被重压缩)上触发驱动级访问冲突(0xC0000005);
 	# CPU 合成路径固定用旧贴图,HD 4K 贴图仅走 GPU 端材质路径(_std_tex/layers)
+	# [PERF 9/6] 贴图管线已改 VRAM 压缩(compress/mode=2),get_image() 返回 BPTC
+	# 压缩格式 Image——必须先 decompress 再转 RGBA8,否则 convert/blit_rect 静默失败
+	# (症状:地面照片平铺整块缺失)
 	var t: Texture2D = load("res://textures/" + name + "_diff.jpg")
 	var img := t.get_image()
+	if img.is_compressed():
+		img.decompress()
 	if img.get_format() != Image.FORMAT_RGBA8:
 		img.convert(Image.FORMAT_RGBA8)
 	return img
@@ -224,26 +229,53 @@ static func make_bt_ground(T) -> ImageTexture:
 	return ImgDraw.to_texture(img)
 
 
-## 建筑立面:混凝土照片底 + 程序化窗户
-static func facade_texture(base: String, lit: float, floors := 8) -> ImageTexture:
-	var FS2 := 256
+## 建筑立面 v2:512px 无缝平铺(8 列 × 12 层),窗框/窗台/壁柱/面板明暗;
+## 配合三平面映射(材质侧 uv1_scale≈1/36),所有建筑窗户物理密度一致不拉伸
+static func facade_texture(base: String, lit: float, floors := 12) -> ImageTexture:
+	var FS2 := 512
+	var cols := 8
 	var img := Image.create(FS2, FS2, false, Image.FORMAT_RGBA8)
 	img.fill(_html(base))
 	var photo := _photo("concrete_floor_02")
-	ImgDraw.tile_draw(img, photo, 2)
-	ImgDraw.overlay(img, Color(_html(base), 0.55))
-	# 窗户
-	var cols := 6
-	var ww := float(FS2) / cols
-	var wh := float(FS2) / floors
+	ImgDraw.tile_draw(img, photo, 4)
+	ImgDraw.overlay(img, Color(_html(base), 0.45))
+	var cw := float(FS2) / cols
+	var ch := float(FS2) / floors
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(base) + int(lit * 1000.0)
+	# 面板明暗(每格轻微差异,打破平铺感)
 	for x in cols:
 		for y in floors:
-			var is_lit := randf() < lit
-			var col := _html("#c8b070") if is_lit else (_html("#141a22") if randf() < 0.5 else _html("#1e2630"))
-			var wx: float = x * ww + ww * 0.22
-			var wy: float = y * wh + wh * 0.22
-			ImgDraw.alpha_rect(img, wx, wy, ww * 0.56, wh * 0.5, col)
-			ImgDraw.alpha_rect(img, wx, y * wh + wh * 0.72, ww * 0.56, 3, Color(0, 0, 0, 0.35))
+			var pn := rng.randf_range(-0.05, 0.05)
+			ImgDraw.alpha_rect(img, x * cw, y * ch, cw, ch,
+				Color(pn, pn, pn, 0.35))
+	# 壁柱(竖向分隔条)+ 层间线
+	for x in cols:
+		ImgDraw.alpha_rect(img, x * cw - 2, 0, 4, FS2, Color(0, 0, 0, 0.22))
+	for y in floors:
+		ImgDraw.alpha_rect(img, 0, y * ch - 1.5, FS2, 3, Color(0, 0, 0, 0.28))
+		ImgDraw.alpha_rect(img, 0, y * ch + ch - 3.0, FS2, 3, Color(1, 1, 1, 0.10))
+	# 窗户(内框 + 玻璃渐变 + 窗台)
+	for x in cols:
+		for y in floors:
+			var is_lit: bool = rng.randf() < lit
+			var wx: float = x * cw + cw * 0.24
+			var wy: float = y * ch + ch * 0.20
+			var ww2 := cw * 0.52
+			var wh2 := ch * 0.52
+			# 外框
+			ImgDraw.alpha_rect(img, wx - 3, wy - 3, ww2 + 6, wh2 + 6, Color(0.10, 0.11, 0.12, 0.9))
+			# 玻璃:点亮=暖黄 / 未亮=冷灰蓝带渐变
+			var glass := Color(0.62, 0.66, 0.55, 1.0) if is_lit else Color(0.24, 0.30, 0.38, 1.0)
+			ImgDraw.alpha_rect(img, wx, wy, ww2, wh2, glass)
+			if not is_lit:
+				ImgDraw.alpha_rect(img, wx, wy + wh2 * 0.45, ww2, wh2 * 0.55,
+					Color(0.16, 0.20, 0.26, 0.8))
+			else:
+				ImgDraw.alpha_rect(img, wx + ww2 * 0.15, wy + wh2 * 0.2, ww2 * 0.35, wh2 * 0.3,
+					Color(1.0, 0.95, 0.75, 0.7))
+			# 窗台
+			ImgDraw.alpha_rect(img, wx - 4, wy + wh2 + 3, ww2 + 8, 4, Color(0.85, 0.85, 0.82, 0.5))
 	return ImgDraw.to_texture(img)
 
 
@@ -300,7 +332,7 @@ static func _layer_cfg(theme: String) -> Dictionary:
 			"wa": 0.9, "wb": 0.55, "wc": 0.12, "uv": 0.13,
 			"ta": Color(0.99, 0.95, 0.88), "tb": Color(1.03, 0.98, 0.88), "tc": Color(0.96, 0.95, 0.93) },
 		"snow": { "a": "rock_04", "b": "snow_02", "c": "rough_concrete",
-			"wa": 0.8, "wb": 0.55, "wc": 0.3, "uv": 0.15, "hs": 10.0,
+			"wa": 0.42, "wb": 0.95, "wc": 0.22, "uv": 0.11, "hs": 10.0,
 			"ta": Color(0.874, 0.883, 0.902), "tb": Color(0.975, 0.975, 0.994), "tc": Color(0.846, 0.856, 0.883) },
 		"bt_jungle": { "a": "rock_04", "b": "sand_01", "c": "asphalt_02",
 			"wa": 0.7, "wb": 0.6, "wc": 0.2, "uv": 0.16, "hs": 5.0,
@@ -309,7 +341,7 @@ static func _layer_cfg(theme: String) -> Dictionary:
 			"wa": 0.5, "wb": 0.55, "wc": 0.6, "uv": 0.16,
 			"ta": Color(0.93, 0.92, 0.9), "tb": Color(0.98, 0.95, 0.85), "tc": Color(0.8, 0.82, 0.85) },
 		"bt_peak": { "a": "rock_04", "b": "snow_02", "c": "rough_concrete",
-			"wa": 0.9, "wb": 0.55, "wc": 0.45, "uv": 0.14,
+			"wa": 0.48, "wb": 0.9, "wc": 0.35, "uv": 0.11,
 			"ta": Color(0.93, 0.94, 0.96), "tb": Color(1.07, 1.07, 1.09), "tc": Color(0.88, 0.89, 0.92) },
 		"br_valley": { "a": "rock_04", "b": "sand_01", "c": "rough_concrete",
 			"wa": 0.5, "wb": 0.55, "wc": 0.15, "uv": 0.1,

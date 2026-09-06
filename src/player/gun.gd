@@ -38,9 +38,29 @@ var trigger_held := false
 var fire_mode := 0              # 0=全自动 1=半自动(B 键切换;仅步枪可切换)
 var equipped := false
 var bolt_t := 0.0               # 拉栓动画(AWM/M24)
-var pump_t := 0.0               # 泵动动画(M1014)
+var pump_t := 0.0               # 泵动动画(泵动霰弹枪)
+var semi_t := 0.0               # 半自动霰弹枪自动枪机循环
 var wall_amt := 0.0
 var grip_amt := 0.0
+# === [9/10] 左轮手枪状态(弹巢逐膛管理 + 击锤/换膛动画) ===
+var revolver := false
+var cylinder_t := 0.0            # 击发后弹巢旋转计时
+var hammer_t := 0.0              # 击锤落下/复位计时
+# === [9/10] 武器检视(Inspect) ===
+var inspect_active := false
+var inspect_t := 0.0
+var inspect_cam_pitch := 0.0
+var inspect_cam_yaw := 0.0
+var inspect_cam_roll := 0.0
+var _inspect_was_reloading := false  # [保留] 检视中断恢复逻辑的预留位
+var _inspect_pump_snapshot := 0.0
+var _inspect_bolt_snapshot := 0.0
+var _inspect_cylinder_snapshot := 0.0
+var _inspect_hammer_snapshot := 0.0
+var _pump_snd_back := false
+var _pump_snd_fwd := false
+var _semi_snd_back := false
+var _semi_snd_fwd := false
 var _semi_ready := true
 var _bolt_snd := false
 var shot_streak := 0              # 连射计数(后坐力/散布递增)
@@ -65,12 +85,26 @@ var _mag_x0 := 0.0
 var _mag_anim := "down"
 var _bolt: Node3D = null            # 拉机柄/枪机(换弹上膛驱动)
 var _bolt_base := Vector3.ZERO
-var _pump: MeshInstance3D = null
+var _pump: Node3D = null
 var _pump_base := Vector3.ZERO
 var _slide: MeshInstance3D = null
 var _slide_base_z := 0.0
 var _rocket: Node3D = null              # 火箭筒膛内弹(换弹时隐藏→装入)
 var _bullet_type := 0                    # 0=rifle 1=sniper 2=shotgun 3=pistol
+# [9/10] 泵动/左轮专用动画件
+var _eject_shell: MeshInstance3D = null
+var _eject_shell_base := Vector3.ZERO
+var _cylinder: Node3D = null
+var _crane: Node3D = null
+var _hammer: Node3D = null
+var _chamber_shells: Array = []
+var _chamber_loaded: Array = []
+var _chamber_index := 0
+var _cyl_from := 0.0
+var _cyl_to := 0.0
+var _hammer_from := Vector3.ZERO
+var _hammer_to := Vector3.ZERO
+var _load_port := Vector3(0, -0.1, -0.12)
 
 var _right_hand: Node3D = null
 var _left_hand: Node3D = null
@@ -84,6 +118,11 @@ var _ads_pos := Vector3.ZERO
 var _right_hand_base := Vector3.ZERO
 var _right_hand_rot0 := Vector3.ZERO
 var _left_hand_rot0 := Vector3.ZERO
+# [9/10] 手枪双手握姿:腰射双手包住握把,ADS 左手移到握把正下方托举
+var _pistol_hip_l := Vector3.ZERO
+var _pistol_ads_l := Vector3.ZERO
+var _pistol_hip_rot := Vector3(0.1, 0.0, PI - 0.15)
+var _pistol_ads_rot := Vector3(0.28, 0.12, PI - 0.28)
 var _holster_tw: Tween = null
 var _holster_ready := false       # 首次 equip 后才启用平滑收枪(避免初始多枪同屏)
 # === Procedural Motion 每把枪独立手感(确定性,非随机) ===
@@ -136,13 +175,36 @@ func _init(weapon_id: String, p) -> void:
 	if group.has_meta("bolt"):
 		_bolt = group.get_meta("bolt")
 		_bolt_base = _bolt.position
+	if group.has_meta("eject_shell"):
+		_eject_shell = group.get_meta("eject_shell")
+		_eject_shell_base = _eject_shell.position
+	if group.has_meta("load_port"):
+		_load_port = group.get_meta("load_port").position if group.get_meta("load_port") is Node3D else _load_port
 	_bullet_type = 0
 	if weapon_id in ["awm", "m24", "svd"]:
 		_bullet_type = 1
-	elif weapon_id in ["m1014", "spas12"]:
+	elif weapon_id in ["m1014", "spas12", "rem870", "m590", "win1897"]:
 		_bullet_type = 2
-	elif weapon_id in ["g17", "m1911", "p226", "deagle", "m93r"]:
+	elif weapon_id in ["g17", "m1911", "p226", "deagle", "m93r", "python", "sw686", "sw500"]:
 		_bullet_type = 3
+	revolver = def.get("revolver") == true
+	if revolver:
+		_crane = group.get_meta("crane", null)
+		_cylinder = group.get_meta("cylinder", null)
+		_hammer = group.get_meta("hammer", null)
+		if group.has_meta("chamber_shells"):
+			_chamber_shells = group.get_meta("chamber_shells")
+		_chamber_loaded.clear()
+		for i in mag_cap:
+			_chamber_loaded.append(i < ammo)
+		_chamber_index = 0
+		if _cylinder != null:
+			_cyl_from = _cylinder.rotation.z
+			_cyl_to = _cylinder.rotation.z
+		if _hammer != null:
+			_hammer_from = _hammer.rotation
+			_hammer_to = _hammer.rotation
+		_sync_revolver_chambers()
 	_init_motion_profile(weapon_id)
 	_right_hand = group.get_meta("right_hand", null)
 	_left_hand = group.get_meta("left_hand", null)
@@ -154,6 +216,8 @@ func _init(weapon_id: String, p) -> void:
 		_hand_l1 = _mag.position + Vector3(0, 0.04, 0)
 	elif def.projectile:
 		_hand_l1 = Vector3(0, -0.05, 0.14)
+	elif def.pellets > 1:
+		_hand_l1 = _load_port
 	else:
 		_hand_l1 = Vector3(0, -0.1, -0.12)
 	_hip_pos = def.view_hip if def.view_hip != null else HIP_POS
@@ -164,6 +228,7 @@ func _init(weapon_id: String, p) -> void:
 	if _right_hand != null:
 		_right_hand_base = _right_hand.position
 		_right_hand_rot0 = _right_hand.rotation
+	_setup_pistol_hand_poses()
 	# 模块化换弹控制器(全部阶段/取消/枪机动作由 ReloadProfiles 配置驱动)
 	reload_ctl = WeaponReloadController.new(self)
 
@@ -224,6 +289,20 @@ func _apply_mods() -> void:
 func _init_motion_profile(weapon_id: String) -> void:
 	var kind := String(def.kind)
 	motion_weight = float(FirstPersonMotionSystem.KIND_WEIGHT.get(kind, 1.0))
+	# [9/10] 同枪族内按实际结构与口径区分重量:重管泵动更沉,长管左轮更稳
+	match weapon_id:
+		"rem870":
+			motion_weight = 1.06
+		"m590":
+			motion_weight = 1.14
+		"win1897":
+			motion_weight = 1.0
+		"python":
+			motion_weight = 0.8
+		"sw686":
+			motion_weight = 0.76
+		"sw500":
+			motion_weight = 1.02
 	# 短枪频率略高、长枪/机枪更慢;幅度随重量略有变化,但保持 ADS 可用
 	motion_breath_freq_mult = 1.08 if kind in ["pistol", "smg"] else (0.88 if kind in ["lmg", "sniper", "rpg"] else 1.0)
 	motion_breath_amp_mult = 0.88 if kind in ["pistol", "smg"] else (1.14 if kind in ["lmg", "sniper", "rpg"] else 1.0)
@@ -253,6 +332,10 @@ func equip() -> void:
 	kick_y = 0
 	bolt_t = 0
 	pump_t = 0
+	semi_t = 0
+	cylinder_t = 0
+	hammer_t = 0
+	_stop_inspect()
 	reload_pose = Vector3.ZERO
 	reload_rot = Vector3.ZERO
 	# 新枪接管程序化运动弹簧:不同重量从零开始建立,不继承旧枪残量
@@ -272,10 +355,12 @@ func holster(instant := false) -> void:
 		_holster_tw = null
 		if reload_ctl != null:
 			reload_ctl.on_holster()
+		_stop_inspect()
 		group.visible = false
 		return
 	if reload_ctl != null:
 		reload_ctl.on_holster()
+	_stop_inspect()
 	# 尚未真正上手的枪(初始化/换装时批量 holster)直接隐藏,避免同屏重叠
 	if not _holster_ready:
 		group.visible = false
@@ -331,6 +416,12 @@ func current_spread() -> float:
 
 ## B 键切换射击模式:全自动 ⇄ 半自动(仅步枪;半自动=按一下打一发)
 func toggle_fire_mode() -> void:
+	# 左轮换弹初期按 B:在「快速装弹器」与「逐发装填」之间切换(弹巢未甩出前有效)
+	if revolver and reload_ctl != null and reload_ctl.active and reload_ctl.toggle_revolver_mode():
+		AudioSys.ui()
+		if G.hud != null and G.hud.has_method("hint"):
+			G.hud.hint("左轮装填方式: " + ("快速装弹器" if reload_ctl.revolver_quick else "逐发装填"))
+		return
 	if def.kind != "rifle":
 		AudioSys.dry_fire()
 		return
@@ -350,6 +441,10 @@ func try_fire() -> void:
 	if draw_t < 0.6 or fire_timer > 0:
 		return
 	if player.sprint_amount > 0.5:
+		return
+	# 检视中按开火:先自然取消检视,下一次开火立即生效(避免边转枪边射)
+	if inspect_active:
+		_stop_inspect()
 		return
 	# ADS 状态下换弹:即使 reloading 已置 false、收尾动画仍在播放,也不允许提前击发,
 	# 避免“按住右键时换弹动作还没播完就开枪”。
@@ -377,7 +472,13 @@ func try_fire() -> void:
 		fire_timer = 0.28
 		reload()
 		return
+	# [9/10] 防御:任何外部改弹导致的膛位漂移,在击发前按当前待击发膛重建弹巢
+	if revolver and (_chamber_loaded.is_empty() or _chamber_index >= _chamber_loaded.size() or _chamber_loaded[_chamber_index] != true):
+		_normalize_revolver_chambers()
 	ammo -= 1
+	# [9/10] 左轮:击发的是当前膛,弹巢立即换到下一膛(实际膛位与 HUD 弹药同步)
+	if revolver:
+		_fire_revolver_chamber()
 	fire_timer = 60.0 / def.rpm
 	var p = player
 
@@ -463,8 +564,11 @@ func try_fire() -> void:
 	if id in ["awm", "m24", "m40", "l115", "sv98", "m2010"]:
 		bolt_t = 0.0001
 		_bolt_snd = false
-	if _pump != null:
-		pump_t = 0.0001
+	if def.pellets > 1:
+		if _pump != null and def.get("pump_action") == true:
+			_start_pump_cycle()
+		elif _bolt != null:
+			_start_semi_auto_cycle()
 	if ammo == 0:
 		reload()
 
@@ -492,9 +596,11 @@ func _drop_mag() -> void:
 func reload() -> void:
 	if reload_ctl == null:
 		return
+	if inspect_active:
+		_stop_inspect()
 	if reloading or ammo >= mag_cap or reserve <= 0:
 		return
-	# 普通换弹 vs 空仓换弹、逐发装填与枪机操作全部交给模块化控制器。
+	# 普通换弹 / 逐发装填 / 左轮快速与逐发装填全部交给模块化控制器。
 	reload_ctl.start()
 
 
@@ -523,7 +629,7 @@ func update(dt: float) -> void:
 		_semi_ready = false
 
 	# ADS 插值(指数缓动:起手快、落点稳,放大倍率过渡顺滑)
-	var ads_target := 1.0 if (ads_held and can_ads()) else 0.0
+	var ads_target := 1.0 if (ads_held and can_ads() and not inspect_active) else 0.0
 	if ads_target != ads_amount:
 		ads_amount = Utils.damp(ads_amount, ads_target, 2.6 / maxf(def.ads_time, 0.05), dt)
 
@@ -579,6 +685,8 @@ func update(dt: float) -> void:
 			reload_t = reload_ctl.time
 		g.position += reload_pose
 		g.rotation += reload_rot
+	# 手枪:腰射双手包握把,ADS 左手平滑移到握把正下方托举
+	_update_pistol_support(dt)
 	# === 枪械自然晃动(走路 Bob / 鼠标惯性 Sway / 呼吸) ===
 	# ADS 时枪身必须稳定:Bob/Sway/呼吸在满镜时收敛到 0,只保留开火后坐与换弹动画。
 	var speed := Vector2(p.vel.x, p.vel.z).length()
@@ -600,9 +708,6 @@ func update(dt: float) -> void:
 	g.position.y += sin(tb * 1.55) * 0.0013 * breath_k * br
 	g.position.x += sin(tb * 0.87 + 1.3) * 0.0010 * breath_k * br
 	g.rotation.z += sin(tb * 0.7) * 0.0005 * breath_k * br
-	# 臂筒:手腕 → 屏外肘锚点连续定向(修复断臂)
-	_point_arm(_left_arm, _left_hand.position, ELBOW_L)
-	_point_arm(_right_arm, _right_hand.position, ELBOW_R)
 	# === AWM/M24 拉栓动画 ===
 	if bolt_t > 0:
 		bolt_t += dt
@@ -628,26 +733,368 @@ func update(dt: float) -> void:
 			else:
 				_bolt.position.y = _bolt_base.y + 0.025 - (bt - 0.7) / 0.3 * 0.025
 			g.rotation.z += sin(bt * PI) * 0.05
-	# === 霰弹枪泵动动画(沿枪管轴) ===
-	if pump_t > 0:
-		pump_t += dt
-		var pt := pump_t / 0.45
-		if pt >= 1:
-			pump_t = 0
-			if _pump != null:
-				_pump.position = _pump_base
-		elif _pump != null:
-			# 泵动护木沿枪管轴 z 前后运动:护木(cyl z 轴长 0.12)位于枪身前段 z=-0.34,枪口朝 -Z;
-			# 负 sin = 先向 -Z(朝枪口)前推再复位,即装填完毕"推弹入膛"的收尾微动(完整后拉上膛相位含在 0.45s 泵动内),
-			# 幅度 0.06 ≈ 护木长度一半,行程醒目
-			_pump.position.z = _pump_base.z - sin(pt * PI) * 0.06
-			g.rotation.x += sin(pt * PI) * 0.06
+	# === 霰弹枪泵动动画(沿枪管轴,真实后拉 → 前推 → 闭锁) ===
+	_update_pump(dt)
+	# === 半自动霰弹枪枪机自动循环(M1014 / SPAS-12) ===
+	_update_semi_auto(dt)
+	# === 左轮击锤/换膛动画(与开火/换弹状态互斥,由计时器自然收尾) ===
+	_update_revolver_anim(dt)
+	# === 武器检视(状态驱动,和换弹/开镜不重叠) ===
+	_update_inspect(dt)
+	# 臂筒:所有动画件(换弹/泵动/枪栓/左轮/检视)更新完毕后,再让手腕 → 肘锚点连续定向,
+	# 保证手部与泵体/枪机严格同帧同步,不出现手臂滞后或断臂。
+	_align_revolver_reload_wrist()
+	_point_arm(_left_arm, _left_hand.position, ELBOW_L)
+	_point_arm(_right_arm, _right_hand.position, ELBOW_R)
 	# 高倍率狙击镜 PIP:ADS 时隐藏镜筒实体/黑目镜,只留高透目镜、细分划与细镜口圈;
 	# 镜外完全透明(正常视野)。非 ADS 时恢复全黑镜筒,避免透明枪筒观感。
 	_update_pip_scope_visuals(g, ads_amount)
 	# === 光学瞄具 3D 分划:普通瞄具开镜时隐藏,由 2D HUD 稳定准星接管(防贴目放大/模糊/双准星) ===
 	if ret_style() != "":
 		_set_ret_visible(g, ads_amount < 0.5)
+
+
+## [9/10] 左轮击发:当前膛清空,弹巢旋转到下一膛,击锤落下/复位。
+func _fire_revolver_chamber() -> void:
+	if _chamber_loaded.is_empty():
+		return
+	_chamber_loaded[_chamber_index] = false
+	_chamber_index = (_chamber_index + 1) % _chamber_loaded.size()
+	_sync_revolver_chambers()
+	if _cylinder != null:
+		_cyl_from = _cylinder.rotation.z
+		_cyl_to = _cyl_from + TAU / float(_chamber_loaded.size())
+		cylinder_t = 0.0001
+	if _hammer != null:
+		hammer_t = 0.0001
+	AudioSys.weapon_mech("revolver_hammer_" + id, 1.0)
+
+
+## [9/10] 把弹巢逐膛可见性与实际膛位同步(换弹控制器与击发都调用)。
+func _sync_revolver_chambers() -> void:
+	for i in _chamber_shells.size():
+		if i < _chamber_shells.size() and _chamber_shells[i] is Node3D:
+			(_chamber_shells[i] as Node3D).visible = i < _chamber_loaded.size() and _chamber_loaded[i] == true
+
+
+## [9/10] 若外部逻辑(测试/拾取/存档)只改了 ammo,按数量重建弹巢状态,保证逐膛可见性不漂移。
+func _normalize_revolver_chambers() -> void:
+	if not revolver:
+		return
+	var loaded_count := 0
+	for v in _chamber_loaded:
+		if v == true:
+			loaded_count += 1
+	if loaded_count == ammo and _chamber_loaded.size() == mag_cap:
+		return
+	_chamber_loaded.clear()
+	for i in mag_cap:
+		_chamber_loaded.append(false)
+	# 从当前待击发膛位开始向后填满实弹:部分装填后下一枪一定打得到子弹
+	for i in ammo:
+		_chamber_loaded[( _chamber_index + i) % mag_cap] = true
+	_sync_revolver_chambers()
+
+
+## [9/10] 左轮击锤 + 换膛动画:击锤快速落下→0.1s 后复位;弹巢 0.16s 转一格。
+func _update_revolver_anim(dt: float) -> void:
+	if cylinder_t > 0.0:
+		cylinder_t += dt
+		var k := clampf(cylinder_t / 0.16, 0.0, 1.0)
+		var e := k * k * (3.0 - 2.0 * k)
+		if _cylinder != null:
+			_cylinder.rotation.z = lerpf(_cyl_from, _cyl_to, e)
+		if k >= 1.0:
+			cylinder_t = 0.0
+			if _cylinder != null:
+				_cylinder.rotation.z = _cyl_to
+			AudioSys.weapon_mech("revolver_rotate_" + id, 1.0)
+	if hammer_t > 0.0:
+		hammer_t += dt
+		var k := clampf(hammer_t / 0.22, 0.0, 1.0)
+		if _hammer != null:
+			var drop := sin(clampf(k * 1.6, 0.0, 1.0) * PI)
+			_hammer.rotation.x = -0.55 * drop if k < 0.62 else lerpf(-0.55 * drop, 0.0, (k - 0.62) / 0.38)
+			_hammer.rotation.y = 0.0
+			_hammer.rotation.z = 0.0
+		if k >= 1.0:
+			hammer_t = 0.0
+			if _hammer != null:
+				_hammer.rotation = Vector3.ZERO
+
+
+## [9/10] 泵动循环:后拉(+Z) → 前推(-Z) → 闭锁,抛壳与机械音严格按相位触发。
+func _start_pump_cycle() -> void:
+	if _pump == null:
+		return
+	pump_t = 0.0001
+	_pump_snd_back = false
+	_pump_snd_fwd = false
+	if _eject_shell != null:
+		_eject_shell.visible = false
+		_eject_shell.position = _eject_shell_base
+
+
+func _update_pump(dt: float) -> void:
+	if pump_t <= 0.0:
+		return
+	pump_t += dt
+	var dur: float = 0.45
+	var stroke: float = 0.065
+	if def.get("pump_dur") != null:
+		dur = float(def.get("pump_dur"))
+	if def.get("pump_stroke") != null:
+		stroke = float(def.get("pump_stroke"))
+	var pt := clampf(pump_t / maxf(dur, 0.1), 0.0, 1.0)
+	# 0.00~0.16 枪机先行后坐;0.16~0.50 护木后拉;0.50~0.84 前推;0.84~1 闭锁回正
+	var pull := 0.0
+	var push := 0.0
+	if pt < 0.16:
+		pull = pt / 0.16 * 0.25
+	elif pt < 0.5:
+		pull = 0.25 + (pt - 0.16) / 0.34 * 0.75
+	else:
+		pull = 1.0
+	if pt >= 0.5:
+		push = clampf((pt - 0.5) / 0.34, 0.0, 1.0)
+	var offset := stroke * (pull - push)
+	if _pump != null:
+		_pump.position = _pump_base + Vector3(0.0, 0.0, offset)
+	# 枪机连杆与护木严格同步;抛壳在拉到最末时从抛壳窗飞出
+	if _bolt != null:
+		_bolt.position = _bolt_base + Vector3(0.0, 0.0, offset * 0.82)
+	if _eject_shell != null:
+		if pt >= 0.45 and pt < 0.62:
+			_eject_shell.visible = true
+			var e := clampf((pt - 0.45) / 0.17, 0.0, 1.0)
+			_eject_shell.position = _eject_shell_base + Vector3(0.0, e * 0.055, e * 0.11)
+			_eject_shell.rotation.x = e * 5.5
+		elif pt >= 0.62:
+			_eject_shell.visible = false
+	# 轻微枪身晃动:后拉抬一点,前推压下,闭锁回正(克制不晃)
+	if pt < 0.5:
+		var s := sin(clampf(pt / 0.5, 0.0, 1.0) * PI)
+		group.rotation.x += s * 0.045
+		group.rotation.z += s * 0.018
+	else:
+		var s := sin(clampf((pt - 0.5) / 0.5, 0.0, 1.0) * PI)
+		group.rotation.x += s * 0.028
+	# 机械音:后拉/前推各一次,与护木相位严格同步
+	if pt >= 0.16 and not _pump_snd_back:
+		_pump_snd_back = true
+		AudioSys.weapon_mech("pump_back_" + id, 1.0)
+	if pt >= 0.52 and not _pump_snd_fwd:
+		_pump_snd_fwd = true
+		AudioSys.weapon_mech("pump_fwd_" + id, 1.0)
+	if pt >= 1.0:
+		pump_t = 0.0
+		if _pump != null:
+			_pump.position = _pump_base
+		if _bolt != null:
+			_bolt.position = _bolt_base
+		if _eject_shell != null:
+			_eject_shell.visible = false
+
+
+## [9/10] 半自动霰弹枪:射击后枪机自行后坐/回位并抛壳,没有手动泵动。
+func _start_semi_auto_cycle() -> void:
+	if _bolt == null:
+		return
+	semi_t = 0.0001
+	_semi_snd_back = false
+	_semi_snd_fwd = false
+	if _eject_shell != null:
+		_eject_shell.visible = false
+		_eject_shell.position = _eject_shell_base
+
+
+func _update_semi_auto(dt: float) -> void:
+	if semi_t <= 0.0 or _bolt == null:
+		return
+	semi_t += dt
+	var dur := 0.24
+	var pt := clampf(semi_t / dur, 0.0, 1.0)
+	var travel := 0.045
+	var offset := 0.0
+	if pt < 0.45:
+		offset = (pt / 0.45) * travel
+	else:
+		offset = travel * (1.0 - (pt - 0.45) / 0.55)
+	_bolt.position = _bolt_base + Vector3(0.0, 0.0, offset)
+	if _eject_shell != null:
+		if pt >= 0.35 and pt < 0.52:
+			_eject_shell.visible = true
+			var e := clampf((pt - 0.35) / 0.17, 0.0, 1.0)
+			_eject_shell.position = _eject_shell_base + Vector3(0.0, e * 0.05, e * 0.09)
+			_eject_shell.rotation.x = e * 4.5
+		else:
+			_eject_shell.visible = false
+	group.rotation.x += sin(pt * PI) * 0.02
+	if pt >= 0.08 and not _semi_snd_back:
+		_semi_snd_back = true
+		AudioSys.reload_action("bolt_cycle")
+	if pt >= 0.55 and not _semi_snd_fwd:
+		_semi_snd_fwd = true
+		AudioSys.reload_action("slide_release")
+	if pt >= 1.0:
+		semi_t = 0.0
+		_bolt.position = _bolt_base
+		if _eject_shell != null:
+			_eject_shell.visible = false
+
+
+# ============================================================
+# [9/10] 手枪双手握姿:腰射双手包握把,ADS 左手托握把正下方
+# ============================================================
+func _setup_pistol_hand_poses() -> void:
+	if _left_hand == null or def.kind != "pistol":
+		return
+	_pistol_hip_l = _left_hand.position
+	# 腰射:左手包住握把,手腕向后退一点、手指向下收,不让长手模伸到枪口前
+	_pistol_hip_rot = Vector3(-0.3, 0.16, PI - 0.22)
+	match id:
+		"m1911", "g17", "p226":
+			_pistol_ads_l = Vector3(-0.012, -0.112, 0.03)
+			_pistol_ads_rot = Vector3(0.28, 0.12, PI - 0.28)
+		"deagle":
+			_pistol_ads_l = Vector3(-0.014, -0.122, 0.03)
+			_pistol_ads_rot = Vector3(0.26, 0.14, PI - 0.3)
+		"m93r":
+			_pistol_ads_l = Vector3(-0.012, -0.105, 0.028)
+			_pistol_ads_rot = Vector3(0.3, 0.1, PI - 0.26)
+			_pistol_hip_rot = Vector3(-0.16, 0.12, PI - 0.2)
+		"python", "sw686", "sw500":
+			_pistol_ads_l = Vector3(-0.012, -0.108, 0.02)
+			_pistol_ads_rot = Vector3(0.32, 0.14, PI - 0.3)
+			_pistol_hip_rot = Vector3(-0.26, 0.15, PI - 0.24)
+		_:
+			_pistol_ads_l = Vector3(-0.012, -0.108, 0.03)
+			_pistol_ads_rot = Vector3(0.28, 0.12, PI - 0.28)
+
+
+## 只在完全空闲持枪时驱动(换弹/泵动/左轮动作/检视期间由各自动画系统控制,不抢手)。
+func _update_pistol_support(dt: float) -> void:
+	if _left_hand == null or def.kind != "pistol":
+		return
+	if reloading or inspect_active:
+		return
+	if reload_ctl != null and reload_ctl.is_animating():
+		return
+	if pump_t > 0.0 or semi_t > 0.0 or bolt_t > 0.0 or cylinder_t > 0.0 or hammer_t > 0.0:
+		return
+	if draw_t < 0.4:
+		return
+	var target_pos: Vector3 = _pistol_hip_l.lerp(_pistol_ads_l, ads_amount)
+	var target_rot: Vector3 = _pistol_hip_rot.lerp(_pistol_ads_rot, ads_amount)
+	var k := 1.0 - exp(-12.0 * dt)
+	_left_hand.position = _left_hand.position.lerp(target_pos, k)
+	var target_q := Quaternion.from_euler(target_rot)
+	_left_hand.quaternion = _left_hand.quaternion.slerp(target_q, k).normalized()
+
+
+# ============================================================
+# [9/10] 武器检视(Inspect)
+# ============================================================
+const INSPECT_DUR := 3.4
+
+
+func try_inspect() -> void:
+	if not equipped or draw_t < 0.9 or reloading or inspect_active:
+		return
+	if reload_ctl != null and reload_ctl.is_animating():
+		return
+	if pump_t > 0.0 or semi_t > 0.0 or bolt_t > 0.0 or cylinder_t > 0.0 or hammer_t > 0.0:
+		return
+	if player != null and (player.sprint_amount > 0.35 or not player.on_ground):
+		return
+	inspect_active = true
+	inspect_t = 0.0
+	inspect_cam_pitch = 0.0
+	inspect_cam_yaw = 0.0
+	inspect_cam_roll = 0.0
+	_inspect_pump_snapshot = pump_t
+	_inspect_bolt_snapshot = bolt_t
+	_inspect_cylinder_snapshot = cylinder_t
+	_inspect_hammer_snapshot = hammer_t
+	AudioSys.weapon_mech("inspect_grab", 1.0)
+
+
+func _stop_inspect() -> void:
+	if not inspect_active:
+		return
+	inspect_active = false
+	inspect_t = 0.0
+	inspect_cam_pitch = 0.0
+	inspect_cam_yaw = 0.0
+	inspect_cam_roll = 0.0
+
+
+func is_inspecting() -> bool:
+	return inspect_active
+
+
+## 检视三段:抬枪展示(0~0.26) → 环绕观察(0.26~0.76) → 自然回位(0.76~1)。
+## 所有输出用 smoothstep/正弦包络,不存在瞬移或手部锁死。
+func _update_inspect(dt: float) -> void:
+	if not inspect_active:
+		return
+	# 冲刺/跳跃/切枪由调用方取消;这里只处理开镜自然打断
+	if ads_held or player.sprint_amount > 0.35 or not player.on_ground:
+		_stop_inspect()
+		return
+	inspect_t += dt
+	var k := clampf(inspect_t / INSPECT_DUR, 0.0, 1.0)
+	var env := sin(clampf(k * 1.04, 0.0, 1.0) * PI)   # 0→1→0 连续包络
+	var orbit := sin(clampf(k * 1.04, 0.0, 1.0) * PI * 2.0)
+	# 枪械从战斗位置移到屏幕中部,绕 Y 展示枪身左/右侧,再绕回
+	group.position += Vector3(0.065, 0.028, 0.045) * env
+	group.rotation += Vector3(
+		0.06 * env + orbit * 0.018,
+		-0.82 * env - orbit * 0.14,
+		0.14 * env + orbit * 0.05)
+	# 镜头围绕武器轻微移动(只动本地偏移,不抢玩家视角)
+	inspect_cam_yaw = orbit * 0.016
+	inspect_cam_pitch = -0.008 * env + orbit * 0.006
+	inspect_cam_roll = orbit * 0.008
+	# 双手自然调整:左手移到检视抓点(泵体/弹巢/机匣),右手保持握把但轻微内收
+	var insp: Vector3 = group.get_meta("inspect_point", Vector3(0.0, -0.02, -0.06))
+	if _left_hand != null:
+		var target := Vector3(insp.x, insp.y + 0.018, insp.z)
+		_left_hand.position = _left_hand.position.lerp(target, 1.0 - exp(-9.0 * dt))
+		_left_hand.quaternion = _left_hand.quaternion.slerp(
+			Quaternion.from_euler(Vector3(-0.5, 0.28, PI - 0.42)), 1.0 - exp(-9.0 * dt)).normalized()
+	if _right_hand != null:
+		_right_hand.position = _right_hand.position.lerp(_right_hand_base + Vector3(0.012, 0.004, 0.01), 1.0 - exp(-8.0 * dt))
+	if k >= 1.0:
+		_stop_inspect()
+
+
+## 当前武器动画状态名(状态驱动系统的可观测输出,供 QA/HUD/诊断使用)。
+func state_name() -> String:
+	if inspect_active:
+		return "inspect"
+	if reload_ctl != null and reload_ctl.is_animating():
+		return "reload_" + reload_ctl.stage_name()
+	if pump_t > 0.0:
+		return "pump"
+	if semi_t > 0.0:
+		return "semi_auto_cycle"
+	if bolt_t > 0.0:
+		return "bolt"
+	if cylinder_t > 0.0 or hammer_t > 0.0:
+		return "revolver_action"
+	if ads_amount > 0.55:
+		return "aim"
+	if player != null:
+		if player.sprint_amount > 0.5:
+			return "sprint"
+		if player.crouched:
+			return "crouch"
+		if not player.on_ground:
+			return "jump"
+	if fire_timer > 0.0:
+		return "fire_recoil"
+	return "idle"
 
 
 ## 高倍镜内部可见性切换:非 ADS 全黑镜筒;ADS 只留透明目镜 + 分划。
@@ -675,6 +1122,11 @@ func _update_pip_scope_visuals(g: Node3D, ads: float) -> void:
 	var irons: Node3D = g.get_node_or_null("StockIrons")
 	if irons != null:
 		irons.visible = not in_ads
+	# [FIX] 通用镜内遮挡清除:武器本体组(如毒刺 RpgBody 发射筒)ADS 时整体隐藏 ——
+	# PIP 相机就在主相机位置,枪身大件在镜内放大后占满半屏(毒刺"只有半边"根因之一)
+	var hidden_grp: Node3D = _meta_node(g, "scope_hidden")
+	if hidden_grp != null:
+		hidden_grp.visible = not in_ads
 
 
 func _meta_node(g: Node3D, meta: String) -> Node3D:
@@ -782,6 +1234,28 @@ func _viewmodel_depth() -> float:
 	if G == null or G.settings == null:
 		return 1.0
 	return float(G.settings.get("viewmodel_depth", 1.0))
+
+
+## 左轮换弹腕部对齐:手部四元数向“腕→肘”方向收敛,手掌仍保留抓弹角度。
+## 这样手腕不会和直臂筒各转各的,从视觉上消除换弹时的手肘脱节/麻花臂。
+func _align_revolver_reload_wrist() -> void:
+	if not revolver or _left_hand == null:
+		return
+	if not (reloading or (reload_ctl != null and reload_ctl.is_animating())):
+		return
+	var elbow := ELBOW_L
+	var dir := (elbow - _left_hand.position).normalized()
+	if dir.length() < 0.001:
+		return
+	var right := Vector3.UP.cross(dir)
+	if right.length() < 0.01:
+		right = Vector3.RIGHT.cross(dir)
+	right = right.normalized()
+	var up := dir.cross(right)
+	var align_basis := Basis(right, up, dir)
+	var align_q := align_basis.get_rotation_quaternion()
+	var grip_q := Quaternion.from_euler(Vector3(-0.34, 0.16, PI - 0.3))
+	_left_hand.quaternion = grip_q.slerp(align_q, 0.7).normalized()
 
 
 ## 手臂定向:腕部 → 屏外肘锚点,臂筒连续伸缩(修复第一人称断臂)

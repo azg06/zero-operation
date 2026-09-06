@@ -51,10 +51,13 @@ var heal_over_time := 0.0
 var _lock_cand = null
 var _lock_t := 0.0
 var _lock_los_t := 0.0               # 锁定目标 LOS 丢失宽限计时
-var _veh_tp := false                 # 载具第三人称
-var _veh_crew := 0                   # [8/10] 载具乘员位:0=驾驶位 1=炮手/操作位(炮塔载具)
+var _veh_tp := true                  # 载具第三人称(战地式:常开;唯一第一人称=炮手右键 ADS)
+var _veh_crew := 0                   # 乘员位:0=炮手位(驾驶+开炮一体) 1=观察位(纯旁观;AA 可开机枪)
+var _veh_station := 0                # 当前岗位冗余标记:0=炮手位 1=观察位(与 _veh_crew 同步)
+var _veh_optic_mode := 0             # 观瞄模式:0=白光 1=热成像 2=微光夜视
 var _veh_scope := false              # [8/10] 炮手位炮镜(右键 ADS)
 var _passenger_gun := false          # 吉普副驾驶持个人武器状态(可开火)
+var _veh_fp_passenger := false       # 吉普乘客位强制第一人称(NPC 司机在位时上车)
 var _killed_by_def = null
 var sprint_toggled := false           # Shift 切换疾跑
 var slide_t := 0.0                    # 滑铲剩余时间
@@ -69,6 +72,7 @@ var veh_body: Node3D = null       # 第三人称载具乘员模型(吉普/炮塔
 var br_armor := 0.0               # 护甲值(吸收 30% 伤害,耐久 100)
 var br_armor_max := 100.0
 var br_medkits := 0               # 医疗包数量(按 F 使用,+50 HP)
+var _br_f_hold := 0.0             # BR F 键按住时长(短按=兵种技能,长按=使用地图医疗包)
 
 # ---- 近战小刀(全模式) ----
 var melee_active := false         # 小刀状态(与枪械/换弹/载具/跳伞互斥)
@@ -98,21 +102,19 @@ func _set_fp_body_layers(n: Node) -> void:
 		_set_fp_body_layers(c)
 
 
-## 同步影子手持武器:重建 body 上的当前主武器投影(SHADOWS_ONLY,不渲染)
+## 同步影子手持武器:重建 HandR 骨附件上的当前武器投影(SHADOWS_ONLY,不渲染)
+## 阴影武器轮廓随切枪切换
 func _update_body_gun() -> void:
-	if body == null or not is_instance_valid(body) or not body.has_meta("upper"):
+	if body == null or not is_instance_valid(body) or not body.has_meta("gun_mount"):
 		return
-	var upper: Node3D = body.get_meta("upper")
-	var old: Node3D = upper.get_node_or_null("BodyGun")
-	if old != null:
-		old.queue_free()
+	var mount: Node3D = body.get_meta("gun_mount")
+	for c in mount.get_children():
+		c.queue_free()
 	var g := gun()
 	if g == null or g.id == "rpg":
 		return
 	var gn: Node3D = WeaponModels.build(g.id, false, WeaponModsData.load_cfg(g.id))
-	gn.name = "BodyGun"
-	gn.scale = Vector3.ONE * 1.15
-	gn.position = Vector3(0.16, 0.28, -0.35)
+	gn.rotation_degrees = Vector3(90, 0, 0)
 	var so_stack: Array = [gn]
 	while not so_stack.is_empty():
 		var n: Node3D = so_stack.pop_back()
@@ -120,7 +122,7 @@ func _update_body_gun() -> void:
 			(n as MeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
 		for ch in n.get_children():
 			so_stack.append(ch)
-	upper.add_child(gn)
+	mount.add_child(gn)
 	_set_fp_body_layers(gn)
 
 
@@ -212,13 +214,12 @@ func spawn(p_pos: Vector3) -> void:
 	if _adren_vm != null and is_instance_valid(_adren_vm):
 		_adren_vm.visible = false
 	_adren_t = -1.0
-	# 重生恢复尸体隐藏的枪/手臂(死亡时隐藏)
-	if body != null and is_instance_valid(body) and body.has_meta("upper"):
-		var bu: Node3D = body.get_meta("upper")
-		for bn in ["BodyGun", "sho_l", "sho_r"]:
-			var bn2: Node3D = bu.get_node_or_null(bn)
-			if bn2 != null:
-				bn2.visible = true
+	# 重生恢复死亡时隐藏的影子武器
+	if body != null and is_instance_valid(body) and body.has_meta("gun_mount"):
+		var mount: Node3D = body.get_meta("gun_mount")
+		for c in mount.get_children():
+			if c is Node3D:
+				(c as Node3D).visible = true
 	spawn_protect = 4 if G.mode == "breakthrough" else 2   # [BALANCE] 突破模式出生保护延长(防出门团灭)
 	last_damage_t = -99
 	heal_over_time = 0
@@ -303,16 +304,11 @@ func damage(amount: float, attacker_pos: Vector3, attacker, def = null) -> void:
 				gg.group.visible = false
 		if gun() != null and gun().id != "rpg":
 			G.effects.spawn_dropped_weapon(gun().id, pos + Vector3(0, 1.2, 0))
-		if body != null and is_instance_valid(body):
-			var body_upper: Node3D = body.get_meta("upper") if body.has_meta("upper") else null
-			if body_upper != null:
-				var bg: Node3D = body_upper.get_node_or_null("BodyGun")
-				if bg != null:
-					bg.visible = false
-				for bn in ["sho_l", "sho_r"]:
-					var sh: Node3D = body_upper.get_node_or_null(bn)
-					if sh != null:
-						sh.visible = false
+		if body != null and is_instance_valid(body) and body.has_meta("gun_mount"):
+			var mount: Node3D = body.get_meta("gun_mount")
+			for c in mount.get_children():
+				if c is Node3D:
+					(c as Node3D).visible = false
 		if melee_active:
 			_deactivate_melee(false)   # 死亡:小刀强制收回
 		if veh_body != null:
@@ -713,6 +709,48 @@ func use_gadget() -> void:
 			AudioSys.dry_fire()
 
 
+## BR 短按 F:使用开局自带兵种技能(武器型技能切枪,非武器型按正常 use_gadget)
+func _br_use_class_gadget() -> void:
+	if _gadget_is_weapon():
+		var gslot := -1
+		for i in guns.size():
+			if guns[i].id == gadget:
+				gslot = i
+				break
+		if gslot >= 0:
+			if gun_index == gslot:
+				switch_weapon(0)
+				G.hud.hint("已切回主/副武器")
+			else:
+				switch_weapon(gslot)
+				G.hud.hint("已切换 %s(按 3/F 切换)" % gadget_cn)
+		else:
+			AudioSys.dry_fire()
+			G.hud.hint("兵种武器未就绪")
+		return
+	if gadget == "beacon":
+		G.hud.hint("大逃杀禁用重生信标")
+		AudioSys.dry_fire()
+		return
+	if gadget_count <= 0:
+		AudioSys.dry_fire()
+		G.hud.hint("%s 次数已用完" % gadget_cn)
+		return
+	use_gadget()
+
+
+## BR 长按 F:使用地图拾取的医疗包(与开局兵种技能互不冲突)
+func _br_use_loot_medkit() -> void:
+	if br_medkits > 0:
+		br_medkits -= 1
+		heal(50)
+		AudioSys.capture(true)
+		G.hud.hint("医疗包:恢复 50 生命(剩余 %d)" % br_medkits)
+	else:
+		AudioSys.dry_fire()
+		G.hud.hint("没有医疗包 — 搜索物资获取(长按 F 使用)")
+
+
 ## 工程兵维修:附近 4m 内有受损己方/中立载具则持续修复
 func _try_repair_vehicle() -> bool:
 	for v in G.vehicles:
@@ -732,43 +770,86 @@ func _try_repair_vehicle() -> bool:
 
 # ============ 载具 ============
 func enter_vehicle(v) -> void:
+	var npc_driver: bool = v.driver != null and v.driver != self
+	var npc_gunner: bool = v.gunner != null and v.gunner != self
+	if v.type == "jeep" and npc_driver:
+		# 吉普司机在位:玩家坐乘客位(不顶司机下车),强制第一人称,持个人武器开火;
+		# 乘客位被 NPC 占时顶替乘客(乘客无操作价值,NPC 由座位兜底下车),司机必须保留
+		if v.gunner != null and v.gunner != self:
+			print("[CREW] 玩家上车顶替吉普乘客位")
+		if melee_active:
+			_deactivate_melee(false)   # 上车:小刀强制收回(载具互斥)
+		if motion != null:
+			motion.reset(Vector3.ZERO)  # 车上由 VehicleCameraController 接管,清掉步战运动残留
+		vehicle = v
+		v.gunner = self
+		_veh_crew = 1
+		_veh_station = 1
+		_veh_fp_passenger = true
+		yaw = 0
+		pitch = 0  # 相对载具的观察角
+		_veh_tp = false       # 乘客位强制第一人称
+		_passenger_gun = false
+		_veh_scope = false
+		_veh_optic_mode = 0
+		night_vision = false
+		G.effects.set_night_vision(false)
+		if v.camera_ctl != null:
+			v.camera_ctl.reset()       # 重置第三人称平滑(防瞬移插值)
+			v.camera_ctl.set_gunner_mode(false)  # 乘客不驱动炮塔
+			v.camera_ctl.set_station(FirstPersonVehicleController.Station.GUNNER)  # FP 眼位=吉普右座
+			v.camera_ctl.set_optic_mode(0)
+		# 不收枪:_update_passenger_gun 首帧自动 equip 个人武器
+		AudioSys.engine_start(v.type)
+		G.hud.hint("乘客位(第一人称) · 左键开火 · 右键瞄准 · R 换弹 · E 下车")
+		return
 	if melee_active:
 		_deactivate_melee(false)   # 上车:小刀强制收回(载具互斥)
 	if motion != null:
 		motion.reset(Vector3.ZERO)  # 车上由 VehicleCameraController 接管,清掉步战运动残留
 	vehicle = v
-	# 座位分配:优先驾驶位;驾驶位被占(队友/NPC)则坐炮手/乘客位;两个座位都满则不能上车
-	if v.driver == null:
-		v.driver = self
-		_veh_crew = 0
-	elif v.gunner == null:
-		v.gunner = self
-		_veh_crew = 1
-	else:
-		vehicle = null
-		G.hud.hint("载具已满员")
-		return
+	# 战地式座位:上车即炮手位(驾驶+开炮一体,顶替在位 NPC,NPC 由各自 update 自动让位);
+	# 观察位由 F 键切换。默认第三人称,唯一第一人称 = 右键 ADS 目镜。
+	if v.driver != null and v.driver != self:
+		print("[CREW] 玩家上车顶替驾驶位")
+	if v.gunner != null and v.gunner != self:
+		print("[CREW] 玩家上车顶替炮手位")
+	v.driver = self
+	v.gunner = self
+	_veh_crew = 0
 	yaw = 0
 	pitch = 0  # 相对载具的观察角
-	_veh_tp = false
+	_veh_tp = true
 	_passenger_gun = false
+	_veh_fp_passenger = false
+	_veh_station = 0
+	_veh_scope = false
+	_veh_optic_mode = 0
+	night_vision = false
+	G.effects.set_night_vision(false)
 	if v.camera_ctl != null:
 		v.camera_ctl.reset()       # 重置第三人称平滑(防瞬移插值)
-		v.camera_ctl.set_gunner_mode(_veh_crew == 1)
+		v.camera_ctl.set_gunner_mode(true)
+		v.camera_ctl.set_station(FirstPersonVehicleController.Station.GUNNER)
+		v.camera_ctl.set_optic_mode(0)
 	for g in guns:
 		g.holster()
 	AudioSys.engine_start(v.type)
-	if _veh_crew == 1 and v.has_turret():
-		G.hud.hint("炮手位:鼠标瞄准 · 左键开火 · F 换驾驶位 · E 下车")
+	if v.has_turret():
+		var w_name: String = "主炮" if v.is_tank() else v.def.weapon["cn"]
+		G.hud.hint("炮手位:" + w_name + " · 左键开火 · 右键瞄准镜 · F 观察位 · E 下车")
 	else:
-		G.hud.hint("W/S 油门刹车 · A/D 转向 · C 第三人称 · E 下车")
-	# 征召附近空闲队友当炮手(炮塔载具双人制;玩家驾驶时缺炮手)
-	_call_gunner_crew(v)
+		G.hud.hint("驾驶位:W/S 油门刹车 · A/D 转向 · F 观察位 · E 下车")
 
 
-## 征召最近空闲同队 bot 登车担任炮手/乘客(半径 150m;在载具中的 bot 不征召)
+## 上车时征召最近空闲同队 bot 补齐空缺乘员位:
+## 玩家驾驶 → 召炮手;玩家坐炮手 → 召驾驶员(半径 150m;在载具中的 bot 不征召)
 func _call_gunner_crew(v) -> void:
-	if not v.has_turret() or v.gunner != null or G.bots.is_empty():
+	if not v.has_turret() or G.bots.is_empty():
+		return
+	var need_driver: bool = v.driver == null and v.gunner == self
+	var need_gunner: bool = v.gunner == null and v.driver == self
+	if not need_driver and not need_gunner:
 		return
 	var best = null
 	var best_d := 150.0
@@ -779,11 +860,15 @@ func _call_gunner_crew(v) -> void:
 		if d < best_d:
 			best_d = d
 			best = b
-	if best != null:
+	if best == null:
+		return
+	if need_driver:
+		best.board_vehicle_as_driver(v)
+	else:
 		best.board_vehicle(v)
-		if not _veh_recruit_notified:
-			_veh_recruit_notified = true
-			G.hud.hint("队友已响应,正在登车担任炮手")
+	if not _veh_recruit_notified:
+		_veh_recruit_notified = true
+		G.hud.hint("队友已响应,正在登车担任" + ("驾驶员" if need_driver else "炮手"))
 
 
 func exit_vehicle(silent := false) -> void:
@@ -796,6 +881,13 @@ func exit_vehicle(silent := false) -> void:
 		v.gunner = null
 	vehicle = null
 	_passenger_gun = false
+	_veh_fp_passenger = false
+	_veh_station = 0
+	_veh_optic_mode = 0
+	if v.camera_ctl != null:
+		v.camera_ctl.set_gunner_mode(false)
+		v.camera_ctl.set_station(0)
+		v.camera_ctl.deactivate_optic_modes()
 	if veh_body != null:
 		veh_body.visible = false
 	_veh_scope = false
@@ -828,18 +920,32 @@ func _update_veh_body(v) -> void:
 		veh_body.visible = false  # 仅侦察吉普显示玩家第三人称模型
 		return
 	veh_body.visible = true
-	var leg_l: Node3D = veh_body.get_meta("leg_l")
-	var leg_l_knee: Node3D = veh_body.get_meta("leg_l_knee")
-	var leg_r: Node3D = veh_body.get_meta("leg_r")
-	var leg_r_knee: Node3D = veh_body.get_meta("leg_r_knee")
-	var rig: Node3D = veh_body.get_meta("rig")
+	# GLB 骨骼乘员:停动画 + 骨骼坐姿(同 bot 乘员);旧盒子 meta 仅作回退兼容
+	var vskel: Skeleton3D = veh_body.get_meta("skel", null)
+	var vanim: AnimationPlayer = veh_body.get_meta("anim", null)
+	var leg_l: Node3D = veh_body.get_meta("leg_l", null)
+	var leg_l_knee: Node3D = veh_body.get_meta("leg_l_knee", null)
+	var leg_r: Node3D = veh_body.get_meta("leg_r", null)
+	var leg_r_knee: Node3D = veh_body.get_meta("leg_r_knee", null)
+	var rig: Node3D = veh_body.get_meta("rig", null)
 	veh_body.rotation_order = EULER_ORDER_YXZ
 	# 吉普:臀部落座(模型原点在脚底,座椅面高约 1.08,下沉 1.32 防站穿车顶)
 	# 副驾驶位用乘客锚点(右前座),驾驶位用座位锚点(左前座)
 	var seat: Vector3 = v.passenger_world() if _veh_crew == 1 else v.seat_world()
 	veh_body.position = Vector3(seat.x, seat.y - 1.32, seat.z)
 	veh_body.rotation = Vector3(0, v.yaw, 0)
-	if leg_l != null:
+	if vskel != null:
+		if vanim != null:
+			vanim.stop()
+		for bn in ["ThighL", "ThighR"]:
+			var bi := vskel.find_bone(bn)
+			if bi >= 0:
+				vskel.set_bone_pose_rotation(bi, Quaternion(Vector3(1, 0, 0), 1.35))
+		for bn in ["ShinL", "ShinR"]:
+			var bi2 := vskel.find_bone(bn)
+			if bi2 >= 0:
+				vskel.set_bone_pose_rotation(bi2, Quaternion(Vector3(1, 0, 0), -1.35))
+	elif leg_l != null:
 		leg_l.visible = true
 		leg_r.visible = true
 		leg_l.rotation.x = 1.35
@@ -850,6 +956,40 @@ func _update_veh_body(v) -> void:
 		rig.rotation.x = 0.1
 
 
+## 乘员岗位占用(战地式):0=炮手位(驾驶+开炮一体,占 driver+gunner)
+## 1=观察位(纯第三人称旁观;防空车配机枪)。玩家占用时顶替在位 NPC。
+func _take_vehicle_station(v, s: int) -> void:
+	var prev_crew := _veh_crew
+	if s == 0:
+		# 吉普驾驶员由 NPC 担任时不可抢占(F 换岗守卫),保持乘客位
+		if v.type == "jeep" and v.driver != null and v.driver != self:
+			G.hud.hint("驾驶员已就位")
+			return
+		if v.driver != self:
+			print("[CREW-F] 玩家接管炮手位(驾驶+开炮)")
+		v.driver = self
+		v.gunner = self
+		_veh_crew = 0
+	else:
+		if v.driver == self:
+			v.driver = null
+		if v.gunner == self:
+			v.gunner = null
+		_veh_crew = 1
+		_veh_scope = false
+		if G.hud != null and G.hud.has_method("set_veh_scope"):
+			G.hud.set_veh_scope(false)
+	_veh_station = s
+	if prev_crew != _veh_crew and v.camera_ctl != null:
+		v.camera_ctl.set_station(FirstPersonVehicleController.Station.GUNNER if _veh_crew == 0
+			else FirstPersonVehicleController.Station.OBSERVER)
+
+
+## F 键换岗:炮手位 ↔ 观察位
+func _cycle_vehicle_station(v) -> void:
+	_take_vehicle_station(v, 1 if _veh_crew == 0 else 0)
+
+
 func update_vehicle(dt: float) -> void:
 	var v = vehicle
 	var input = G.input_sys
@@ -858,100 +998,115 @@ func update_vehicle(dt: float) -> void:
 	if Input.is_action_just_pressed("interact"):
 		exit_vehicle()
 		return
-	# Z 键(载具内趴下键):召唤附近空闲队友补齐空缺乘员位(驾驶位/炮手/乘客)
-	if Input.is_action_just_pressed("prone"):
-		_call_crew_mates(v)
-	if Input.is_action_just_pressed("crouch"):
-		_veh_tp = not _veh_tp
-	# F 切换乘员位(目标座位被 NPC 占时玩家可顶替,NPC 下一帧自动释放)
+	# F 换岗:炮手位(驾驶+开炮) ↔ 观察位
 	if Input.is_action_just_pressed("gadget"):
-		if _veh_crew == 0 and v.gunner != self:
-			if v.gunner != null:
-				print("[CREW-F] 顶替 NPC 炮手位")
-			v.driver = null
-			v.gunner = self
-			_veh_crew = 1
-		elif _veh_crew == 1 and v.driver != self:
-			if v.driver != null:
-				print("[CREW-F] 顶替 NPC 驾驶位")
-			v.gunner = null
-			v.driver = self
-			_veh_crew = 0
+		_cycle_vehicle_station(v)
 	var cam := camera()
 	pos = Vector3(v.pos.x, v.pos.y, v.pos.z)  # 供 AI 瞄准/小地图
 	var ctl = v.camera_ctl
 	if ctl == null:
 		return
-	ctl.set_gunner_mode(_veh_crew == 1)
+	# 战地式视角:默认第三人称;唯一第一人称 = 炮手位右键 ADS 目镜
+	_veh_tp = true
 	cam.rotation_order = EULER_ORDER_YXZ
-	# 炮镜:仅炮手位可用(驾驶位只能驾驶)
-	_veh_scope = Input.is_action_pressed("ads") and _veh_crew == 1 and not _veh_tp
 	if v.has_turret():
-		if _veh_crew == 1:
-			# 炮手位:瞄准镜头(准心=炮口=准心)
-			if _veh_tp:
-				ctl.view = VehicleCameraController.VehView.THIRD_PERSON
-			elif _veh_scope:
-				ctl.view = VehicleCameraController.VehView.FP_OPTIC
-			else:
-				ctl.view = VehicleCameraController.VehView.FP_GUNNER
+		# ADS:右键按住进入目镜(第一人称,藏炮管只留分划);松开回第三人称
+		_veh_scope = Input.is_action_pressed("ads") and _veh_crew == 0
+		ctl.view = FirstPersonVehicleController.VehView.FP_OPTIC if _veh_scope else FirstPersonVehicleController.VehView.THIRD_PERSON
+		if _veh_scope:
+			ctl.set_optic_mode(_veh_optic_mode)
 		else:
-			# 驾驶位:只能驾驶,自由观察(不带动炮塔)
-			ctl.view = VehicleCameraController.VehView.THIRD_PERSON if _veh_tp else VehicleCameraController.VehView.FP_DRIVER
+			ctl.set_optic_mode(FirstPersonVehicleController.OpticMode.DAY)
+		if Input.is_action_just_pressed("nightvision") and _veh_scope:
+			_veh_optic_mode = ctl.cycle_optic_mode()
+			match _veh_optic_mode:
+				FirstPersonVehicleController.OpticMode.THERMAL:
+					G.hud.hint("热成像开启 — 白光/热像/夜视循环")
+				FirstPersonVehicleController.OpticMode.NIGHT:
+					G.hud.hint("微光夜视开启 — 白光/热像/夜视循环")
+				_:
+					G.hud.hint("白光观瞄 — 白光/热像/夜视循环")
 		if G.hud != null and G.hud.has_method("set_veh_scope"):
 			G.hud.set_veh_scope(_veh_scope)
-		var w_name: String = "主炮" if v.is_tank() else v.def.weapon["cn"]
-		var crew_hint: String = "F 换位(" + ("炮手" if _veh_crew == 0 else "驾驶") + ") · C 第三人称 · E 下车"
-		if _veh_crew == 1:
-			G.hud.hint(w_name + ("装填 " + str(ceil(v.cannon_t)) + "s · " if v.cannon_t > 0 and v.is_tank() else "就绪 · 左键开火 · ") + crew_hint)
+		if G.hud != null and G.hud.has_method("set_veh_optic_mode"):
+			G.hud.set_veh_optic_mode(_veh_optic_mode if _veh_scope else 0)
+		if _veh_crew == 0:
+			var w_name: String = "主炮" if v.is_tank() else v.def.weapon["cn"]
+			var reload_hint: String = ("装填 " + str(ceil(v.cannon_t)) + "s · " if v.cannon_t > 0 and v.is_tank() else "")
+			G.hud.hint("炮手位:" + w_name + reload_hint + "左键开火 · 右键瞄准镜 · F 观察位 · E 下车")
 		else:
-			G.hud.hint("驾驶中(驾驶位不能开炮) · " + crew_hint)
+			# 观察位:纯第三人称旁观;防空车配一挺可开火的机枪
+			if v.type == "aa":
+				_update_passenger_gun(dt)
+				G.hud.hint("观察位 · 车顶机枪:左键开火 · R 换弹 · F 回炮手位 · E 下车")
+			else:
+				if _passenger_gun:
+					_passenger_gun = false
+					if gun() != null:
+						gun().holster()
+				G.hud.hint("观察位 · F 回炮手位 · E 下车")
 	else:
-		# 吉普:驾驶位/乘客位均自由观察(只转相机,车体方向由驾驶输入控制)
-		ctl.view = VehicleCameraController.VehView.THIRD_PERSON if _veh_tp else VehicleCameraController.VehView.FP_DRIVER
+		# 吉普:主位=驾驶(无车载武器),乘客位=个人武器(NPC 司机在位时强制第一人称)
+		ctl.set_optic_mode(FirstPersonVehicleController.OpticMode.DAY)
 		if _veh_crew == 1:
-			# 副驾驶:可持个人武器开火(准心=观察方向),第三人称时收枪
+			_veh_tp = not _veh_fp_passenger
+			ctl.view = (FirstPersonVehicleController.VehView.FP_DRIVER if _veh_fp_passenger
+				else FirstPersonVehicleController.VehView.THIRD_PERSON)  # FP_DRIVER 视图按 station 取锚点:GUNNER=吉普右座
 			_update_passenger_gun(dt)
-			G.hud.hint("乘客位 · 左键开火 · R 换弹 · F 换驾驶位 · Z 召唤队友 · C 第三人称 · E 下车")
+			G.hud.hint("乘客位" + ("(第一人称)" if _veh_fp_passenger else "") + " · 左键开火 · R 换弹 · F 换驾驶位 · E 下车")
 		else:
+			_veh_tp = true
+			ctl.view = FirstPersonVehicleController.VehView.THIRD_PERSON
 			if _passenger_gun:
 				_passenger_gun = false
 				if gun() != null:
 					gun().holster()
-			G.hud.hint("W/S 油门刹车 · A/D 转向 · Z 召唤队友 · C 第三人称 · E 下车")
-	# 鼠标观察(第三人称=360° 环绕;第一人称=观察角;只转相机,不转车体)
+			G.hud.hint("驾驶位:W/S 油门刹车 · A/D 转向 · F 乘客位 · E 下车")
+	# 鼠标:第三人称=环绕观察(炮塔/机枪跟随视线);ADS 目镜/乘客位第一人称=车内自由视角
 	var md: Vector2 = input.consume_mouse()
-	if _veh_tp:
-		ctl.apply_tp_orbit(md.x, md.y)
-	else:
+	if _veh_scope or _veh_fp_passenger:
 		ctl.apply_look(md.x, md.y)
-	# 副驾驶持枪后坐作用于观察角(复用玩家后坐衰减,开枪有真实抬枪感)
+	else:
+		ctl.apply_tp_orbit(md.x, md.y)
+	# 观察位/乘客位持枪后坐作用于观察角(复用玩家后坐衰减)
 	if _passenger_gun:
-		ctl.look_pitch = clampf(ctl.look_pitch + recoil_pitch + cam_kick_pitch,
-			VehicleCameraController.LOOK_PITCH_DOWN, VehicleCameraController.LOOK_PITCH_UP)
-		ctl.look_yaw = clampf(ctl.look_yaw + recoil_yaw + cam_kick_yaw,
-			-VehicleCameraController.LOOK_YAW_MAX, VehicleCameraController.LOOK_YAW_MAX)
+		if _veh_fp_passenger:
+			ctl.look_pitch = clampf(ctl.look_pitch - (recoil_pitch + cam_kick_pitch),
+				FirstPersonVehicleController.LOOK_PITCH_DOWN, FirstPersonVehicleController.LOOK_PITCH_UP)
+			ctl.look_yaw = clampf(ctl.look_yaw + recoil_yaw + cam_kick_yaw,
+				-FirstPersonVehicleController.LOOK_YAW_MAX, FirstPersonVehicleController.LOOK_YAW_MAX)
+		else:
+			ctl._tp_orbit_pitch = clampf(ctl._tp_orbit_pitch - (recoil_pitch + cam_kick_pitch),
+				-FirstPersonVehicleController.LOOK_PITCH_UP, -FirstPersonVehicleController.LOOK_PITCH_DOWN)
+			ctl.look_yaw = clampf(ctl.look_yaw + recoil_yaw + cam_kick_yaw,
+				-FirstPersonVehicleController.LOOK_YAW_MAX, FirstPersonVehicleController.LOOK_YAW_MAX)
 	recoil_pitch = Utils.damp(recoil_pitch, 0, 3.4, dt)
 	recoil_yaw = Utils.damp(recoil_yaw, 0, 9, dt)
 	cam_kick_pitch = Utils.damp(cam_kick_pitch, 0, 13, dt)
 	cam_kick_yaw = Utils.damp(cam_kick_yaw, 0, 13, dt)
 	ctl.update(dt)
-	# 定期征召炮手:驾驶炮塔载具期间若炮手位空缺,每 3s 尝试拉最近空闲队友登车
-	if v.has_turret() and v.gunner == null:
-		_veh_recruit_t -= dt
-		if _veh_recruit_t <= 0:
-			_veh_recruit_t = 3.0
-			_call_gunner_crew(v)
-	# FOV:载具第一人称 86°,炮镜缩放 0.7×;吉普副驾驶持枪开镜按武器 zoom_fov 缩放,
-	# 高倍率狙击镜例外:主相机保持正常 FOV,镜内倍率由 OpticScopeSystem 独立渲染。
-	var fov_target: float = VehicleCameraController.FP_FOV
-	if _veh_scope:
-		fov_target = VehicleCameraController.FP_FOV * 0.7
+	# 定期征召乘员:玩家驾驶缺炮手 → 召炮手;玩家坐炮手/车长缺驾驶 → 召驾驶员(每 3s 重试)
+	if v.has_turret():
+		var crew_missing := false
+		if _veh_crew == 0:
+			crew_missing = v.gunner == null
+		else:
+			crew_missing = v.driver == null
+		if crew_missing:
+			_veh_recruit_t -= dt
+			if _veh_recruit_t <= 0:
+				_veh_recruit_t = 3.0
+				_call_crew_mates(v)
+	# FOV:载具第一人称由 FirstPersonVehicleController 按岗位配置(驾驶 86°/炮镜 40~46°);
+	# 吉普副驾驶持枪开镜按武器 zoom_fov 缩放;高倍率狙击镜镜内倍率由 OpticScopeSystem 独立渲染。
+	var fov_target: float = ctl.target_fov()
+	if _veh_tp:
+		fov_target = float(G.settings.get("fov", 75.0))
 	elif _passenger_gun and gun() != null:
 		if gun().scope_sight():
-			fov_target = VehicleCameraController.FP_FOV
+			fov_target = FirstPersonVehicleController.FP_FOV
 		else:
-			fov_target = lerpf(VehicleCameraController.FP_FOV, gun().def.zoom_fov, gun().ads_amount)
+			fov_target = lerpf(FirstPersonVehicleController.FP_FOV, gun().def.zoom_fov, gun().ads_amount)
 	if absf(cam.fov - fov_target) > 0.05:
 		cam.fov = Utils.damp(cam.fov, fov_target, 10, dt)
 
@@ -973,7 +1128,7 @@ func _call_crew_mates(v) -> void:
 		if b.pos.distance_to(pos) > 150.0:
 			continue
 		if need_driver and v.driver == null:
-			b.board_vehicle(v)
+			b.board_vehicle_as_driver(v)
 			recruited += 1
 		elif need_gunner and v.gunner == null:
 			b.board_vehicle(v)
@@ -992,7 +1147,7 @@ func _call_crew_mates(v) -> void:
 ## 射击结算复用 Gun 完整管线(准心=观察方向,枪口=相机位置,含后坐/散布/曳光/命中反馈)
 func _update_passenger_gun(dt: float) -> void:
 	var g := gun()
-	var want: bool = not _veh_tp and g != null
+	var want: bool = g != null
 	if want != _passenger_gun:
 		_passenger_gun = want
 		if g != null:
@@ -1020,6 +1175,10 @@ func _update_passenger_gun(dt: float) -> void:
 		if not _wheel_to_scope_zoom(wheel):
 			switch_weapon((gun_index + (1 if wheel > 0 else -1) + guns.size()) % guns.size())
 	g.update(dt)
+	# 乘客位第三人称:只走射击结算管线,枪模隐藏(避免悬空枪挡屏);
+	# 乘客位第一人称:显示完整视角模型(个人武器在车内可见可开火)
+	if g.group != null:
+		g.group.visible = _veh_fp_passenger
 
 
 ## 制导瞄准镜 UI 使用的锁定进度(0~1)
@@ -1222,6 +1381,8 @@ func update_player(dt: float) -> void:
 			g.reload()
 		if Input.is_action_just_pressed("fire_mode"):
 			g.toggle_fire_mode()
+		if Input.is_action_just_pressed("inspect"):
+			g.try_inspect()
 		if Input.is_action_just_pressed("weapon_1"):
 			switch_weapon(0)
 		if Input.is_action_just_pressed("weapon_2"):
@@ -1254,18 +1415,19 @@ func update_player(dt: float) -> void:
 		if Input.is_action_just_pressed("at_mine"):
 			place_at_mine()
 		if Input.is_action_just_pressed("gadget"):
+			_br_f_hold = 0.0
+		elif Input.is_action_pressed("gadget") and G.mode == "br":
+			_br_f_hold += dt
+		if Input.is_action_just_released("gadget"):
 			if G.mode == "br":
-				# 大逃杀:按 F 使用医疗包
-				if br_medkits > 0:
-					br_medkits -= 1
-					heal(50)
-					AudioSys.capture(true)
-					G.hud.hint("医疗包:恢复 50 生命(剩余 %d)" % br_medkits)
+				# 大逃杀:短按 F = 开局自带兵种技能;长按 F = 使用地图拾取的医疗包
+				if _br_f_hold < 0.22:
+					_br_use_class_gadget()
 				else:
-					AudioSys.dry_fire()
-					G.hud.hint("没有医疗包 — 搜索物资获取(按 F 使用)")
+					_br_use_loot_medkit()
 			else:
 				use_gadget()
+			_br_f_hold = 0.0
 		if Input.is_action_just_pressed("spot"):
 			spot_enemy()
 		if Input.is_action_just_pressed("nightvision"):
@@ -1391,11 +1553,11 @@ func update_player(dt: float) -> void:
 	var jt: float = G.time
 	var motion_rot := motion.camera_rotation() if motion != null else Vector3.ZERO
 	var motion_pos := motion.camera_position() if motion != null else Vector3.ZERO
-	cam.rotation.y = yaw + recoil_yaw + cam_kick_yaw + reload_cam_yaw + G.effects.shake_yaw + sin(jt * 31.0) * sup_j + motion_rot.y
-	cam.rotation.x = pitch + recoil_pitch + cam_kick_pitch + reload_cam_pitch + G.effects.shake_pitch + cos(jt * 27.0 + 1.4) * sup_j + motion_rot.x
+	cam.rotation.y = yaw + recoil_yaw + cam_kick_yaw + reload_cam_yaw + g.inspect_cam_yaw + G.effects.shake_yaw + sin(jt * 31.0) * sup_j + motion_rot.y
+	cam.rotation.x = pitch + recoil_pitch + cam_kick_pitch + reload_cam_pitch + g.inspect_cam_pitch + G.effects.shake_pitch + cos(jt * 27.0 + 1.4) * sup_j + motion_rot.x
 	# 滑铲相机侧倾:快速压入,干净回正
 	_slide_roll = Utils.damp(_slide_roll, -0.1 if slide_t > 0 else 0.0, 16.0 if slide_t > 0 else 10.0, dt)
-	cam.rotation.z = recoil_yaw * 0.3 + _slide_roll + reload_cam_roll + motion_rot.z
+	cam.rotation.z = recoil_yaw * 0.3 + _slide_roll + reload_cam_roll + g.inspect_cam_roll + motion_rot.z
 	# 位置 = 眼位 + 相机局部空间偏移;偏移随相机 basis 旋转,保证与屏幕上下左右一致
 	var cam_base := Vector3(pos.x, pos.y + eye_height, pos.z)
 	cam.global_position = cam_base + cam.global_transform.basis * motion_pos
@@ -1412,43 +1574,53 @@ func update_player(dt: float) -> void:
 	if absf(cam.fov - target_fov) > 0.05:
 		cam.fov = Utils.damp(cam.fov, target_fov, 18, dt)
 
-	# ---- 下半身同步(趴下平躺 / 蹲下压缩) ----
+	# ---- 下半身同步(骨骼 GLB 版:真实腿部 + 人形阴影) ----
 	body.visible = true
 	body.position = pos
-	# 第一人称显示腿 + 躯干/双肩:upper 顶面 1.35m < 站立眼高 1.62m,平视不穿模;
-	# 低头可见胸口/双腿、蹲姿(眼 1.12m)可见胸口,均为游戏内正常表现。
-	var upper: Node3D = body.get_meta("upper")
-	upper.visible = true
 	_prone_amt = Utils.damp(_prone_amt, 1.0 if prone else 0.0, 8, dt)
-	# 站立:身体略后移,低头看到腿部;趴下:身体整体后移约一个身长,
-	# 使旋转后头部落在原站立位置(头下压、脚后伸),而非绕脚轴把头向前翻倒
-	var back_off := lerpf(0.2, 1.35, _prone_amt)
+	# 趴下:身体整体后移让趴平后的头回到原眼位下方(Prone 动画自身把身体铺平,
+	# 不再绕脚轴刚体转体——旧版"上半身硬抬 45°枪杵地"已废弃)
+	# 旧值 1.35 按悬空趴姿调的;location 轴修复后 Prone 实测头部水平偏移 0.55,留 0.05 余量
+	var back_off := lerpf(0.2, 0.6, _prone_amt)
 	body.position.x += sin(yaw) * back_off
 	body.position.z += cos(yaw) * back_off
 	body.position.y -= _prone_amt * 0.05
 	body.rotation.y = yaw
-	var target_rx := (-PI / 2 + 0.1) * _prone_amt
-	body.rotation.x = Utils.damp(body.rotation.x, target_rx, 10, dt)
-	var target_sy := 0.72 if (crouched or slide_t > 0) else 1.0
-	body.scale.y = Utils.damp(body.scale.y, target_sy, 10, dt)
-	# 腿部行走动画(膝关节,与相机 bob 同步)
-	var leg_l: Node3D = body.get_meta("leg_l")
-	var leg_l_knee: Node3D = body.get_meta("leg_l_knee")
-	var leg_r: Node3D = body.get_meta("leg_r")
-	var leg_r_knee: Node3D = body.get_meta("leg_r_knee")
-	if not prone:
-		var speed_k := clampf(h_speed / 4.6, 0, 1)
-		var swing := sin(bob_y) * speed_k * 0.58
-		leg_l.rotation.x = Utils.damp(leg_l.rotation.x, swing, 14, dt)
-		leg_r.rotation.x = Utils.damp(leg_r.rotation.x, -swing, 14, dt)
-		leg_l_knee.rotation.x = Utils.damp(leg_l_knee.rotation.x, -maxf(0, sin(bob_y - 2.0)) * speed_k * 1.0, 12, dt)
-		leg_r_knee.rotation.x = Utils.damp(leg_r_knee.rotation.x, -maxf(0, sin(bob_y - 2.0 + PI)) * speed_k * 1.0, 12, dt)
-	else:
-		# 趴下时腿伸直
-		leg_l.rotation.x = Utils.damp(leg_l.rotation.x, 0.12, 8, dt)
-		leg_r.rotation.x = Utils.damp(leg_r.rotation.x, -0.08, 8, dt)
-		leg_l_knee.rotation.x = Utils.damp(leg_l_knee.rotation.x, 0.05, 8, dt)
-		leg_r_knee.rotation.x = Utils.damp(leg_r_knee.rotation.x, 0.05, 8, dt)
+	body.rotation.x = 0
+	# 动画:Prone(贴地趴) / Crouch(屈膝战斗蹲) / Run / Walk / Idle,步频随速度
+	# 瞄准俯仰随视线(AimPitch 只带手臂+枪;趴姿枪口由动画压低,代码只做视线微调)
+	var skel: Skeleton3D = body.get_meta("skel") if body.has_meta("skel") else null
+	var panim: AnimationPlayer = body.get_meta("anim") if body.has_meta("anim") else null
+	if panim != null:
+		var want := "Idle"
+		var ss := 1.0
+		if _prone_amt > 0.5:
+			# 匍匐爬行:趴姿 + 移动 → ProneCrawl(用户实测:趴着滑行保持静止趴姿很怪)
+			if h_speed > 0.4:
+				want = "ProneCrawl"; ss = clampf(h_speed / 1.3, 0.6, 1.4)
+			else:
+				want = "Prone"
+		elif crouched or slide_t > 0:
+			# 蹲走:蹲姿 + 移动 → CrouchWalk
+			if h_speed > 0.6:
+				want = "CrouchWalk"; ss = clampf(h_speed / 2.8, 0.6, 1.3)
+			else:
+				want = "Crouch"
+		elif h_speed > 4.4:
+			want = "Run"; ss = clampf(h_speed / 5.8, 0.7, 1.5)
+		elif h_speed > 0.6:
+			want = "Walk"; ss = clampf(h_speed / 4.2, 0.5, 1.5)
+		if not panim.has_animation(want):
+			# 兜底:旧 GLB 无步态片回退静态姿态
+			want = "Prone" if _prone_amt > 0.5 else ("Crouch" if (crouched or slide_t > 0) else "Idle")
+			ss = 1.0
+		if panim.current_animation != want:
+			panim.play(want, 0.25)
+		panim.speed_scale = ss
+	if skel != null:
+		var ai := skel.find_bone("AimPitch")
+		if ai >= 0:
+			skel.set_bone_pose_rotation(ai, Quaternion(Vector3(1, 0, 0), clampf(pitch, -0.6, 0.6)))
 
 
 # ============ 近战小刀(全模式:弹尽自动 / H 长按 / 左键挥击) ============
@@ -1554,19 +1726,22 @@ func _any_gun_ready() -> int:
 
 # ============ 大逃杀(BR):背包/拾取 ============
 
-## 登机时清空装备:仅保留一把基础手枪(避免 gun() 空引用),护甲/药品清零
+## 登机时清空装备:保留一把基础手枪 + 当前兵种技能武器(gl/rpg),
+## 非武器类兵种道具(gadget_count)在开局即满,不需要进图捡。
 ## 时序注意:被保留手枪的 group 绝不能 queue_free(帧末会被真正销毁),否则下一帧
 ## gun.update 访问已释放节点(gun.gd:496 "previously freed" 报错根因)
 func br_strip_inventory() -> void:
 	if melee_active:
 		_deactivate_melee(false)   # 登机清装:小刀强制收回
 	var keep: Gun = null
+	var keep_gadget: Gun = null
 	for g in guns:
-		if g.def.kind == "pistol":
+		if keep == null and g.def.kind == "pistol":
 			keep = g
-			break
+		elif _gadget_is_weapon() and g.id == gadget:
+			keep_gadget = g
 	for g in guns:
-		if is_same(g, keep) or g.group == null or not is_instance_valid(g.group):
+		if is_same(g, keep) or is_same(g, keep_gadget) or g.group == null or not is_instance_valid(g.group):
 			continue
 		G.vm_camera.remove_child(g.group)
 		g.group.queue_free()
@@ -1574,12 +1749,19 @@ func br_strip_inventory() -> void:
 	if keep != null and keep.group != null and is_instance_valid(keep.group):
 		if keep.group.get_parent() != G.vm_camera:
 			G.vm_camera.add_child(keep.group)
-		guns = [keep]
-	else:
+		guns.append(keep)
+	if keep_gadget != null and keep_gadget.group != null and is_instance_valid(keep_gadget.group):
+		if keep_gadget.group.get_parent() != G.vm_camera:
+			G.vm_camera.add_child(keep_gadget.group)
+		guns.append(keep_gadget)
+	if guns.is_empty():
 		guns = [Gun.new("m1911", self)]
 		G.vm_camera.add_child(guns[0].group)
 	gun_index = 0
 	gun().equip()
+	# 兵种道具开场即满:非武器技能直接回满次数;医疗包/护甲仍由地图物资提供
+	if not _gadget_is_weapon():
+		gadget_count = gadget_max if gadget_max > 0 else int(WeaponsData.C()[class_id].gadget_count)
 	br_armor = 0.0
 	br_medkits = 0
 
@@ -1626,11 +1808,18 @@ func br_equip_weapon(weapon_id: String, quality: int) -> bool:
 	var slot: int = 1 if is_pistol else 0
 	var g := Gun.new(weapon_id, self)
 	if quality > 0:
+		# 品质加成:伤害 +25%/级;弹匣容量按比例小幅提升(+15%/级,至少 1 发),
+		# 不再使用“弹匣 +10*q”的绝对值——那会让 5 发枪在史诗品质下变成 25 发。
+		var base_mag: int = g.def.mag
+		var base_reserve: int = g.def.reserve
 		g.def = Utils.def_copy(g.def)
 		g.def.damage = g.def.damage * (1.0 + 0.25 * quality)
-		g.def.mag = maxi(1, g.def.mag + 10 * quality)
-		g.def.reserve = maxi(0, g.def.reserve + 20 * quality)
+		g.def.mag = maxi(1, int(round(float(base_mag) * (1.0 + 0.15 * quality))))
+		g.def.reserve = maxi(0, int(round(float(base_reserve) * (1.0 + 0.2 * quality))))
 		g.mag_cap = g.def.mag
+	# 新枪必须按“这把枪自己的 def”装满弹药,绝不继承上一把枪的弹匣/备弹
+	g.ammo = g.def.mag
+	g.reserve = g.def.reserve
 	# 替换旧槽位枪(视角模型层)
 	if slot < guns.size():
 		var old = guns[slot]

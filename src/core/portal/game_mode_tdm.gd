@@ -327,7 +327,7 @@ func on_damage(attacker, victim, amount: float) -> void:
 	_register_damage(attacker, victim, amount)
 
 
-func end() -> void:
+func end(_result: Dictionary = {}) -> void:
 	if not started or ended:
 		return
 	var win := us_score > ru_score

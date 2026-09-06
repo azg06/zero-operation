@@ -24,12 +24,12 @@ const PRESETS := {
 	},
 	Level.HIGH: {
 		"shadows": 4096, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 8,
-		"ssil": false, "ssr": true, "sdfgi": false, "glow": true, "msaa": 2, "cinema": true,
+		"ssil": false, "ssr": true, "sdfgi": false, "glow": true, "msaa": 1, "cinema": true,
 		"fog": 1.0, "particles": 1.0, "fx_scale": 1.0, "vfog": 32,
 	},
 	Level.ULTRA: {
 		"shadows": 4096, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 8,
-		"ssil": false, "ssr": true, "sdfgi": false, "glow": true, "msaa": 2, "cinema": true,
+		"ssil": false, "ssr": true, "sdfgi": false, "glow": true, "msaa": 1, "cinema": true,
 		"fog": 1.1, "particles": 1.0, "fx_scale": 1.0, "vfog": 32,
 	},
 }
@@ -148,9 +148,29 @@ func _apply_dict(p: Dictionary, lv: int, label: String) -> void:
 		vp.msaa_3d = (int(p.get("msaa", 0)) as Viewport.MSAA)
 		# 3b) 抗锯齿策略:高档用 TAA,低档用自定义 FXAA 层(与 main.apply_graphics 保持一致)
 		vp.use_taa = p["taa"]
+	# 3.5) [PERF] GPU 画质项实验开关(A 系列基准逐项归因;命令行 --no-ssr 等)
+	if Utils.FLAG_SHADOW_2048:
+		G.settings.shadows = 2048  # 在 G.apply_graphics 之前改,图集大小由其内部应用
 	# 4) 收尾:走游戏自己的画质应用(阴影图集/雾距/粒子质量)
 	if G.apply_graphics.is_valid():
 		G.apply_graphics.call()
+	# 5) [PERF] 环境类实验开关(在 apply_graphics 后覆盖,防止被其重置)
+	if G.world_env != null and G.world_env.environment != null:
+		var env2: Environment = G.world_env.environment
+		if Utils.FLAG_NO_SSR:
+			env2.ssr_enabled = false
+			print("[PERF] 实验: SSR 已关闭(--no-ssr)")
+		if Utils.FLAG_NO_SSAO:
+			env2.ssao_enabled = false
+			print("[PERF] 实验: SSAO 已关闭(--no-ssao)")
+		if Utils.FLAG_NO_GLOW:
+			env2.glow_enabled = false
+			print("[PERF] 实验: glow 已关闭(--no-glow)")
+	if Utils.FLAG_SHADOW_2048:
+		print("[PERF] 实验: 阴影图集 4096→2048(--shadow2048)")
+	if Utils.FLAG_SCALE50 and vp != null:
+		vp.scaling_3d_scale = 0.5  # 在 apply_graphics 强制 1.0 之后覆盖,测填充率归因
+		print("[PERF] 实验: 渲染分辨率 50%(--scale50)")
 	print("[GraphicsQuality] 已应用预设: ", label)
 
 
@@ -162,7 +182,7 @@ func _apply_dict(p: Dictionary, lv: int, label: String) -> void:
 ## (图集显存减半、阴影 pass 填充率降约 4 倍),体积雾 48→32(BR 对局内动态收敛,见下)。
 const BR_PRESET := {
 	"shadows": 2048, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 8,
-	"ssil": false, "ssr": false, "sdfgi": false, "glow": true, "msaa": 2, "cinema": true,
+	"ssil": false, "ssr": false, "sdfgi": false, "glow": true, "msaa": 1, "cinema": true,
 	"fog": 1.0, "particles": 1.0, "fx_scale": 1.0, "vfog": 32,
 }
 
@@ -171,7 +191,7 @@ const BR_PRESET := {
 ## 5s 稳定后由 main 尝试恢复原档(仍卡则保持)。全模式生效(征服/突破/TDM/战役/BR)。
 const PROTECT_PRESET := {
 	"shadows": 2048, "ssao": true, "fxaa": false, "taa": true, "scale": 1.0, "aniso": 8,
-	"ssil": false, "ssr": false, "sdfgi": false, "glow": true, "msaa": 2, "cinema": true,
+	"ssil": false, "ssr": false, "sdfgi": false, "glow": true, "msaa": 1, "cinema": true,
 	"fog": 1.0, "particles": 0.7, "fx_scale": 1.0, "vfog": 32,
 }
 

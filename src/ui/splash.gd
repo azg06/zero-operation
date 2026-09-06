@@ -21,6 +21,7 @@ var _divider: ColorRect
 
 
 func _ready() -> void:
+	print("[PERF] splash._ready 于 %.2fs" % (Time.get_ticks_msec() / 1000.0))
 	if not OS.get_cmdline_user_args().is_empty():
 		_go_main()
 		return

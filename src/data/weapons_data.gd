@@ -48,6 +48,15 @@ class WeaponDef extends RefCounted:
 	var recoil_cam := 0.006              # 摄像机微后坐(开火视角震动)
 	# === 换弹 ===
 	var reload_tac := 0.0                # 战术换弹时长(0=自动 = reload_time×0.78)
+	# === [9/10] 泵动霰弹枪 / 左轮结构参数 ===
+	var pump_action := false             # 泵动式(护木后拉/前推循环)
+	var pump_stroke := 0.065             # 泵体行程(m)
+	var pump_dur := 0.45                 # 泵动循环时长(s)
+	var revolver := false                # 左轮弹巢装填逻辑
+	var chambers := 6                    # 弹巢容量
+	var barrel_len := 0.1                # 左轮枪管长度(m,模型区分)
+	var quick_reload := 0.0              # 左轮快速装弹器换弹时长
+	var single_reload := 0.0             # 左轮逐发装填总时长
 
 
 class ClassDef extends RefCounted:
@@ -129,7 +138,7 @@ static func build_weapons() -> Dictionary:
 		{ "scope": true, "scope_mag": 8, "bullet_speed": 950, "bullet_drop": 0.55, "recoil_cam": 0.014, "reload_tac": 2.7 })
 	# 狙击镜独立 PIP:scope_mag 为真实倍率(4/6/7/8×),运行时按基础 FOV 换算镜内 FOV;
 	# zoom_fov 仍作为旧数据/非 PIP 路径兼容值保留。
-	WD["m1014"] = _w("M1014", "M1014 霰弹枪", "shotgun", false, 11, 1.5, 78, 7, 42, 4.9, 0.13, 62,
+	WD["m1014"] = _w("M1014", "M1014 半自动霰弹枪", "shotgun", false, 11, 1.5, 210, 7, 42, 4.9, 0.13, 62,
 		[10, 26, 0.25], 0.096, -0.24, [1.8, 0.4, 0.12], [3.2, 2.2, 0.8, 0, 0], Color(1, 0.75, 0.56),
 		{ "pellets": 9, "bullet_speed": 380, "bullet_drop": 1.35 })
 	WD["m1911"] = _w("M1911", "M1911 手枪", "pistol", false, 28, 2.0, 380, 8, 64, 1.7, 0.09, 62,
@@ -145,7 +154,7 @@ static func build_weapons() -> Dictionary:
 		[20, 48, 0.5], 0.1, -0.23, [0.34, 0.12, 0.035], [1.1, 0.13, 0.7, 0.2, 1.3], Color(1, 0.94, 0.75),
 		{ "bullet_speed": 410, "bullet_drop": 1.05, "reload_tac": 1.4 })
 	WD["p90"] = _w("P90", "P90 个人防卫武器", "smg", true, 20, 1.8, 900, 50, 200, 2.5, 0.11, 60,
-		[18, 45, 0.5], 0.078, -0.22, [0.28, 0.16, 0.03], [1.3, 0.16, 0.8, 0.16, 1.2], Color(0.75, 0.88, 1),
+		[18, 45, 0.5], 0.09, -0.22, [0.28, 0.16, 0.03], [1.3, 0.16, 0.8, 0.16, 1.2], Color(0.75, 0.88, 1),
 		{ "bullet_speed": 715, "bullet_drop": 0.95, "reload_tac": 1.7 })
 	WD["pkm"] = _w("PKM", "PKM 通用机枪", "lmg", true, 32, 1.8, 650, 100, 200, 6.0, 0.24, 58,
 		[38, 85, 0.65], 0.122, -0.25, [0.58, 0.32, 0.06], [2.7, 0.32, 1.9, 0.13, 1.2], Color(1, 0.69, 0.38),
@@ -184,9 +193,37 @@ static func build_weapons() -> Dictionary:
 	WD["m93r"] = _w("M93R", "M93R 冲锋手枪", "pistol", true, 16, 1.8, 1100, 21, 126, 1.7, 0.08, 62,
 		[13, 34, 0.42], 0.07, -0.2, [0.36, 0.3, 0.038], [1.7, 0.42, 1.15, 0.14, 1.6], Color(1, 0.91, 0.69),
 		{ "bullet_speed": 400, "bullet_drop": 1.05, "reload_tac": 1.1 })
-	WD["spas12"] = _w("SPAS-12", "SPAS-12 战斗霰弹枪", "shotgun", false, 13, 1.5, 68, 8, 40, 5.3, 0.14, 62,
+	WD["spas12"] = _w("SPAS-12", "SPAS-12 半自动霰弹枪", "shotgun", false, 13, 1.5, 190, 8, 40, 5.3, 0.14, 62,
 		[12, 30, 0.28], 0.1, -0.24, [2.1, 0.45, 0.13], [3.0, 2.0, 0.8, 0, 0], Color(1, 0.75, 0.56),
 		{ "pellets": 8, "bullet_speed": 400, "bullet_drop": 1.35 })
+	# ==================== [9/10 泵动霰弹枪扩充] 3 把独立管式弹仓泵动霰弹枪 ====================
+	# 三把枪拥有不同结构/材质/弹容/后坐/散布/泵动行程与换弹节奏,全部走逐发装填 + 真泵动循环。
+	WD["rem870"] = _w("Remington 870", "雷明顿 M870 泵动霰弹枪", "shotgun", false, 12, 1.5, 70, 7, 42, 4.6, 0.13, 62,
+		[11, 27, 0.26], 0.098, -0.24, [1.95, 0.42, 0.125], [3.1, 2.1, 0.8, 0, 0], Color(0.92, 0.78, 0.6),
+		{ "pellets": 9, "bullet_speed": 385, "bullet_drop": 1.35,
+		  "pump_action": true, "pump_stroke": 0.065, "pump_dur": 0.46, "reload_tac": 3.4 })
+	WD["m590"] = _w("M590A1", "莫斯伯格 M590A1 泵动霰弹枪", "shotgun", false, 13, 1.5, 65, 8, 40, 5.1, 0.14, 62,
+		[12, 30, 0.27], 0.101, -0.24, [2.15, 0.48, 0.14], [3.4, 2.3, 0.85, 0, 0], Color(0.8, 0.88, 0.74),
+		{ "pellets": 8, "bullet_speed": 400, "bullet_drop": 1.3,
+		  "pump_action": true, "pump_stroke": 0.075, "pump_dur": 0.5, "reload_tac": 3.9 })
+	WD["win1897"] = _w("M1897", "温彻斯特 M1897 堑壕霰弹枪", "shotgun", false, 14, 1.5, 62, 5, 35, 3.7, 0.14, 62,
+		[13, 32, 0.3], 0.103, -0.24, [1.75, 0.38, 0.115], [2.7, 1.85, 0.7, 0, 0], Color(0.72, 0.62, 0.48),
+		{ "pellets": 10, "bullet_speed": 375, "bullet_drop": 1.4,
+		  "pump_action": true, "pump_stroke": 0.07, "pump_dur": 0.52, "reload_tac": 2.9 })
+	# ==================== [9/10 左轮手枪扩充] 3 把独立弹巢左轮 ====================
+	# kind 保持 pistol(与现有副武器/BR/菜单/后坐体系完全兼容),revolver 标记驱动独立弹巢换弹逻辑。
+	WD["python"] = _w("Colt Python", "柯尔特蟒蛇 左轮手枪", "pistol", false, 58, 2.3, 260, 6, 36, 2.5, 0.11, 60,
+		[28, 62, 0.5], 0.093, -0.2, [1.55, 0.34, 0.105], [1.2, 0.1, 0.7, 0.45, 1.6], Color(0.78, 0.86, 0.98),
+		{ "bullet_speed": 440, "bullet_drop": 0.85, "recoil_cam": 0.009,
+		  "revolver": true, "chambers": 6, "barrel_len": 0.152, "quick_reload": 2.1, "single_reload": 3.2 })
+	WD["sw686"] = _w("S&W 686", "史密斯韦森 686 左轮手枪", "pistol", false, 50, 2.2, 290, 6, 36, 2.3, 0.1, 60,
+		[26, 58, 0.5], 0.091, -0.2, [1.35, 0.3, 0.092], [1.1, 0.09, 0.65, 0.4, 1.4], Color(0.9, 0.92, 0.96),
+		{ "bullet_speed": 430, "bullet_drop": 0.9, "recoil_cam": 0.008,
+		  "revolver": true, "chambers": 6, "barrel_len": 0.102, "quick_reload": 1.9, "single_reload": 2.9 })
+	WD["sw500"] = _w("S&W 500", "史密斯韦森 M500 左轮手枪", "pistol", false, 82, 2.4, 170, 5, 25, 2.9, 0.14, 58,
+		[34, 78, 0.45], 0.096, -0.2, [2.75, 0.62, 0.185], [1.7, 0.16, 1.0, 0.7, 2.4], Color(0.8, 0.82, 0.88),
+		{ "bullet_speed": 500, "bullet_drop": 0.8, "recoil_cam": 0.014,
+		  "revolver": true, "chambers": 5, "barrel_len": 0.213, "quick_reload": 2.5, "single_reload": 3.5 })
 	# ==================== [8/10 武器扩充] 新增 10 把武器(定位差异化) ====================
 	# 卡宾枪:高射速低后座,近距离压枪利器(比 M4 轻快)
 	WD["g36c"] = _w("G36C", "G36C 卡宾枪", "rifle", true, 25, 2.0, 800, 30, 150, 2.6, 0.1, 56,
@@ -288,13 +325,13 @@ static func build_weapons() -> Dictionary:
 
 
 static func build_classes() -> Dictionary:
-	var secondaries := ["m1911", "g17", "p226", "deagle", "m93r"]
+	var secondaries := ["m1911", "g17", "p226", "deagle", "m93r", "python", "sw686", "sw500"]
 	var CD := {}
 	# 突击兵:前线破阵(步枪 + 霰弹 + 烟雾弹 + C5 + 医疗针自用)
 	var assault := ClassDef.new()
 	assault.cn = "突击兵"; assault.en = "ASSAULT"; assault.icon = "突"; assault.color = Color(0.5, 0.82, 1.0)
 	assault.primary = "m4"; assault.weapons = ["m4", "ak", "scar", "aug", "g36c", "ak74", "famas", "g3"]
-	assault.shotguns = ["m1014", "spas12"]; assault.secondaries = secondaries
+	assault.shotguns = ["m1014", "spas12", "rem870", "m590", "win1897"]; assault.secondaries = secondaries
 	assault.gadget = "medkit"; assault.gadget_cn = "医疗针"; assault.gadget_count = 2
 	assault.desc = "前线破阵者。冲锋夺点、近战歼敌;烟雾弹掩护推进,C5 炸药摧毁工事载具,医疗针仅限自救。"
 	assault.gadgets = [
@@ -372,7 +409,7 @@ static func gadget_option(class_id: String, gadget_id: String) -> Dictionary:
 
 static var _weapons: Dictionary = {}
 static var _classes: Dictionary = {}
-const SECONDARIES: Array = ["m1911", "g17", "p226", "deagle", "m93r"]
+const SECONDARIES: Array = ["m1911", "g17", "p226", "deagle", "m93r", "python", "sw686", "sw500"]
 
 
 ## 惰性初始化(GDScript 静态变量初始化限制)

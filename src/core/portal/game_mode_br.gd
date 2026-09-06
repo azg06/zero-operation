@@ -38,12 +38,12 @@ const ZONE_DMG_START := 2.0          # 圈外初始每秒伤害
 const ZONE_DMG_STEP := 2.0           # 每阶段递增(上限 10)
 const ZONE_DMG_MAX := 10.0
 const PICK_RADIUS := 2.2             # 拾取距离
-const LOOT_PER_POINT := 2            # 每物资点物品数
+const LOOT_PER_POINT := 1            # 每物资点物品数(加密后点位 300+,保持实体池可控)
 const AIRDROP_TIMES := [200.0, 320.0, 440.0]  # 空投时刻(秒)
 const LOOT_REFRESH_TIMES := [240.0, 420.0]    # 物资刷新(中盘/空投后)
 const VEH_RESPAWN := 45.0            # 载具重生间隔(秒)
 const REPLAY_TIME := 5.0             # 死亡回放时长(击杀者视角,秒)
-const LOOT_POOL := 140               # 物资实体对象池大小
+const LOOT_POOL := 400               # 物资实体对象池大小(初始物资约 316,留出死亡掉落/空投余量)
 
 var phase := "idle"                  # idle | lobby | flight | battle
 var phase_t := 0.0
@@ -57,6 +57,7 @@ var drop_zone := Vector3.ZERO
 # ---- 地图点(extra 或程序化) ----
 var loot_points: Array = []
 var vehicle_points: Array = []
+var _villages: Array = []      # [BR-FIX] 村庄坐标(锚点聚落偏好用)
 var _zone_bounds := 400.0
 
 # ---- 毒圈 ----
@@ -431,15 +432,31 @@ func _begin_flight() -> void:
 func _update_flight(dt: float) -> void:
 	_flight_t += dt
 	plane_pos += plane_vel * dt
-	if _flight_t > 60.0 or plane_pos.distance_to(_plane_route[1]) < 50.0:
+	if _flight_t > 90.0 or plane_pos.distance_to(_plane_route[1]) < 50.0:
 		_end_flight()
 		return
-	# 兜底自动跳伞:飞机飞临地图上空后 1+id%5 秒错峰下机(AI Agent 可通过 start_jump 提前接管)
-	var plane_in_zone: bool = plane_pos.distance_to(drop_zone) < _zone_bounds * 0.7
+	# [BR-FIX] 跳伞时机 = 飞机飞临该队落点锚上空才跳(旧版 1~5s 全员齐跳,99 人全砸在
+	# 航线前段 350m 内 —— "所有 NPC 集中在一个地方降落"的根因)。飞机 70m/s 穿越
+	# 2180m 航线约 31s,25 队锚沿航线依次触发,落点覆盖全图。
+	var rd2 := Vector2(plane_vel.x, plane_vel.z)
+	if rd2.length() < 0.1:
+		rd2 = Vector2.DOWN
+	rd2 = rd2.normalized()
+	var perp := Vector2(-rd2.y, rd2.x)
 	for b in _bot_jump.keys():
 		var j: Dictionary = _bot_jump[b]
-		if j["state"] == "plane" and plane_in_zone \
-				and _flight_t - float(j["t0"]) > 1.0 + (b.id % 5):
+		if j["state"] != "plane":
+			continue
+		var anchor := Vector3.ZERO
+		if b.squad_id >= 0 and _squad_anchors.size() > b.squad_id:
+			anchor = _squad_anchors[b.squad_id]
+		if anchor == Vector3.ZERO:
+			continue
+		var to_a := Vector2(anchor.x - plane_pos.x, anchor.z - plane_pos.z)
+		var along := to_a.dot(rd2)
+		var lateral: float = absf(to_a.dot(perp))
+		# 正上方 ±90m 内跳;或刚越过锚点(0~-90m)且横偏在滑翔修正范围(<230m)内兜底
+		if to_a.length() < 90.0 or (along < 0.0 and along > -90.0 and lateral < 230.0):
 			start_jump(b, j["target"])
 
 
@@ -1002,6 +1019,7 @@ func _init_loot_mats() -> void:
 		"armor": _loot_mat(Color(0.4, 0.55, 0.75)),
 		"medkit": _loot_mat(Color(0.95, 0.3, 0.28)),
 		"ammo": _loot_mat(Color(0.95, 0.8, 0.3)),
+		"airdrop": _loot_mat(Color(0.95, 0.9, 0.6)),
 	}
 
 
@@ -1024,7 +1042,7 @@ func _loot_key(kind: String, quality: int) -> String:
 
 func _spawn_loot() -> void:
 	# 先清除旧物资(换局)
-	print("[PERF] 物资动画节流生效: 120 实体,>60m 处 0.5s 一拍(近处每帧)")
+	print("[PERF] 物资动画节流生效: %d 实体,>60m 处 0.5s 一拍(近处每帧)" % LOOT_POOL)
 	for l in _loot:
 		var h = l["holder"]
 		if is_instance_valid(h):
@@ -1118,8 +1136,19 @@ func _build_loot_medkit(h: Node3D) -> void:
 
 
 func _build_loot_weapon(h: Node3D, wid: String) -> void:
+	# [BR-FIX] 优先真枪 GLB(与玩家/枪手持有的同模,4k-20k 面,PUBG 式地面武器可辨识);
+	# 缺 GLB 的 wid 回退程序化盒拼
 	var def = WeaponsData.W().get(wid, null)
 	var kind: String = def.kind if def != null else "rifle"
+	if WeaponModels.has_glb(wid):
+		var g := Node3D.new()
+		if WeaponModels.build_from_glb(wid, g):
+			g.scale = Vector3.ONE * 1.35
+			g.rotation = Vector3(0, Utils.rand(TAU), 0)   # 平躺随机朝向
+			g.position.y = 0.22
+			h.add_child(g)
+			return
+		g.queue_free()
 	var metal := WorldBuilder._std_tex(Color(0.32, 0.35, 0.4), 0.45, "metal_plate", 0.5)
 	var wood := WorldBuilder._std_tex(Color(0.55, 0.4, 0.25), 0.6, "plywood", 0.1)
 	var g := Node3D.new()
@@ -1362,6 +1391,21 @@ func try_player_pickup(p) -> bool:
 	if hit == null:
 		return false
 	var loot = hit["loot"]
+	# 空投箱是组合补给,不是单一 kind:必须在这里展开为武器+护甲+医疗包,
+	# 不能直接丢给 br_pickup("airdrop")(Player 没有该 kind,导致空投永远捡不起来)。
+	if loot["kind"] == "airdrop":
+		var aw := str(loot.get("id", ""))
+		if aw == "" or not WeaponsData.W().has(aw):
+			aw = _roll_weapon()
+		if p.br_pickup("weapon", aw, 2):
+			p.br_pickup("armor", "", 0)
+			p.br_pickup("medkit", "", 0)
+			_consume_loot(loot)
+			if G.effects != null:
+				G.effects.shake(0.08)
+			AudioSys.capture(true)
+			return true
+		return false
 	if p.br_pickup(loot["kind"], loot["id"], int(loot["quality"])):
 		_consume_loot(loot)
 		if G.effects != null:
@@ -1369,6 +1413,20 @@ func try_player_pickup(p) -> bool:
 		AudioSys.capture(true)
 		return true
 	return false
+
+
+## 品质加成统一实现:伤害 +25%/级,弹匣/备弹按比例小幅提升;
+## 绝对值的 +10 发会导致 5 发武器史诗品质变成 25 发。
+func _quality_def(d, q: int) -> Variant:
+	var c: Variant = Utils.def_copy(d)
+	if q <= 0:
+		return c
+	var base_mag: int = c.mag
+	var base_reserve: int = c.reserve
+	c.damage = c.damage * (1.0 + 0.25 * q)
+	c.mag = maxi(1, int(round(float(base_mag) * (1.0 + 0.15 * q))))
+	c.reserve = maxi(0, int(round(float(base_reserve) * (1.0 + 0.2 * q))))
+	return c
 
 
 ## AI Agent 接口:让 bot 拾取物资(武器/医疗/弹药即时生效;护甲数据由 AI Agent 记录)
@@ -1400,10 +1458,7 @@ func pickup_for(actor, loot) -> bool:
 			if aw2 == "" or not WeaponsData.W().has(aw2):
 				aw2 = _roll_weapon()
 			actor.weapon_id = aw2
-			actor.def = Utils.def_copy(WeaponsData.W()[aw2])
-			actor.def.damage = actor.def.damage * 1.5
-			actor.def.mag = actor.def.mag + 20
-			actor.def.reserve = actor.def.reserve + 40
+			actor.def = _quality_def(WeaponsData.W()[aw2], 2)
 			actor.ammo = actor.def.mag
 			actor.reloading = false
 			_consume_loot(loot)
@@ -1413,12 +1468,7 @@ func pickup_for(actor, loot) -> bool:
 			if not WeaponsData.W().has(wid):
 				return false
 			actor.weapon_id = wid
-			actor.def = Utils.def_copy(WeaponsData.W()[wid])
-			var q := int(loot["quality"])
-			if q > 0:
-				actor.def.damage = actor.def.damage * (1.0 + 0.25 * q)
-				actor.def.mag = maxi(1, actor.def.mag + 10 * q)
-				actor.def.reserve = maxi(0, actor.def.reserve + 20 * q)
+			actor.def = _quality_def(WeaponsData.W()[wid], int(loot["quality"]))
 			actor.ammo = actor.def.mag
 			actor.reloading = false
 			_consume_loot(loot)
@@ -1613,18 +1663,13 @@ func on_player_killed(killer, victim, head := false) -> void:
 		_player_jump = ""
 		_player_zone_acc = 0.0
 		print("[BR-Z] 玩家重部署途中阵亡 → 重部署取消,按二次阵亡真淘汰")
-	# [BR-R] bot 首次死亡:不淘汰/不排名 → 进入重生队列(15-30s 后乘直升机批次重生);
-	# 二次死亡才真淘汰(bot.br_redeployed 标记首死,落地复活时保留)
-	# [BR-Z] 毒圈击杀例外:环境击杀直接真淘汰 —— 毒圈内重部署不合理(直升机飞不进毒圈),
-	# 圈 r≈0 时重部署 bot 乘机/跳伞期间永久豁免毒圈(见 _apply_zone_damage) →
-	# 队伍永不减 → _alive_teams 恒 2 → 结算僵局(问题②根因)
-	if not is_p and not victim.br_redeployed and not zone_kill:
+	# [HZ-RULE] 按 Battlefield 2042 Hazard Zone(禁区冲突)规则:NPC 阵亡即永久淘汰,
+	# 不再免费“首死入队复活一次”。玩家保留一次 Reinforcement Uplink 式重部署机会。
+	if not is_p and not victim.br_redeployed:
 		victim.br_redeployed = true
-		_drop_victim_loot(victim)
-		_enqueue_bot_redeploy(victim)
-		return
+		print("[BR-R] bot=%d 阵亡 → 按禁区冲突规则永久淘汰(不再复活)" % victim.id)
 	if not is_p:
-		print("[BR-R] bot=%d %s → 真淘汰(排名结算)" % [victim.id, ("毒圈首杀[BR-Z] 环境击杀" if zone_kill else "二次死亡")])
+		print("[BR-R] bot=%d %s → 真淘汰(排名结算)" % [victim.id, ("毒圈首杀[BR-Z] 环境击杀" if zone_kill else "阵亡")])
 	# [BR-R] 玩家首次阵亡:不淘汰 → 进入重部署等待(20s 内按 R 或超时自动乘直升机重返战场);
 	# 掉落/观战回放照常(尸体留场),但不标记 _eliminated、不记队伍排名 —— 二次阵亡才结算排名
 	if is_p and _player_deaths == 0:
@@ -1717,13 +1762,20 @@ func _drop_victim_loot(victim) -> void:
 		if w != null:
 			wid = str(w)
 	var drop_pos := pos + Vector3(0, 0.5, 0)
+	# 掉落武器保留受害者武器品质(NPC 拾取过稀有/史诗枪后,阵亡时按原品质掉落)
+	var drop_q := 0
+	var qv: Variant = victim.get("br_weapon_q")
+	if qv != null:
+		drop_q = int(qv)
 	if wid != "" and WeaponsData.W().has(wid):
-		_place_loot(drop_pos, "weapon", wid, 0)
-		print("[BR-DROP] 生成掉落 loot=weapon id=%s @%.1f,%.1f,%.1f" % [wid, drop_pos.x, drop_pos.y, drop_pos.z])
-	if victim is Object and is_same(victim, G.player) and float(victim.br_armor) > 0.01:
-		var apos := drop_pos + Vector3(0, 0.7, 0)
-		_place_loot(apos, "armor", "", 0)
-		print("[BR-DROP] 生成掉落 loot=armor @%.1f,%.1f,%.1f" % [apos.x, apos.y, apos.z])
+		_place_loot(drop_pos, "weapon", wid, drop_q)
+		print("[BR-DROP] 生成掉落 loot=weapon id=%s q=%d @%.1f,%.1f,%.1f" % [wid, drop_q, drop_pos.x, drop_pos.y, drop_pos.z])
+	# NPC 护甲同样掉出,玩家可 E 拾取
+	var armor_val: Variant = victim.get("br_armor")
+	if armor_val != null and float(armor_val) > 0.01:
+		var bapos := drop_pos + Vector3(0, 0.7, 0)
+		_place_loot(bapos, "armor", "", 0)
+		print("[BR-DROP] 生成掉落 loot=armor @%.1f,%.1f,%.1f" % [bapos.x, bapos.y, bapos.z])
 	# [3A 8/10] 死亡掉落医疗包:受害者(玩家)携带医疗包时掉 1 个
 	if victim is Object and is_same(victim, G.player) and int(victim.br_medkits) > 0:
 		var mpos := drop_pos + Vector3(0, 0.9, 0)
@@ -2843,6 +2895,7 @@ func _load_map_points() -> void:
 	var T = MapsData.M()[map_id]
 	if T.get("extra") is Dictionary:
 		extra = T["extra"]
+	_villages = (extra.get("villages", []) as Array) if (extra.get("villages") is Array) else []
 	_zone_bounds = float(extra.get("zone_bounds", 0.0))
 	if _zone_bounds <= 0.0:
 		_zone_bounds = maxf(100.0, float(G.bounds))
@@ -2943,19 +2996,59 @@ func _br_arm_bot_pistol(b) -> void:
 			old_wg.visible = false
 
 
-## 任务4:25 队跳伞落点锚(80% 取随机物资点,其余整图随机;钳制地图内)
+## 任务4:25 队跳伞落点锚——网格抖动均匀铺满整图(不再 80% 扎堆在少数物资点)。
+## 每队落点与其他队保持 ≥55m 间距,避免数十人挤在同一个村/城区。
 func _build_squad_anchors() -> void:
 	_squad_anchors.clear()
+	var cols := 5
+	var rows := 5
+	var span := _zone_bounds * 2.0
+	var cell_w := span / float(cols)
+	var cell_h := span / float(rows)
 	for s in BR_TEAMS:
-		var pt := Vector3.ZERO
-		if not loot_points.is_empty() and randf() < 0.8:
-			pt = Utils.choice(loot_points) as Vector3
-		else:
-			pt = Vector3(Utils.rand(-_zone_bounds, _zone_bounds), 0.0,
-				Utils.rand(-_zone_bounds, _zone_bounds))
-		pt.x = clampf(pt.x, -G.bounds + 20, G.bounds - 20)
-		pt.z = clampf(pt.z, -G.bounds + 20, G.bounds - 20)
+		var ix := s % cols
+		var iz := int(s / cols) % rows
+		var base := Vector3(-_zone_bounds + cell_w * (float(ix) + 0.5),
+			0.0, -_zone_bounds + cell_h * (float(iz) + 0.5))
+		var best := base
+		var best_score := -1.0
+		for try_i in 10:
+			var cand := base + Vector3(Utils.rand(-cell_w * 0.35, cell_w * 0.35), 0.0,
+				Utils.rand(-cell_h * 0.35, cell_h * 0.35))
+			var score := Utils.rand(0.0, 1.0)
+			# [BR-FIX] 聚落偏好:锚点落在村庄/城区 45m 内加分(PUBG 式落地即搜房;
+			# 旧版 score 纯随机,注释写了"偏好聚落"但从未实现)
+			for v in _villages:
+				var vd := Vector2((v as Dictionary)["x"] - cand.x, (v as Dictionary)["z"] - cand.z).length()
+				if vd < 45.0:
+					score += 0.6
+					break
+			if cand.x > 185.0:
+				score += 0.4   # 城市区(东北高密度)
+			var ok := true
+			for prev in _squad_anchors:
+				if Vector2((prev as Vector3).x - cand.x, (prev as Vector3).z - cand.z).length() < 55.0:
+					ok = false
+					break
+			# 避开河道/边界,并偏好落在有物资的聚落 12-40m 边缘(仍保持均匀铺开)
+			if absf(cand.x - (-60.0)) < 34.0:
+				ok = false
+			if absf(cand.x) > G.bounds - 34.0 or absf(cand.z) > G.bounds - 34.0:
+				ok = false
+			if ok and score > best_score:
+				best = cand
+				best_score = score
+		var pt := best
+		pt.x = clampf(pt.x, -G.bounds + 24, G.bounds - 24)
+		pt.z = clampf(pt.z, -G.bounds + 24, G.bounds - 24)
 		_squad_anchors.append(pt)
+	# 打印最小间距供 QA 核对(均匀度诊断)
+	var min_d := 1e9
+	for a in _squad_anchors.size():
+		for b2 in range(a + 1, _squad_anchors.size()):
+			min_d = minf(min_d, Vector2((_squad_anchors[a] as Vector3).x - (_squad_anchors[b2] as Vector3).x,
+				(_squad_anchors[a] as Vector3).z - (_squad_anchors[b2] as Vector3).z).length())
+	print("[BR-M] 25 队落点锚已网格化均匀分布,队间最小间距=%.0fm" % min_d)
 
 
 ## 任务4:bot.gd 落点决策接口 —— 本队落点锚(同队 4 人附近降落)
@@ -2991,9 +3084,53 @@ func _update_player_pickup(p) -> void:
 
 
 ## ==================== 收尾/清理 ====================
+## 中途离场:不判胜负,按 Hazard Zone 规则结算“演习结束”+ 当前个人/小队排名。
+func _finish_aborted() -> void:
+	_ended = true
+	started = false
+	_cancel_redeploy()
+	_cancel_bot_redeploys()
+	var squad_rank := _player_rank
+	var player_rank := _player_rank
+	if G.player != null:
+		var squad_alive: bool = (G.player.alive and not _eliminated.has(G.player)) or _redeploy_active()
+		if squad_alive:
+			# 尚在场内:当前排名 = 存活队伍数(倒数第 N 名含义按存活队数显示)
+			squad_rank = _alive_teams()
+			player_rank = squad_rank
+		else:
+			var tr: int = int(_team_ranks.get(BR_PLAYER_SQUAD, 0))
+			squad_rank = tr if tr > 0 else int(_team_ranks.get(BR_PLAYER_SQUAD, maxi(1, _alive_teams())))
+			player_rank = _player_rank if _player_rank > 0 else squad_rank
+	var kills: int = int(_kill_stats.get(G.player, 0))
+	var dmg: float = float(_dmg_stats.get(G.player, 0.0))
+	result = {
+		"aborted": true,
+		"rank": maxi(1, player_rank),
+		"team_rank": maxi(1, squad_rank),
+		"teams": BR_TEAMS,
+		"kills": kills,
+		"damage": dmg,
+		"time": round_time,
+		"winner": "演习结束",
+		"my_win": false,
+		"mvp": _mvp_dict(),
+		"table": _table_dict(),
+	}
+	print("[BR] 演习结束(中途离场) 玩家排名=%d 小队排名=%d 击杀=%d 伤害=%.0f" % [
+		player_rank, squad_rank, kills, dmg])
+	if GraphicsQuality != null:
+		GraphicsQuality.restore_preset()
+	round_ended.emit(result)
+
+
 ## PortalManager 对局收尾路径 A(本模式 emit round_ended 后由管理器统一 G.state="end"
 ## 并 queue_free 本节点);此处仅做防御性兜底(无 PortalManager 驱动时自收尾)
-func end() -> void:
+func end(result: Dictionary = {}) -> void:
+	# 中途离场(主菜单/放弃战斗):按 Hazard Zone 规则生成“演习结束”结果,不判胜负
+	if bool(result.get("aborted", false)) and not _ended:
+		_finish_aborted()
+		return
 	if not _ended:
 		return
 	if G.state != "end" and G.state != "over":

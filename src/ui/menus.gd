@@ -2143,7 +2143,7 @@ func show_portal_end(result: Dictionary) -> void:
 	# 旧契约按 winner 阵营推导。优先级 my_win > win > winner
 	if bool(result.get("aborted", false)):
 		# 主动放弃对局(暂停菜单"放弃战斗"):不判定胜负,直接显示退出
-		_end_title.text = "已退出对局"
+		_end_title.text = "演习结束"
 		_end_title.add_theme_color_override("font_color", Color(0.75, 0.8, 0.85))
 		_end_stats.text = _portal_result_text()
 		hide_all()
@@ -2170,12 +2170,15 @@ func _portal_result_text() -> String:
 	var r: Dictionary = _portal_last_result
 	var kd := "%.2f" % (float(G.stats["kills"]) / maxf(1, float(G.stats["deaths"])))
 	var lines: Array = ["击杀 [b]" + str(G.stats["kills"]) + "[/b] · 阵亡 [b]" + str(G.stats["deaths"]) + "[/b] · KD [b]" + kd + "[/b]"]
-	# BR:最终排名(BR result 含 rank/teams,缺省按 25 队)
+	# BR:最终排名(BR result 含 rank/team_rank/teams,缺省按 25 队)
 	if G.mode == "br":
 		var rank: int = int(r.get("rank", 0))
 		var teams_n: int = int(r.get("teams", 25))
 		if rank > 0:
 			lines.append("最终排名 [b]第 " + str(rank) + " 名[/b](共 " + str(teams_n) + " 队)")
+		var team_rank: int = int(r.get("team_rank", 0))
+		if team_rank > 0:
+			lines.append("小队排名 [b]第 " + str(team_rank) + " 名[/b](共 " + str(teams_n) + " 队)")
 	var us_s = r.get("us_score", r.get("us", null))
 	var ru_s = r.get("ru_score", r.get("ru", null))
 	if us_s != null and ru_s != null:

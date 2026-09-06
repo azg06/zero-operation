@@ -133,6 +133,7 @@ func _setup_input_map() -> void:
 		"scoreboard": [KEY_TAB], "pause": [KEY_ESCAPE],
 		"nightvision": [KEY_T],
 		"melee": [KEY_H],          # 近战小刀(长按呼出/收回)
+		"inspect": [KEY_I],        # 武器检视
 	}
 	for action in defs:
 		if not InputMap.has_action(action):
