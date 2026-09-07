@@ -553,11 +553,11 @@ func _desired_xf() -> Transform3D:
 			var xf_a: Transform3D = anchor.global_transform
 			xf_a.origin += xf_a.basis * _pos_off
 			xf_a.origin += xf_a.basis * Vector3(0.0, 0.0, _recoil_pos_z * 0.25)
-			var basis := xf_a.basis
-			basis = basis * Basis(Vector3.UP, look_yaw)
-			basis = basis * Basis(Vector3.RIGHT, look_pitch)
-			basis = basis * Basis.from_euler(_rot_off)
-			xf = Transform3D(basis, xf_a.origin)
+			var b_xf := xf_a.basis
+			b_xf = b_xf * Basis(Vector3.UP, look_yaw)
+			b_xf = b_xf * Basis(Vector3.RIGHT, look_pitch)
+			b_xf = b_xf * Basis.from_euler(_rot_off)
+			xf = Transform3D(b_xf, xf_a.origin)
 		_:
 			# FP_OPTIC(战地式 ADS 目镜):眼位=观瞄锚点,朝向=鼠标 look 角。
 			# 旧版相机沿炮管轴线取朝向,而炮塔又跟随相机射线 → "相机锁炮管、
@@ -642,9 +642,9 @@ func _update_ads_barrel(view: int) -> void:
 		_cannon_tube = vehicle.mesh.find_child("CannonTube", true, false)
 	if _cannon_tube == null:
 		return
-	var hide: bool = view == VehView.FP_OPTIC
-	if _cannon_tube.visible == hide:
-		_cannon_tube.visible = not hide
+	var hide_fl: bool = view == VehView.FP_OPTIC
+	if _cannon_tube.visible == hide_fl:
+		_cannon_tube.visible = not hide_fl
 
 
 ## 观察位(防空车):机枪随观察方向旋转(模型挂车体,局部 yaw=轨道 yaw)

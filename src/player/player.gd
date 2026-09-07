@@ -441,21 +441,21 @@ func _ensure_adren_vm() -> void:
 	if _adren_vm != null and is_instance_valid(_adren_vm):
 		return
 	_adren_vm = Node3D.new()
-	var body := MeshInstance3D.new()
+	var fbody := MeshInstance3D.new()
 	var bm := CylinderMesh.new()
 	bm.top_radius = 0.012
 	bm.bottom_radius = 0.012
 	bm.height = 0.085
 	bm.radial_segments = 8
-	body.mesh = bm
-	body.rotation.x = PI / 2.0
+	fbody.mesh = bm
+	fbody.rotation.x = PI / 2.0
 	var body_mat := StandardMaterial3D.new()
 	body_mat.albedo_color = Color(0.86, 0.92, 0.96)
 	body_mat.roughness = 0.25
 	body_mat.metallic = 0.4
-	body.material_override = body_mat
-	body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_adren_vm.add_child(body)
+	fbody.material_override = body_mat
+	fbody.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_adren_vm.add_child(fbody)
 	var liquid := MeshInstance3D.new()
 	var lm := CylinderMesh.new()
 	lm.top_radius = 0.007
@@ -530,23 +530,23 @@ func _update_adren_vm(dt: float) -> void:
 	var k := clampf(_adren_t / dur, 0.0, 1.0)
 	var start := Vector3(0.24, -0.16, -0.28)
 	var chest := Vector3(-0.14, -0.10, -0.20)
-	var pos := start
+	var lpos := start
 	var rot := Vector3(0.15, 0.35, 0.1)
 	if k < 0.22:
 		var e := k / 0.22
-		pos = start.lerp(chest, e * e * (3.0 - 2.0 * e))
+		lpos = start.lerp(chest, e * e * (3.0 - 2.0 * e))
 		rot = rot.lerp(Vector3(-0.55, -0.9, 0.2), e)
 	elif k < 0.52:
-		pos = chest + Vector3(0.0, 0.004, -0.012 * sin((k - 0.22) / 0.3 * PI))
+		lpos = chest + Vector3(0.0, 0.004, -0.012 * sin((k - 0.22) / 0.3 * PI))
 		rot = Vector3(-0.55, -0.9, 0.2)
 	elif k < 0.78:
-		pos = chest + Vector3(0.0, 0.004, -0.012)
+		lpos = chest + Vector3(0.0, 0.004, -0.012)
 		rot = Vector3(-0.55, -0.9, 0.2)
 	else:
 		var e := (k - 0.78) / 0.22
-		pos = (chest + Vector3(0.0, 0.004, -0.012)).lerp(start, e)
+		lpos = (chest + Vector3(0.0, 0.004, -0.012)).lerp(start, e)
 		rot = Vector3(-0.55, -0.9, 0.2).lerp(Vector3(0.15, 0.35, 0.1), e)
-	_adren_vm.position = pos
+	_adren_vm.position = lpos
 	_adren_vm.rotation = rot
 	if k >= 1.0:
 		_adren_t = -1.0
@@ -771,7 +771,7 @@ func _try_repair_vehicle() -> bool:
 # ============ 载具 ============
 func enter_vehicle(v) -> void:
 	var npc_driver: bool = v.driver != null and v.driver != self
-	var npc_gunner: bool = v.gunner != null and v.gunner != self
+	var _npc_gunner: bool = v.gunner != null and v.gunner != self  # 预留:乘客/司机区分提示
 	if v.type == "jeep" and npc_driver:
 		# 吉普司机在位:玩家坐乘客位(不顶司机下车),强制第一人称,持个人武器开火;
 		# 乘客位被 NPC 占时顶替乘客(乘客无操作价值,NPC 由座位兜底下车),司机必须保留

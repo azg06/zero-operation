@@ -179,6 +179,9 @@ static func _radial_tex(size: int, stops: Array) -> ImageTexture:
 						col = (stops[i][1] as Color).lerp(stops[i + 1][1], f)
 						break
 				img.set_pixel(x, y, col)
+	if img == null or img.is_empty():
+		push_warning("[TEX] 空 Image @ effects.gd 渐变纹理生成")
+		return null
 	return ImageTexture.create_from_image(img)
 
 
@@ -344,6 +347,9 @@ static func make_vignette_tex(color: Color, edge0: float, edge1: float, linear :
 			var d: float = sqrt(dx * dx + dy * dy)
 			var a: float = clampf((d - edge0) / (edge1 - edge0), 0.0, 1.0) if linear else smoothstep(edge0, edge1, d)
 			img.set_pixel(x, y, Color(color.r, color.g, color.b, a * alpha_scale))
+	if img == null or img.is_empty():
+		push_warning("[TEX] 空 Image @ effects.gd 渐变纹理生成")
+		return null
 	return ImageTexture.create_from_image(img)
 
 
@@ -365,6 +371,9 @@ func _make_nvg_vignette_tex() -> ImageTexture:
 			var d: float = sqrt(dx * dx + dy * dy)
 			var a: float = smoothstep(0.55, 1.1, d)
 			img.set_pixel(x, y, Color(0.01, 0.09, 0.03, a * 0.85))
+	if img == null or img.is_empty():
+		push_warning("[TEX] 空 Image @ effects.gd 渐变纹理生成")
+		return null
 	return ImageTexture.create_from_image(img)
 
 

@@ -566,7 +566,6 @@ static func _pump_shotgun(g: Node3D, c: Dictionary) -> void:
 	var receiver_z1: float = c.get("receiver_z1", 0.13)
 	var barrel_y: float = c.get("barrel_y", 0.045)
 	var barrel_r: float = c.get("barrel_r", 0.014)
-	var barrel_z0: float = c.get("barrel_z0", -0.22)
 	var muzzle_z: float = c.get("muzzle_z", -0.74)
 	var tube_y: float = c.get("tube_y", barrel_y - 0.052)
 	var tube_r: float = c.get("tube_r", 0.0125)
@@ -1033,7 +1032,7 @@ static func _pump_forend(g: Node3D, radius: float, length: float, center_y: floa
 	g.set_meta("pump_grip_offset", Vector3(0, -radius - 0.012, 0))
 
 
-static func _shotgun_action(g: Node3D, receiver_w: float, receiver_y: float, receiver_z0: float) -> void:
+static func _shotgun_action(g: Node3D, receiver_w: float, receiver_y: float, _receiver_z0: float) -> void:
 	var bolt_x := -receiver_w * 0.5 - 0.004
 	var bolt := Node3D.new()
 	bolt.name = "PumpBolt"

@@ -526,6 +526,14 @@ static func update_health_bar(hb: Dictionary, health: float, team: String) -> vo
 	hb["_last_t"] = now
 	hb["_last_hp"] = health
 	var img: Image = hb["img"]
+	# [FIX 纹理空图] img 意外为空时跳过上传(引擎 _texture_2d_update 报错根),
+	# 首次发生打诊断日志定位来源
+	if img == null or img.is_empty():
+		if not hb.has("_img_bad"):
+			hb["_img_bad"] = true
+			push_warning("[TEX] 血条 Image 为空,跳过纹理上传 (诊断: img=", img, ")")
+		(hb["sprite"] as Sprite3D).visible = true
+		return
 	img.fill(Color(0, 0, 0, 0.7))
 	var col := Color(0.0, 1.0, 0.53) if team == "us" else Color(1.0, 0.33, 0.0)
 	var w := int(clampf(health / 100.0, 0.0, 1.0) * 62.0)

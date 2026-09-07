@@ -1667,11 +1667,11 @@ func _crew_driver_goal(v) -> Vector3:
 			continue
 		if G.mode == "breakthrough" and G.bt != null and f.sector != G.bt["sector"]:
 			continue
-		var owner = f.owner_team
+		var own_team = f.owner_team
 		var priority := 2
-		if owner != null and owner != team:
+		if own_team != null and own_team != team:
 			priority = 0
-		elif owner == null:
+		elif own_team == null:
 			priority = 1
 		var score: float = float(priority) * 100000.0 + Utils.dist_2d(v.pos.x, v.pos.z, f.pos.x, f.pos.z)
 		if score < best_score:
@@ -2757,7 +2757,7 @@ func _anim_foot_ik(dt: float, thigh: Node3D, knee: Node3D, hip_x: float, leg_sig
 ## GLB 骨骼动画驱动:locomotion(Idle/Walk/Run 按速度交叉切换+步频同步)
 ## + 姿态动画(Crouch/Prone 按姿态量优先选片,位移已烘进动画)
 ## + 骨骼叠加层(腿向分离/瞄准俯仰 —— 这些骨不在动画轨,代码全权)
-func _anim_glb(dt: float, ap: AnimationPlayer, pk: float) -> void:
+func _anim_glb(_dt: float, ap: AnimationPlayer, pk: float) -> void:
 	# 姿态优先:趴 > 蹲 > 速度选片(蹲/趴位移由动画 Hips location 承担,不再代码压低)
 	# 蹲/趴 + 移动 → CrouchWalk/ProneCrawl 步态片(用户实测:移动中腿保持静止蹲/趴姿很怪)
 	var want := "Idle"

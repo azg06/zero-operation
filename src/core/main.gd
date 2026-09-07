@@ -466,6 +466,18 @@ func _ready() -> void:
 	# NPC 司机登车起步 → 玩家上车应坐乘客位(不顶司机)+强制第一人称+可开枪
 	if ua.has("--test-jeep-passenger"):
 		_run_jeep_passenger_qa()
+	# 第一人称腰射枪位截图:--test-hip-shot(配合 --test-play,可前置 --test-gun <id>)
+	if ua.has("--test-hip-shot"):
+		_run_hip_shot()
+	# 主菜单截图:--test-menu-shot(不部署,等背景城市就绪后截主菜单整屏)
+	if ua.has("--test-menu-shot"):
+		_run_menu_shot()
+	# ADS 三点一线批量验证:--test-ads-line <all|枪id>(配合 --test-play)
+	# 每把枪满镜后把 muzzle 世界坐标 unproject 到屏幕,量化枪口与准星(屏幕中心)偏差
+	if ua.has("--test-ads-line"):
+		var alidx := ua.find("--test-ads-line")
+		var alid: String = ua[alidx + 1] if ua.size() > alidx + 1 else "all"
+		_run_ads_line(alid)
 	# 空中载具建模 QA:--test-air <heli|jet>(悬浮多角度认证,不进飞行逻辑)
 	if ua.has("--test-air"):
 		var aidx := ua.find("--test-air")
@@ -1402,14 +1414,10 @@ func _ready() -> void:
 					await get_tree().create_timer(0.42).timeout
 					var bo: float = glg.reload_ctl.breech_open if glg.reload_ctl != null else -1.0
 					var bn: Node3D = glg.group.get_meta("breech") if glg.group.has_meta("breech") else null
-					var rn: Node3D = glg.group.get_meta("rocket") if glg.group.has_meta("rocket") else null
 					# 中折方向验证:枪口点(膛体空间 0,0.052,-0.29)在枪身空间的 y 必须随开膛「下降」
 					var tip_y := 0.0
-					var rd_g := Vector3.ZERO
 					if bn != null:
 						tip_y = (bn.transform * Vector3(0, 0.052, -0.29)).y
-						if rn != null:
-							rd_g = bn.transform * rn.position
 					# 榴弹必须始终"握在左手里"被带到装填口(不是在装填口凭空出现):
 					# 取弹后手与弹的世界距离应恒定在握持偏移(≈9cm)左右
 					var rc = glg.reload_ctl
@@ -2817,6 +2825,92 @@ func _qa_shot(tag: String) -> void:
 	if img != null:
 		img.save_png("E:/工作目录2/models_probe/qa_%s.png" % tag)
 		print("[TEST-SHOT] ", tag)
+
+
+## 第一人称腰射(hip)枪位截图:--test-hip-shot(配合 --test-play,可前置 --test-gun <id>)
+## 部署后静止站立不 ADS,待切枪动画与 sway 稳定后正前视角截一帧 —— 用于
+## 对比参考游戏的持枪画面横向位置(枪中轴应在画面中心偏右一点点)
+func _run_hip_shot() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[TEST] 玩家未部署,hip 截图跳过")
+		get_tree().quit()
+		return
+	await get_tree().create_timer(2.2).timeout
+	var gid: String = G.player.gun().id if G.player.gun() != null else "default"
+	await _qa_shot("hip_" + gid)
+	print("[TEST] hip 截图完成:", gid)
+	get_tree().quit()
+
+
+## 主菜单整屏截图:--test-menu-shot(不部署;等菜单背景城市构建完成再截)
+func _run_menu_shot() -> void:
+	# 菜单背景城市在主菜单显示后异步构建([PERF] 菜单背景城市构建完成),给足 6s
+	await get_tree().create_timer(6.0).timeout
+	await _qa_shot("menu_main")
+	print("[TEST] 主菜单截图完成")
+	get_tree().quit()
+
+
+## ADS 三点一线批量验证:--test-ads-line <all|id>
+## 每把枪满镜后 muzzle 世界坐标 unproject 到屏幕,输出与屏幕中心的偏差
+## (px 与半屏高百分比);偏差 >6% 半屏高判 FAIL(doom 视角)
+func _run_ads_line(which: String) -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[ADS-LINE] 玩家未部署,跳过")
+		get_tree().quit()
+		return
+	var ids: Array = []
+	if which == "all":
+		for wd_id in WeaponsData.W().keys():
+			ids.append(wd_id)
+	else:
+		ids.append(which)
+	var vp_size := get_viewport().get_visible_rect().size
+	var center := vp_size * 0.5
+	var fail := 0
+	var tested := 0
+	for gid in ids:
+		if not WeaponsData.W().has(gid):
+			continue
+		var def = WeaponsData.W()[gid]
+		if def.scope:
+			continue   # 狙击满镜走镜内遮罩,枪模不可见,无三点一线概念
+		# 装配并切枪
+		for g in G.player.guns:
+			G.vm_camera.remove_child(g.group)
+			g.group.queue_free()
+		G.player.guns = [Gun.new(gid, G.player)]
+		G.vm_camera.add_child(G.player.guns[0].group)
+		G.player.gun_index = 0
+		G.player.gun().equip()
+		Input.action_press("ads")
+		await get_tree().create_timer(1.2).timeout
+		var gun = G.player.gun()
+		var mzl: Node3D = gun.group.get_meta("muzzle", null)
+		if mzl == null:
+			print("[ADS-LINE] %-8s 无 muzzle meta,跳过" % gid)
+			continue
+		var wpos: Vector3 = mzl.global_position
+		var sp: Vector2 = get_viewport().get_camera_3d().unproject_position(wpos)
+		var dy_pct: float = (sp.y - center.y) / (vp_size.y * 0.5) * 100.0
+		var dx_pct: float = (sp.x - center.x) / (vp_size.x * 0.5) * 100.0
+		tested += 1
+		var ok := absf(dy_pct) <= 6.0 and absf(dx_pct) <= 6.0
+		if not ok:
+			fail += 1
+		print("[ADS-LINE] %-8s 枪口屏幕偏差 dx=%+.1f%% dy=%+.1f%% (%s)" % [
+			gid, dx_pct, dy_pct, "OK" if ok else "FAIL"])
+		Input.action_release("ads")
+	print("[ADS-LINE] 完成:测试 %d 枪,FAIL %d 枪" % [tested, fail])
+	get_tree().quit()
 
 
 ## 载具战地式座位/视角序列验证:上车(炮手位=驾驶+开炮) → 第三人称开炮 →

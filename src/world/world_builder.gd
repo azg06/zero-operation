@@ -967,10 +967,10 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 		wg.add_child(brw)
 
 	# ---------- 共享材质 ----------
-	var crate_mat := _std_tex(Color.WHITE, 0.85, "plywood")
+	var _crate_mat := _std_tex(Color.WHITE, 0.85, "plywood")
 	var conc_mat := _std_tex(Color.WHITE, 0.95, "rough_concrete")
 	var rock_photo_mat := _std_tex(Color.WHITE, 1.0, "rock_04")
-	var sand_mat := _std(Color.html("#9a8a68"), 1.0)
+	var _sand_mat := _std(Color.html("#9a8a68"), 1.0)
 	var roof_mat := _std(Color.html("#3a3c40"), 0.95)
 	var cont_mats := [
 		_std_tex(Color.html("#8aa0c0"), 0.6, "metal_plate", 0.4),
@@ -998,13 +998,13 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 
 	# GLB 道具批绘缓冲(多表面网格,材质内嵌)
 	var mm_mesh_buf := {}
-	var mm_push_mesh := func(prop_id: String, x: float, z: float, rot: float, y_off: float, sc: Vector3) -> void:
+	var mm_push_mesh := func(prop_id: String, x: float, z: float, rot: float, y_off: float, scl: Vector3) -> void:
 		var gh: float = G.ground_h.call(x, z)
 		var entry = mm_mesh_buf.get(prop_id)
 		if entry == null:
 			entry = { "mesh": PropModels.prop_mesh(prop_id), "t": [] }
 			mm_mesh_buf[prop_id] = entry
-		(entry["t"] as Array).append(Transform3D(Basis(Vector3.UP, rot).scaled(sc), Vector3(x, gh + y_off, z)))
+		(entry["t"] as Array).append(Transform3D(Basis(Vector3.UP, rot).scaled(scl), Vector3(x, gh + y_off, z)))
 	var crate := func(x: float, z: float, s := 1.3) -> void:
 		mm_push_mesh.call("crate", x, z, Utils.rand(TAU), 0.0, Vector3(s / 0.78, s / 0.78, s / 0.78))
 		add_collider.call(x, 0, z, s, s, s)
@@ -1015,20 +1015,20 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 		m.position = Vector3(x, G.ground_h.call(x, z) + 0.45, z)
 		m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 		wg.add_child(m)
-		var ww := 2.4 if absf(cos(rot)) > 0.5 else 0.5
-		add_collider.call(x, 0, z, ww, 0.9, 0.5 if ww == 2.4 else 2.4)
+		var bw := 2.4 if absf(cos(rot)) > 0.5 else 0.5
+		add_collider.call(x, 0, z, bw, 0.9, 0.5 if bw == 2.4 else 2.4)
 
 	var sandbag := func(x: float, z: float, rot := 0.0, sb_len := 3.0) -> void:
 		# 沙袋墙 GLB(错缝三行):替换旧版纯盒"莫名正方体"
 		mm_push_mesh.call("sandbag", x, z, rot, 0.0, Vector3(sb_len / 1.62, 1.30, 1.45))
-		var ww := sb_len if absf(cos(rot)) > 0.5 else 0.7
-		add_collider.call(x, 0, z, ww, 1.0, 0.7 if ww == sb_len else sb_len)
+		var sw := sb_len if absf(cos(rot)) > 0.5 else 0.7
+		add_collider.call(x, 0, z, sw, 1.0, 0.7 if sw == sb_len else sb_len)
 
 	var container := func(x: float, z: float, rot := 0.0) -> void:
 		mm_push.call(Utils.choice(cont_mats), m_box1, x, z, rot, 1.35, Vector3(6.2, 2.7, 2.5))
-		var ww := 6.2 if absf(cos(rot)) > 0.5 else 2.5
-		add_collider.call(x, 0, z, ww, 2.7, 2.5 if ww == 6.2 else 6.2)
-		minimap_rects.append({ "x": x, "z": z, "w": ww, "d": 2.5 if ww == 6.2 else 6.2 })
+		var cw := 6.2 if absf(cos(rot)) > 0.5 else 2.5
+		add_collider.call(x, 0, z, cw, 2.7, 2.5 if cw == 6.2 else 6.2)
+		minimap_rects.append({ "x": x, "z": z, "w": cw, "d": 2.5 if cw == 6.2 else 6.2 })
 
 	var barrel := func(x: float, z: float) -> void:
 		mm_push_mesh.call("barrel", x, z, Utils.rand(TAU), 0.0, Vector3.ONE)
@@ -1087,9 +1087,9 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 			(car3a_buf[cm2]["t"] as Array).append(
 				Transform3D(Basis(Vector3.UP, rot), Vector3(x, gh, z)))
 			var sz: Array = car3a_size.get(Utils.choice(car3a_ids), [4.6, 1.86, 1.45])
-			var ww: float = sz[0] if absf(cos(rot)) > 0.5 else sz[1]
+			var vw: float = sz[0] if absf(cos(rot)) > 0.5 else sz[1]
 			var dd: float = sz[1] if absf(cos(rot)) > 0.5 else sz[0]
-			add_collider.call(x, 0, z, ww, sz[2], dd)
+			add_collider.call(x, 0, z, vw, sz[2], dd)
 			return
 		# 兜底:GLB 缺失时回退旧版盒堆车
 		var col: Color = col_override if col_override != null else Utils.choice(car_colors)
@@ -1118,8 +1118,8 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 		for wp in [[-1.4, 0.95], [1.4, 0.95], [-1.4, -0.95], [1.4, -0.95]]:
 			(car_mm[car_wheel_mat]["t"] as Array).append(base * Transform3D(Basis(Vector3.RIGHT, PI / 2.0).scaled(Vector3(0.72, 0.3, 0.72)), Vector3(wp[0], 0.36, wp[1])))
 			(car_mm[car_hub_mat]["t"] as Array).append(base * Transform3D(Basis(Vector3.RIGHT, PI / 2.0).scaled(Vector3(0.4, 0.34, 0.4)), Vector3(wp[0], 0.36, wp[1])))
-		var ww := 4.2 if absf(cos(rot)) > 0.5 else 1.9
-		add_collider.call(x, 0, z, ww, 1.7, 1.9 if ww == 4.2 else 4.2)
+		var cw := 4.2 if absf(cos(rot)) > 0.5 else 1.9
+		add_collider.call(x, 0, z, cw, 1.7, 1.9 if cw == 4.2 else 4.2)
 
 	# ---------- 可破坏建筑 ----------
 	var shed_wood := _std_tex(Color.html("#8a6f4e"), 0.95, "plywood")
@@ -2206,7 +2206,7 @@ static func _city_blocks(_T, wg: Node3D, add_collider: Callable, minimap_rects: 
 
 ## 中央广场(C 点) + 街区城市设施:喷泉水池/草坪/长椅/路灯/花坛/公交站/报刊亭/
 ## 咖啡座/篮球场/停车场/游乐小件。全部 MultiMesh 批绘(每材质 1 draw,零额外开销)。
-static func _city_plaza_and_amenities(wg: Node3D, add_collider: Callable, road: float) -> void:
+static func _city_plaza_and_amenities(wg: Node3D, add_collider: Callable, _road: float) -> void:
 	var stone := _std_tex(Color.html("#9a9a92"), 0.9, "rough_concrete")
 	var stone2 := _std_tex(Color.html("#7a7a74"), 0.95, "rough_concrete")
 	var grass := _std(Color.html("#4a7a3a"), 1.0)
@@ -2369,8 +2369,6 @@ static func add_amenities(wg: Node3D, kind: String, positions: Array) -> void:
 	uc.bottom_radius = 0.5
 	uc.height = 1.0
 	uc.radial_segments = 12
-	var buf := {}
-	var kk := "%d|%d" % [0, 0]   # 不分 mat/mesh 桶,每 kind 单材质单 mesh
 	match kind:
 		"pump":
 			# 沙漠加油站:加油机 + 顶棚支柱
@@ -3157,7 +3155,7 @@ static func _desert_airport(wg: Node3D, add_collider: Callable, minimap_rects: A
 		ent_wall: Material, roof_mat: Material) -> void:
 	var tarmac_mat := _std(Color.html("#4a4c4e"), 0.92)
 	var line_mat := _basic(Color.html("#e8e8e0"), true)
-	var plane_mat := _std_tex(Color.html("#b8bcc0"), 0.5, "metal_plate", 0.5)
+	var _plane_mat := _std_tex(Color.html("#b8bcc0"), 0.5, "metal_plate", 0.5)
 	var rz := -95.0
 	# 跑道(东西向沥青带)
 	var gh0: float = G.ground_h.call(0, rz)
@@ -4395,7 +4393,7 @@ static func _snow_research_station(wg: Node3D, add_collider: Callable, minimap_r
 ## ==================== 丛林河谷(突破) ====================
 ## sc: 布局缩放系数(TDM 120m 圈定按 1/3 等比;默认 1.0 不影响突破)
 static func _jungle_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects: Array,
-		crate: Callable, barrel: Callable, near_obj: Callable, rock_photo_mat: Material,
+		crate: Callable, barrel: Callable, near_obj: Callable, _rock_photo_mat: Material,
 		sc := 1.0) -> void:
 	var trunk_mat := _std(Color.html("#4a3a26"), 1.0)
 	var wood_mat2 := _std_tex(Color.html("#8a6a44"), 0.95, "plywood")
@@ -4961,7 +4959,7 @@ static func _harbor_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects:
 ## ==================== 暗夜雷达站(突破) ====================
 static func _peak_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects: Array,
 		crate: Callable, barrel: Callable, sandbag: Callable, barrier: Callable, container: Callable,
-		near_obj: Callable, rock_photo_mat: Material, roof_mat: Material) -> void:
+		near_obj: Callable, _rock_photo_mat: Material, roof_mat: Material) -> void:
 	var bunker_mat := _std_tex(Color.html("#b0b6bc"), 1.0, "rough_concrete")
 	var white_mat := _std(Color.html("#dde2e8"), 0.6, 0.2)
 	var mast_mat := _std(Color.html("#8a4040"), 0.6, 0.5)
@@ -5103,7 +5101,7 @@ static func _peak_blocks(T, wg: Node3D, add_collider: Callable, minimap_rects: A
 				g.add_child(br2)
 			if lvl < 2:
 				var h2: float = h + 4.6
-				var tx: float = 0.62 * (1.0 - h2 / H) + 0.62 * 0.35 * (h2 / H)
+				var _tx: float = 0.62 * (1.0 - h2 / H) + 0.62 * 0.35 * (h2 / H)
 				for s3 in [-1.0, 1.0]:
 					var dz: float = 2 * hx
 					var d1 := _box(0.055, sqrt(4.6 * 4.6 + dz * dz), 0.055, mast_mat)
@@ -5982,7 +5980,7 @@ static func _build_base_camp(wg: Node3D, add_collider: Callable, half: float, si
 	var gh := func(x: float, z: float) -> float:
 		return G.ground_h.call(x, z) if G.ground_h.is_valid() else 0.0
 	var canvas := _std_tex(Color.html("#4a5a3a"), 0.95, "plywood")
-	var sand := _std(Color.html("#9a8a68"), 1.0)
+	var _sand := _std(Color.html("#9a8a68"), 1.0)
 	var wood := _std_tex(Color.html("#8a6f4e"), 0.95, "plywood")
 	var metal := _std_tex(Color.html("#5a5e64"), 0.6, "metal_plate", 0.4)
 	var dark := _std(Color.html("#23252a"), 1.0)
@@ -6012,12 +6010,12 @@ static func _build_base_camp(wg: Node3D, add_collider: Callable, half: float, si
 	var sandbag_wall := func(x: float, z: float, length: float, rot: float) -> void:
 		var g := Node3D.new()
 		for s in int(length / 1.2):
-			var b := _box(1.0, 0.5, 0.5, sand)
+			var b := _box(1.0, 0.5, 0.5, _sand)
 			b.position = Vector3(-length / 2.0 + s * 1.2 + 0.6, 0.25, 0)
 			b.rotation.y = Utils.rand(-0.06, 0.06)
 			g.add_child(b)
 		for s in int(length / 2.4):
-			var b2 := _box(1.0, 0.5, 0.5, sand)
+			var b2 := _box(1.0, 0.5, 0.5, _sand)
 			b2.position = Vector3(-length / 2.0 + s * 2.4 + 1.2, 0.75, Utils.rand(-0.1, 0.1))
 			b2.rotation.y = Utils.rand(-0.08, 0.08)
 			g.add_child(b2)

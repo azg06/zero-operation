@@ -707,14 +707,14 @@ func _start_revolver() -> void:
 	var names: Array = []
 	var durs: Array = []
 	if revolver_quick:
-		var total: float = maxf(0.8, float(cfg.get("quick_time", 2.0)) * mult)
+		var mt: float = maxf(0.8, float(cfg.get("quick_time", 2.0)) * mult)
 		var qw: Array = (cfg.get("quick_weights", [0.16, 0.15, 0.20, 0.18, 0.16, 0.15]) as Array).duplicate()
 		var wsum := 0.0
 		for w in qw:
 			wsum += float(w)
 		names = ["rv_open", "rv_eject", "rv_fetch_loader", "rv_load_loader", "rv_close", "rv_recover"]
 		for w in qw:
-			durs.append(total * float(w) / maxf(wsum, 0.0001))
+			durs.append(mt * float(w) / maxf(wsum, 0.0001))
 		revolver_load_count = mini(_g().mag_cap, _g().ammo + _g().reserve)
 	else:
 		var need := mini(_g().mag_cap - _g().ammo, _g().reserve)
@@ -745,7 +745,7 @@ func _start_revolver() -> void:
 	var ttl := 0.0
 	for d in phase_durs:
 		ttl += float(d)
-	total = ttl
+	var mag_total := ttl
 	stage = 0
 	stage_time = 0.0
 	stage_dur = float(phase_durs[0]) if phase_durs.size() > 0 else 0.2
@@ -817,9 +817,9 @@ func _next_empty_chamber() -> int:
 	var n: int = arr.size()
 	if n <= 0:
 		return -1
-	var start: int = _g()._chamber_index
+	var ch_i: int = _g()._chamber_index
 	for step in n:
-		var idx := (start + step) % n
+		var idx := (ch_i + step) % n
 		if arr[idx] != true:
 			return idx
 	return -1
@@ -914,9 +914,9 @@ func _update_revolver(dt: float, _env: float) -> void:
 	match nm:
 		"rv_open":
 			# 左手离开护木,抓住弹巢后缘把弹巢向左侧拨出(手部缩到 0.88 并留出安全间隙)
-			var e := _ez(p)
-			var arc := Vector3(-sin(e * PI) * 0.03, sin(e * PI) * 0.012, 0.0)
-			left_hand.position = hand_rest.lerp(cyl_pos + Vector3(0.0, -0.022, 0.045), e) + arc
+			var e1 := _ez(p)
+			var arc := Vector3(-sin(e1 * PI) * 0.03, sin(e1 * PI) * 0.012, 0.0)
+			left_hand.position = hand_rest.lerp(cyl_pos + Vector3(0.0, -0.022, 0.045), e1) + arc
 		"rv_eject":
 			# 右手保持握把,左手拍退壳杆/弹巢前缘,弹出全部空壳(或快速换弹清膛)
 			left_hand.position = support + Vector3(sin(p * PI) * 0.018, 0.0, sin(p * PI) * 0.012)
@@ -925,15 +925,15 @@ func _update_revolver(dt: float, _env: float) -> void:
 		"rv_fetch_loader":
 			var pocket := _chest_pocket()
 			if p < 0.4:
-				var e := _ez(p / 0.4)
-				left_hand.position = support.lerp(pocket, e) + Vector3(-sin(e * PI) * 0.04, 0.0, -sin(e * PI) * 0.03)
+				var e2 := _ez(p / 0.4)
+				left_hand.position = support.lerp(pocket, e2) + Vector3(-sin(e2 * PI) * 0.04, 0.0, -sin(e2 * PI) * 0.03)
 			else:
-				var e := _ez((p - 0.4) / 0.6)
-				left_hand.position = pocket.lerp(cyl_pos + Vector3(0.0, 0.0, 0.045), e) + Vector3(-sin(e * PI) * 0.03, 0.0, -sin(e * PI) * 0.03)
-				if speedloader_mesh != null and e > 0.06:
+				var e3 := _ez((p - 0.4) / 0.6)
+				left_hand.position = pocket.lerp(cyl_pos + Vector3(0.0, 0.0, 0.045), e3) + Vector3(-sin(e3 * PI) * 0.03, 0.0, -sin(e3 * PI) * 0.03)
+				if speedloader_mesh != null and e3 > 0.06:
 					speedloader_mesh.visible = true
 					speedloader_mesh.position = left_hand.position + Vector3(0.0, 0.012, -0.01)
-					speedloader_mesh.rotation = Vector3(0.0, 0.0, e * 0.4)
+					speedloader_mesh.rotation = Vector3(0.0, 0.0, e3 * 0.4)
 		"rv_load_loader":
 			var target := _revolver_cyl_center() + Vector3(0.0, 0.016, 0.055)
 			var e := _ez(p)
@@ -1403,10 +1403,10 @@ func _update_mag_prepare() -> void:
 		mag.rotation = mag_base_rot
 	if left_hand == null:
 		return
-	var e := _ez(stage_p)
+	var _e := _ez(stage_p)
 	# 换弹开始:左手先抓住旧弹匣
 	var grip := hand_grip_anchor
-	left_hand.position = hand_rest.lerp(grip, e)
+	left_hand.position = hand_rest.lerp(grip, _e)
 
 
 func _update_mag_remove() -> void:
@@ -1529,7 +1529,7 @@ func _update_mag_fetch() -> void:
 			mag.rotation = insert_start_rot * _ez(e)
 
 
-func _update_mag_insert(dt: float) -> void:
+func _update_mag_insert(_dt: float) -> void:
 	var p := stage_p
 	var commit_frac: float = float(cfg.get("insert_commit", 0.52))
 	var contact: float = float(cfg.get("insert_contact", 0.30))

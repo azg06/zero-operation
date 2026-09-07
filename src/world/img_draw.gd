@@ -132,6 +132,10 @@ static func overlay(img: Image, color: Color) -> void:
 
 
 static func to_texture(img: Image) -> ImageTexture:
+	# [FIX 纹理空图] _texture_2d_update 引擎报错根:空 Image 上传 GPU
+	if img == null or img.is_empty():
+		push_warning("[TEX] to_texture 收到空 Image (诊断)")
+		return ImageTexture.new()
 	var tex := ImageTexture.new()
 	tex.set_image(img)  # set_image 自动生成 mipmap,并设置 linear 过滤(Godot 4.7)
 	return tex

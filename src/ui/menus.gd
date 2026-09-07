@@ -164,7 +164,7 @@ func _process(dt: float) -> void:
 			_campaign_src.chapter_finished.disconnect(_on_chapter_finished)
 		_campaign_src = G.campaign
 		G.campaign.chapter_finished.connect(_on_chapter_finished)
-	# 新闻滚动条
+	# 新闻/情报轮播(主菜单右侧 INTEL 卡 + 指示点)
 	if _news_label != null and _screens.has("menu") and _screens["menu"].visible:
 		_news_t += dt
 		if _news_t > 5.0:
@@ -173,6 +173,8 @@ func _process(dt: float) -> void:
 			_news_label.text = NEWS[_news_i]
 			if _news_label.text == "":
 				_news_label.text = NEWS[0]
+			for di in _intel_dots.size():
+				(_intel_dots[di] as ColorRect).color = UiTheme.PRIMARY if di == _news_i else Color(1, 1, 1, 0.22)
 	# 枪械改装 3D 预览:自动旋转(拖拽暂停)+ 槽位聚焦镜头平滑过渡
 	if _screens.has("armory") and _screens["armory"].visible:
 		if _arm_pivot != null and not _arm_dragging:
@@ -313,7 +315,8 @@ func _bg(parent: Control, color := Color(0.04, 0.05, 0.08, 1)) -> ColorRect:
 	return bg
 
 
-## ==================== 主菜单(BF2042 风格:左侧竖排模式列表 + 顶部标签 + 战场背景) ====================
+## ==================== 主菜单(BF2042 布局:顶部导航条(货币/XP/玩家卡) +
+## 左上赛季标识 + 左侧竖排模式列表 + 右侧信息栏(通行证/经验/任务/情报)) ====================
 func _build_main_menu() -> void:
 	var s := _add_screen("menu")
 	# 半透明底色(战场景色透出,左侧压暗便于阅读)
@@ -327,44 +330,50 @@ func _build_main_menu() -> void:
 	dim.custom_minimum_size = Vector2(460, 0)
 	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	s.add_child(dim)
-	# ---- 顶部标签栏(BF2042:PLAY / ARMORY / BATTLE PASS / PROFILE / STORE,可点击切换) ----
+	# ---- 顶部全宽导航条(BF2042:深色横条承载 Tab;货币/XP/玩家卡靠右) ----
+	var topbar := ColorRect.new()
+	topbar.color = Color(0.01, 0.02, 0.03, 0.72)
+	topbar.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	topbar.custom_minimum_size = Vector2(0, 56)
+	topbar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	s.add_child(topbar)
 	_make_tab_bar(s, "menu")
-	# ---- 右上:玩家卡 ----
-	var trow := VBoxContainer.new()
-	trow.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	trow.position = Vector2(-226, 14)
-	trow.add_theme_constant_override("separation", 1)
-	s.add_child(trow)
-	var pc1 := UiTheme.make_label("等级 32", 16, UiTheme.PRIMARY)
-	pc1.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	trow.add_child(pc1)
-	var pc2 := UiTheme.make_label("指挥官 · SF-7749", 12, UiTheme.TXT)
-	pc2.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	trow.add_child(pc2)
-	var pc3 := UiTheme.make_label("在线好友 3 · 幽灵 猎鹰 毒蛇", 11, UiTheme.TXT_DIM)
-	pc3.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	trow.add_child(pc3)
-	# ---- 左侧:游戏标题 + 竖排模式列表 ----
+	_mm_topright(s)
+	# ---- 左上:赛季标识(小标签行 + 红色赛季大字 + 英文副题) ----
+	var season := VBoxContainer.new()
+	season.position = Vector2(46, 84)
+	season.add_theme_constant_override("separation", 2)
+	s.add_child(season)
+	var srow := HBoxContainer.new()
+	srow.add_theme_constant_override("separation", 10)
+	season.add_child(srow)
+	var st := UiTheme.make_label("零度行动", 17, UiTheme.TXT)
+	st.add_theme_font_size_override("font_size", 17)
+	srow.add_child(st)
+	var stag := Label.new()
+	stag.text = " SEASON 01 "
+	stag.add_theme_font_size_override("font_size", 13)
+	stag.add_theme_color_override("font_color", Color(0.01, 0.04, 0.06))
+	stag.add_theme_stylebox_override("normal", UiTheme.stylebox(UiTheme.PRIMARY, Color.TRANSPARENT, 0, 2, 4))
+	srow.add_child(stag)
+	var big := UiTheme.make_label("寒潮协议", 42, UiTheme.ENEMY)
+	big.add_theme_font_size_override("font_size", 42)
+	season.add_child(big)
+	season.add_child(UiTheme.make_label("COLD FRONT · 第一赛季作战", 12, UiTheme.TXT_DIM))
+	# ---- 左侧:竖排模式列表(图标 + 大字名 + 英文副题) ----
 	var left := VBoxContainer.new()
 	left.set_anchors_preset(Control.PRESET_CENTER_LEFT)
-	left.position = Vector2(46, -190)
+	left.position = Vector2(46, -150)
 	left.add_theme_constant_override("separation", 6)
 	s.add_child(left)
-	var title := UiTheme.make_label("零度行动", 44, UiTheme.TXT)
-	left.add_child(title)
-	var en := UiTheme.make_label("ZERO OPERATION · 大型多兵种征服/突破作战", 12, UiTheme.PRIMARY)
-	left.add_child(en)
-	var sep := Control.new()
-	sep.custom_minimum_size = Vector2(0, 16)
-	left.add_child(sep)
-	left.add_child(_make_mode_row("征服模式", "CONQUEST · 全面战场 占点为王", false, func():
+	left.add_child(_make_mode_row("◉", "征服模式", "CONQUEST · 全面战场 占点为王", func():
 		G.mode = "conquest"; AudioSys.ui(); on_start.call()))
-	left.add_child(_make_mode_row("突破模式", "BREAKTHROUGH · 攻防推进 逐区争夺", false, func():
+	left.add_child(_make_mode_row("▲", "突破模式", "BREAKTHROUGH · 攻防推进 逐区争夺", func():
 		G.mode = "breakthrough"; AudioSys.ui(); on_start.call()))
-	left.add_child(_make_mode_row("门户模式", "PORTAL · 自定义规则作战", false, func():
+	left.add_child(_make_mode_row("◆", "门户模式", "PORTAL · 自定义规则作战", func():
 		AudioSys.ui()
 		_open_portal_select()))
-	left.add_child(_make_mode_row("战争故事", "WAR STORIES · 单人战役", false, func():
+	left.add_child(_make_mode_row("★", "战争故事", "WAR STORIES · 单人战役", func():
 		AudioSys.ui()
 		_open_campaign_select()))
 	# ---- 左下:功能按钮 + 连续服役统计 ----
@@ -389,43 +398,231 @@ func _build_main_menu() -> void:
 	bq.pressed.connect(func(): AudioSys.ui(); get_tree().quit())
 	fn_row.add_child(bq)
 	bl.add_child(UiTheme.make_label("连续服役 142 场 · 胜率 61%", 12, UiTheme.TXT_DIM))
-	# ---- 右下:新闻滚动条 ----
-	_news_label = UiTheme.make_label(NEWS[0], 12, UiTheme.TXT_DIM)
-	_news_label.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_news_label.position = Vector2(-560, -34)
-	s.add_child(_news_label)
+	# ---- 右侧信息栏(BF2042:通行证/经验/任务/情报 四卡纵排) ----
+	_mm_infobar(s)
+
+
+## 右上:货币 + 经验 + 玩家卡 + 等级徽章(BF2042 顶部条右段)
+func _mm_topright(s: Control) -> void:
+	var row := HBoxContainer.new()
+	row.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	row.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	row.position = Vector2(-26, 12)
+	row.add_theme_constant_override("separation", 18)
+	s.add_child(row)
+	# 货币 ×2(红晶核 / 补给币)
+	for cur in [["◆", "48", UiTheme.ENEMY], ["◉", "2,500", UiTheme.WARN]]:
+		var c := HBoxContainer.new()
+		c.add_theme_constant_override("separation", 5)
+		row.add_child(c)
+		var ic := UiTheme.make_label(cur[0], 15, cur[2])
+		c.add_child(ic)
+		var v := UiTheme.make_label(cur[1], 15, UiTheme.TXT)
+		c.add_child(v)
+	# 经验:小进度条 + 数值
+	var xp := HBoxContainer.new()
+	xp.add_theme_constant_override("separation", 7)
+	row.add_child(xp)
+	var xpcol := VBoxContainer.new()
+	xpcol.add_theme_constant_override("separation", 3)
+	xp.add_child(xpcol)
+	var xpbar_bg := ColorRect.new()
+	xpbar_bg.color = Color(1, 1, 1, 0.14)
+	xpbar_bg.custom_minimum_size = Vector2(72, 5)
+	xpcol.add_child(xpbar_bg)
+	var xpbar := ColorRect.new()
+	xpbar.color = UiTheme.PRIMARY
+	xpbar.custom_minimum_size = Vector2(72, 5)
+	xpbar.size = Vector2(46, 5)
+	xpbar_bg.add_child(xpbar)
+	xpcol.add_child(UiTheme.make_label("经验 0/133,500", 11, UiTheme.TXT_DIM))
+	# 玩家卡(头像块 + 名字/称号)
+	var pc := HBoxContainer.new()
+	pc.add_theme_constant_override("separation", 9)
+	row.add_child(pc)
+	var av := Panel.new()
+	av.custom_minimum_size = Vector2(36, 36)
+	av.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.05, 0.14, 0.18, 0.9), UiTheme.PRIMARY, 1, 3, 2))
+	pc.add_child(av)
+	var avl := UiTheme.make_label("指", 16, UiTheme.PRIMARY)
+	avl.set_anchors_preset(Control.PRESET_FULL_RECT)
+	avl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	avl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	av.add_child(avl)
+	var pcol := VBoxContainer.new()
+	pcol.add_theme_constant_override("separation", 0)
+	pc.add_child(pcol)
+	pcol.add_child(UiTheme.make_label("指挥官 · SF-7749", 13, UiTheme.TXT))
+	pcol.add_child(UiTheme.make_label("新晋指挥官", 11, UiTheme.TXT_DIM))
+	# 等级徽章(方块 + 数字)
+	var bd := Panel.new()
+	bd.custom_minimum_size = Vector2(36, 36)
+	bd.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0, 0, 0, 0.5), UiTheme.PRIMARY, 2, 3, 1))
+	row.add_child(bd)
+	var bdl := UiTheme.make_label("32", 15, UiTheme.TXT)
+	bdl.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bdl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	bdl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	bd.add_child(bdl)
+
+
+## 右侧信息栏:通行证卡 + 经验卡 + 任务列表 + 情报轮播卡
+func _mm_infobar(s: Control) -> void:
+	var col := VBoxContainer.new()
+	col.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	col.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	col.grow_vertical = Control.GROW_DIRECTION_END
+	col.position = Vector2(-356, 84)
+	col.custom_minimum_size = Vector2(330, 0)
+	col.add_theme_constant_override("separation", 10)
+	s.add_child(col)
+	var card_bg := UiTheme.stylebox(Color(0.01, 0.03, 0.05, 0.62), Color(1, 1, 1, 0.07), 1, 4, 12)
+	# ---- 卡1:下一通行证等级 ----
+	var bp := PanelContainer.new()
+	bp.add_theme_stylebox_override("panel", card_bg)
+	col.add_child(bp)
+	var bph := HBoxContainer.new()
+	bph.add_theme_constant_override("separation", 10)
+	bp.add_child(bph)
+	var bpcol := VBoxContainer.new()
+	bpcol.add_theme_constant_override("separation", 6)
+	bpcol.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bph.add_child(bpcol)
+	bpcol.add_child(UiTheme.make_label("下一通行证等级", 12, UiTheme.PRIMARY))
+	var dots := HBoxContainer.new()
+	dots.add_theme_constant_override("separation", 5)
+	bpcol.add_child(dots)
+	for i in 10:
+		var dot := ColorRect.new()
+		dot.custom_minimum_size = Vector2(12, 8)
+		dot.color = UiTheme.PRIMARY if i < 8 else Color(1, 1, 1, 0.16)
+		dots.add_child(dot)
+	bpcol.add_child(UiTheme.make_label("8/10 点数", 13, UiTheme.TXT))
+	var badge := Panel.new()
+	badge.custom_minimum_size = Vector2(52, 52)
+	badge.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	badge.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.08, 0.1, 0.12, 0.9), UiTheme.PRIMARY, 2, 4, 1))
+	bph.add_child(badge)
+	var bl2 := UiTheme.make_label("33", 17, UiTheme.PRIMARY)
+	bl2.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bl2.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	bl2.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	badge.add_child(bl2)
+	# ---- 卡2:经验收益 ----
+	var xp := PanelContainer.new()
+	xp.add_theme_stylebox_override("panel", card_bg)
+	col.add_child(xp)
+	var xpcol := VBoxContainer.new()
+	xpcol.add_theme_constant_override("separation", 6)
+	xp.add_child(xpcol)
+	xpcol.add_child(UiTheme.make_label("经验收益", 12, UiTheme.PRIMARY))
+	var bigxp := UiTheme.make_label("1,740 / 2,250", 19, UiTheme.TXT)
+	xpcol.add_child(bigxp)
+	var bar_bg := ColorRect.new()
+	bar_bg.color = Color(1, 1, 1, 0.13)
+	bar_bg.custom_minimum_size = Vector2(0, 5)
+	xpcol.add_child(bar_bg)
+	var bar := ColorRect.new()
+	bar.color = UiTheme.PRIMARY
+	bar.custom_minimum_size = Vector2(0, 5)
+	bar.size = Vector2(240, 5)
+	bar_bg.add_child(bar)
+	# ---- 卡3:今日作战目标 ×3 ----
+	var tasks := PanelContainer.new()
+	tasks.add_theme_stylebox_override("panel", card_bg)
+	col.add_child(tasks)
+	var tcol := VBoxContainer.new()
+	tcol.add_theme_constant_override("separation", 0)
+	tasks.add_child(tcol)
+	for t in [["◈", "完成一场征服对局", "0/1"], ["◈", "驾驶载具达成击杀", "0/3"], ["◈", "占领或夺取据点", "0/5"]]:
+		var tr := HBoxContainer.new()
+		tr.custom_minimum_size = Vector2(0, 40)
+		tr.add_theme_constant_override("separation", 10)
+		tcol.add_child(tr)
+		var ti := UiTheme.make_label(t[0], 14, UiTheme.PRIMARY)
+		ti.custom_minimum_size = Vector2(20, 0)
+		tr.add_child(ti)
+		var tn := UiTheme.make_label(t[1], 13, UiTheme.TXT)
+		tn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		tr.add_child(tn)
+		tr.add_child(UiTheme.make_label(t[2], 13, UiTheme.TXT_DIM))
+	# ---- 卡4:情报轮播(INTEL) ----
+	var intel := PanelContainer.new()
+	intel.add_theme_stylebox_override("panel", card_bg)
+	col.add_child(intel)
+	var icol := VBoxContainer.new()
+	icol.add_theme_constant_override("separation", 8)
+	intel.add_child(icol)
+	var art := Panel.new()
+	art.custom_minimum_size = Vector2(0, 96)
+	art.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.09, 0.05, 0.05, 0.9), Color(1, 1, 1, 0.06), 1, 3, 0))
+	icol.add_child(art)
+	var wm := UiTheme.make_label("零度行动", 30, Color(1, 1, 1, 0.10))
+	wm.set_anchors_preset(Control.PRESET_FULL_RECT)
+	wm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	wm.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	art.add_child(wm)
+	var itag := Label.new()
+	itag.text = " INTEL "
+	itag.add_theme_font_size_override("font_size", 11)
+	itag.add_theme_color_override("font_color", Color(0.01, 0.04, 0.06))
+	itag.add_theme_stylebox_override("normal", UiTheme.stylebox(UiTheme.PRIMARY, Color.TRANSPARENT, 0, 2, 3))
+	icol.add_child(itag)
+	_news_label = UiTheme.make_label(NEWS[0], 12, UiTheme.TXT)
+	_news_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_news_label.custom_minimum_size = Vector2(0, 34)
+	icol.add_child(_news_label)
+	# 轮播指示点(4 点,随新闻切换)
+	var drow := HBoxContainer.new()
+	drow.alignment = BoxContainer.ALIGNMENT_END
+	drow.add_theme_constant_override("separation", 6)
+	icol.add_child(drow)
+	for i in 4:
+		var d := ColorRect.new()
+		d.custom_minimum_size = Vector2(14, 4)
+		d.color = UiTheme.PRIMARY if i == 0 else Color(1, 1, 1, 0.22)
+		drow.add_child(d)
+		_intel_dots.append(d)
 
 
 var _news_label: Label = null
 var _news_t := 0.0
 var _news_i := 0
+var _intel_dots: Array = []   # 情报卡轮播指示点
 const NEWS := [
-	"［公告］门户模式上线:团队死斗 11v11 · 大逃杀 25 队同场竞技",
-	"［战报］大逃杀更新:100 名参赛者 · 开局仅手枪,物资/空投/毒圈每局随机",
-	"［公告］团队死斗装备选择:任意武器主副搭配,死亡 2 秒自动复活",
+	"门户模式上线:团队死斗 11v11 · 大逃杀 25 队同场竞技",
+	"大逃杀更新:100 名参赛者 · 开局仅手枪,物资/空投/毒圈每局随机",
+	"团队死斗装备选择:任意武器主副搭配,死亡 2 秒自动复活",
+	"第二赛季「寒潮协议」:全新极地战区与低温视觉特效即将上线",
 ]
 
 
-## BF2042 风格模式行(大标题 + 英文副题,悬停高亮左移)
-func _make_mode_row(cn: String, en: String, disabled: bool, cb: Callable) -> Button:
+## BF2042 风格模式行:图标 + 大字名 + 英文副题,悬停高亮
+func _make_mode_row(icon: String, cn: String, en: String, cb: Callable) -> Button:
 	var b := Button.new()
 	b.theme = UiTheme.theme()
-	b.custom_minimum_size = Vector2(400, 62)
-	b.text = cn + "\n" + en
-	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	b.add_theme_font_size_override("font_size", 20)
-	b.add_theme_color_override("font_color", UiTheme.TXT if not disabled else UiTheme.TXT_DIM)
-	b.add_theme_stylebox_override("normal", UiTheme.stylebox(Color(0, 0, 0, 0), Color.TRANSPARENT, 0, 2, 8))
-	b.add_theme_stylebox_override("hover", UiTheme.stylebox(Color(0.0, 0.16, 0.22, 0.6), UiTheme.PRIMARY, 1, 2, 8))
-	b.add_theme_stylebox_override("pressed", UiTheme.stylebox(Color(0.0, 0.24, 0.3, 0.75), UiTheme.PRIMARY, 1, 2, 8))
-	b.add_theme_stylebox_override("focus", UiTheme.stylebox(Color(0, 0, 0, 0), Color.TRANSPARENT, 0, 2, 8))
-	b.add_theme_stylebox_override("disabled", UiTheme.stylebox(Color(0, 0, 0, 0), Color.TRANSPARENT, 0, 2, 8))
-	b.add_theme_color_override("font_hover_color", Color(1, 1, 1))
-	b.add_theme_color_override("font_disabled_color", UiTheme.TXT_DIM)
-	if disabled:
-		b.disabled = true
-		b.modulate = Color(1, 1, 1, 0.45)
-	elif cb.is_valid():
+	b.custom_minimum_size = Vector2(400, 64)
+	b.add_theme_stylebox_override("normal", UiTheme.stylebox(Color(0.0, 0.0, 0.0, 0.45), Color(1, 1, 1, 0.08), 1, 3, 8))
+	b.add_theme_stylebox_override("hover", UiTheme.stylebox(Color(0.0, 0.16, 0.22, 0.6), UiTheme.PRIMARY, 1, 3, 8))
+	b.add_theme_stylebox_override("pressed", UiTheme.stylebox(Color(0.0, 0.24, 0.3, 0.75), UiTheme.PRIMARY, 1, 3, 8))
+	b.add_theme_stylebox_override("focus", UiTheme.stylebox(Color(0, 0, 0, 0), Color.TRANSPARENT, 0, 3, 8))
+	var hb := HBoxContainer.new()
+	hb.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hb.position = Vector2(14, 0)
+	hb.add_theme_constant_override("separation", 14)
+	hb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	b.add_child(hb)
+	var ic := UiTheme.make_label(icon, 22, UiTheme.PRIMARY)
+	ic.custom_minimum_size = Vector2(28, 0)
+	ic.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	hb.add_child(ic)
+	var vc := VBoxContainer.new()
+	vc.add_theme_constant_override("separation", 0)
+	vc.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hb.add_child(vc)
+	vc.add_child(UiTheme.make_label(cn, 20, UiTheme.TXT))
+	vc.add_child(UiTheme.make_label(en, 11, UiTheme.TXT_DIM))
+	if cb.is_valid():
 		UiTheme.wire_button(b)
 		b.pressed.connect(cb)
 	return b

@@ -188,14 +188,14 @@ static func bevel_box_mesh(w: float, h: float, d: float, b: float, uv_s: float) 
 
 ## 两端带倒角的圆柱(沿 Y 生成,与 CylinderMesh 一致,便于复用旋转逻辑)。
 ## 枪管口、消焰器、镜筒的"倒角圈"是金属件最容易被眼睛捕捉的细节。
-static func chamfer_cyl_mesh(r: float, len: float, b: float, seg: int, uv_s: float,
+static func chamfer_cyl_mesh(r: float, length: float, b: float, seg: int, uv_s: float,
 		cap_top := true, cap_bottom := true) -> ArrayMesh:
-	var key := PackedFloat64Array([1.0, r, len, b, float(seg), uv_s, 1.0 if cap_top else 0.0,
+	var key := PackedFloat64Array([1.0, r, length, b, float(seg), uv_s, 1.0 if cap_top else 0.0,
 		1.0 if cap_bottom else 0.0])
 	var hit: ArrayMesh = _mesh_cache.get(key)
 	if hit != null:
 		return hit
-	var hy := len * 0.5
+	var hy := length * 0.5
 	b = clampf(b, 0.0, minf(r, hy) * 0.45)
 	var ri := r - b
 	var yc := hy - b
@@ -266,12 +266,12 @@ static func picatinny_mesh(length: float, uv_s: float, width := RAIL_TOP_W) -> A
 # ==================== 零件:滚花 / 减重槽 / 六角 ====================
 
 ## 滚花圆柱:表面沿周向交替凸起的细棱。用于枪管螺母、调节钮、握把螺丝等手拧件。
-static func knurl_mesh(r: float, len: float, teeth: int, depth: float, uv_s: float) -> ArrayMesh:
-	var key := PackedFloat64Array([3.0, r, len, float(teeth), depth, uv_s])
+static func knurl_mesh(r: float, length: float, teeth: int, depth: float, uv_s: float) -> ArrayMesh:
+	var key := PackedFloat64Array([3.0, r, length, float(teeth), depth, uv_s])
 	var hit: ArrayMesh = _mesh_cache.get(key)
 	if hit != null:
 		return hit
-	var hy := len * 0.5
+	var hy := length * 0.5
 	var st := _begin()
 	for i in teeth:
 		var a0 := TAU * float(i) / float(teeth)
@@ -307,12 +307,12 @@ static func knurl_mesh(r: float, len: float, teeth: int, depth: float, uv_s: flo
 
 
 ## 带纵向减重槽的圆柱(转轮弹巢、栓动枪机、枪口制退器的常见特征)。
-static func fluted_mesh(r: float, len: float, flutes: int, groove: float, uv_s: float) -> ArrayMesh:
-	var key := PackedFloat64Array([4.0, r, len, float(flutes), groove, uv_s])
+static func fluted_mesh(r: float, length: float, flutes: int, groove: float, uv_s: float) -> ArrayMesh:
+	var key := PackedFloat64Array([4.0, r, length, float(flutes), groove, uv_s])
 	var hit: ArrayMesh = _mesh_cache.get(key)
 	if hit != null:
 		return hit
-	var hy := len * 0.5
+	var hy := length * 0.5
 	var st := _begin()
 	var seg := flutes * 4
 	var rr: Array[float] = []
@@ -337,15 +337,15 @@ static func fluted_mesh(r: float, len: float, flutes: int, groove: float, uv_s: 
 
 
 ## 六角棱柱(枪管螺母/导气箍/消焰器扳手面)。直接用内置圆柱体 6 段,省一次自绘。
-static func hex_nut_mesh(r: float, len: float) -> Mesh:
-	var key := PackedFloat64Array([5.0, r, len])
+static func hex_nut_mesh(r: float, length: float) -> Mesh:
+	var key := PackedFloat64Array([5.0, r, length])
 	var hit: ArrayMesh = _mesh_cache.get(key)
 	if hit != null:
 		return hit
 	var cm := CylinderMesh.new()
 	cm.top_radius = r
 	cm.bottom_radius = r
-	cm.height = len
+	cm.height = length
 	cm.radial_segments = 6
 	cm.rings = 1
 	_mesh_cache[key] = cm
@@ -356,20 +356,20 @@ static func hex_nut_mesh(r: float, len: float) -> Mesh:
 
 ## M16/M4 的 A2 鸟笼:前段实心环 + 后段三道纵向开槽(底部封闭,射击时不扬尘)。
 ## 用"外环片 + 纵向分隔筋"近似开槽,避免布尔运算 —— 低模下视觉等价,成本可忽略。
-static func birdcage_mesh(r: float, len: float, uv_s: float) -> ArrayMesh:
-	var key := PackedFloat64Array([6.0, r, len, uv_s])
+static func birdcage_mesh(r: float, length: float, uv_s: float) -> ArrayMesh:
+	var key := PackedFloat64Array([6.0, r, length, uv_s])
 	var hit: ArrayMesh = _mesh_cache.get(key)
 	if hit != null:
 		return hit
 	var st := _begin()
-	var z0 := -len * 0.5
-	var z1 := len * 0.5
+	var z0 := -length * 0.5
+	var z1 := length * 0.5
 	var seg := 16
 	# 三段式:前端实心环 / 中段开槽(仅留 3 条纵向筋) / 后端与枪管连接的实心环
 	var zones := [
-		{"z0": z0, "z1": z0 + len * 0.28, "slots": false},
-		{"z0": z0 + len * 0.28, "z1": z1 - len * 0.18, "slots": true},
-		{"z0": z1 - len * 0.18, "z1": z1, "slots": false},
+		{"z0": z0, "z1": z0 + length * 0.28, "slots": false},
+		{"z0": z0 + length * 0.28, "z1": z1 - length * 0.18, "slots": true},
+		{"z0": z1 - length * 0.18, "z1": z1, "slots": false},
 	]
 	for z in zones:
 		var za: float = z["z0"]
@@ -382,7 +382,7 @@ static func birdcage_mesh(r: float, len: float, uv_s: float) -> ArrayMesh:
 			var base_ang := TAU * float(k) / 3.0 - PI * 0.5
 			_ring_seg(st, r, za, zb, 5, base_ang - 0.30, base_ang + 0.30, uv_s)
 	# 内芯:细管,让开槽处透出内部而不是看穿到背景
-	_ring_seg(st, r * 0.55, z0 + len * 0.10, z1 - len * 0.05, 12, 0.0, TAU, uv_s)
+	_ring_seg(st, r * 0.55, z0 + length * 0.10, z1 - length * 0.05, 12, 0.0, TAU, uv_s)
 	var m := _commit(st)
 	_mesh_cache[key] = m
 	return m
@@ -426,8 +426,8 @@ static func screw_mesh(r: float, h: float, uv_s: float) -> ArrayMesh:
 
 
 ## 圆柱销钉(机匣连接销)。两端带倒角,与 push pin 的实物观感一致。
-static func pin_mesh(r: float, len: float, uv_s: float) -> ArrayMesh:
-	return chamfer_cyl_mesh(r, len, minf(r * 0.35, 0.0008), 12, uv_s)
+static func pin_mesh(r: float, length: float, uv_s: float) -> ArrayMesh:
+	return chamfer_cyl_mesh(r, length, minf(r * 0.35, 0.0008), 12, uv_s)
 
 
 ## 三角形扇形封盖(圆柱/螺丝端面的收口)。
@@ -475,9 +475,9 @@ static func bevel_box(w: float, h: float, d: float, x: float, y: float, z: float
 
 
 ## 倒角圆柱实例。axis: "z"(默认,枪管方向) / "y" / "x"。
-static func chamfer_cyl(r: float, len: float, x: float, y: float, z: float,
+static func chamfer_cyl(r: float, length: float, x: float, y: float, z: float,
 		mat: Material, axis := "z", seg := 24, uv_s := DEFAULT_UV_SCALE) -> MeshInstance3D:
-	var mi := _mi(chamfer_cyl_mesh(r, len, minf(r * 0.18, 0.0015), seg, uv_s), mat)
+	var mi := _mi(chamfer_cyl_mesh(r, length, minf(r * 0.18, 0.0015), seg, uv_s), mat)
 	if axis == "z":
 		mi.rotation.x = PI * 0.5
 	elif axis == "x":
@@ -494,10 +494,10 @@ static func picatinny(length: float, x: float, y: float, z: float, mat: Material
 	return mi
 
 
-static func knurl_cyl(r: float, len: float, x: float, y: float, z: float,
+static func knurl_cyl(r: float, length: float, x: float, y: float, z: float,
 		mat: Material, axis := "z", teeth := 24, depth := 0.0008,
 		uv_s := DEFAULT_UV_SCALE) -> MeshInstance3D:
-	var mi := _mi(knurl_mesh(r, len, teeth, depth, uv_s), mat)
+	var mi := _mi(knurl_mesh(r, length, teeth, depth, uv_s), mat)
 	if axis == "z":
 		mi.rotation.x = PI * 0.5
 	elif axis == "x":
@@ -506,10 +506,10 @@ static func knurl_cyl(r: float, len: float, x: float, y: float, z: float,
 	return mi
 
 
-static func fluted_cyl(r: float, len: float, x: float, y: float, z: float,
+static func fluted_cyl(r: float, length: float, x: float, y: float, z: float,
 		mat: Material, axis := "z", flutes := 6, groove := 0.0015,
 		uv_s := DEFAULT_UV_SCALE) -> MeshInstance3D:
-	var mi := _mi(fluted_mesh(r, len, flutes, groove, uv_s), mat)
+	var mi := _mi(fluted_mesh(r, length, flutes, groove, uv_s), mat)
 	if axis == "z":
 		mi.rotation.x = PI * 0.5
 	elif axis == "x":
@@ -518,9 +518,9 @@ static func fluted_cyl(r: float, len: float, x: float, y: float, z: float,
 	return mi
 
 
-static func hex_nut(r: float, len: float, x: float, y: float, z: float,
+static func hex_nut(r: float, length: float, x: float, y: float, z: float,
 		mat: Material, axis := "z") -> MeshInstance3D:
-	var mi := _mi(hex_nut_mesh(r, len), mat)
+	var mi := _mi(hex_nut_mesh(r, length), mat)
 	if axis == "z":
 		mi.rotation.x = PI * 0.5
 	elif axis == "x":
@@ -529,9 +529,9 @@ static func hex_nut(r: float, len: float, x: float, y: float, z: float,
 	return mi
 
 
-static func birdcage(r: float, len: float, x: float, y: float, z: float,
+static func birdcage(r: float, length: float, x: float, y: float, z: float,
 		mat: Material, uv_s := DEFAULT_UV_SCALE) -> MeshInstance3D:
-	var mi := _mi(birdcage_mesh(r, len, uv_s), mat)
+	var mi := _mi(birdcage_mesh(r, length, uv_s), mat)
 	mi.rotation.x = PI * 0.5
 	mi.position = Vector3(x, y, z)
 	return mi
@@ -548,9 +548,9 @@ static func screw(r: float, h: float, x: float, y: float, z: float,
 	return mi
 
 
-static func pin(r: float, len: float, x: float, y: float, z: float,
+static func pin(r: float, length: float, x: float, y: float, z: float,
 		mat: Material, axis := "x", uv_s := DEFAULT_UV_SCALE) -> MeshInstance3D:
-	var mi := _mi(pin_mesh(r, len, uv_s), mat)
+	var mi := _mi(pin_mesh(r, length, uv_s), mat)
 	if axis == "z":
 		mi.rotation.x = PI * 0.5
 	elif axis == "x":

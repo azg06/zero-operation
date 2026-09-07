@@ -1,7 +1,7 @@
 class_name Gun extends RefCounted
 ## 枪械手感(对应 weapons.js 的 Gun 类):射击/换弹/后座/视角模型动画
 
-const HIP_POS := Vector3(0.17, -0.155, -0.34)
+const HIP_POS := Vector3(0.05, -0.155, -0.34)  # [FIX 枪位] x 0.17→0.05:旧值画面偏右 31%,参考战地/全境系持枪应中心偏右约 9%
 const ADS_POS := Vector3(0, -0.0755, -0.26)
 # 手臂肘部屏外锚点(枪身局部空间):臂筒自手腕延伸至屏幕外,消除断臂。
 # 锚点必须保持 z < -group.z(约 -0.34),即位于视角相机前方;旧值在相机后方,
@@ -642,6 +642,15 @@ func update(dt: float) -> void:
 	var vm_scale_k := 1.55 if id == "rpg" else 1.0
 	g.scale = Vector3.ONE * clampf((1.0 + (vm_depth - 1.0) * 0.18) * vm_scale_k, 0.8, 1.7)
 	g.rotation = Vector3.ZERO
+	# [FIX doom 视角] ADS 枪口上抬补偿:ADS 是纯平移(照门对准中心),但枪管轴线
+	# 低于照门 sight_y,枪口在屏幕中心下方 = "doom 视角"。满镜时给枪
+	# atan(sight_y / 照门到枪口距离) 的正俯仰,让枪口与准星视觉连成一线。
+	# 照门到枪口距离用 muzzle meta 实测(缺省 0.42);sniper 满镜走镜内遮罩枪不可见,
+	# rpg 分支在下方自带 rotation 会覆盖此处,均无需特判。
+	var mzl: Node3D = group.get_meta("muzzle", null)
+	var bore_len: float = absf(mzl.position.z) if mzl != null else 0.42
+	var aim_pitch: float = atan(def.sight_y / (absf(def.ads_z) + bore_len))
+	g.rotation.x = lerpf(0.0, aim_pitch, ads_amount)
 	if id == "rpg":
 		# 发射器头部沿中心向左旋转 5°(ADS 时回正以对准 CLU 目镜)
 		g.rotation.y = lerpf(deg_to_rad(5.0), 0.0, ads_amount)
@@ -950,26 +959,28 @@ func _setup_pistol_hand_poses() -> void:
 	if _left_hand == null or def.kind != "pistol":
 		return
 	_pistol_hip_l = _left_hand.position
-	# 腰射:左手包住握把,手腕向后退一点、手指向下收,不让长手模伸到枪口前
-	_pistol_hip_rot = Vector3(-0.3, 0.16, PI - 0.22)
+	# [FIX 手枪握姿] 左手从握把左侧包握右手四指(真手枪双手握姿),掌心贴枪体侧面;
+	# 旧版 z≈PI(掌心朝上)在握把正下方平托 = 用户描述的"托着枪托"。
+	# z≈+1.45:掌心由朝下转朝 +x(贴握把左侧),指节向前卷包右手手指。
+	_pistol_hip_rot = Vector3(0.12, -0.08, 1.42)
 	match id:
 		"m1911", "g17", "p226":
-			_pistol_ads_l = Vector3(-0.012, -0.112, 0.03)
-			_pistol_ads_rot = Vector3(0.28, 0.12, PI - 0.28)
+			_pistol_ads_l = Vector3(-0.048, -0.072, 0.05)
+			_pistol_ads_rot = Vector3(0.12, -0.08, 1.45)
 		"deagle":
-			_pistol_ads_l = Vector3(-0.014, -0.122, 0.03)
-			_pistol_ads_rot = Vector3(0.26, 0.14, PI - 0.3)
+			_pistol_ads_l = Vector3(-0.052, -0.078, 0.055)
+			_pistol_ads_rot = Vector3(0.12, -0.08, 1.48)
 		"m93r":
-			_pistol_ads_l = Vector3(-0.012, -0.105, 0.028)
-			_pistol_ads_rot = Vector3(0.3, 0.1, PI - 0.26)
-			_pistol_hip_rot = Vector3(-0.16, 0.12, PI - 0.2)
+			_pistol_ads_l = Vector3(-0.045, -0.068, 0.03)
+			_pistol_ads_rot = Vector3(0.14, -0.06, 1.42)
+			_pistol_hip_rot = Vector3(0.14, -0.06, 1.4)
 		"python", "sw686", "sw500":
-			_pistol_ads_l = Vector3(-0.012, -0.108, 0.02)
-			_pistol_ads_rot = Vector3(0.32, 0.14, PI - 0.3)
-			_pistol_hip_rot = Vector3(-0.26, 0.15, PI - 0.24)
+			_pistol_ads_l = Vector3(-0.044, -0.07, 0.045)
+			_pistol_ads_rot = Vector3(0.13, -0.07, 1.44)
+			_pistol_hip_rot = Vector3(0.13, -0.07, 1.42)
 		_:
-			_pistol_ads_l = Vector3(-0.012, -0.108, 0.03)
-			_pistol_ads_rot = Vector3(0.28, 0.12, PI - 0.28)
+			_pistol_ads_l = Vector3(-0.048, -0.072, 0.05)
+			_pistol_ads_rot = Vector3(0.12, -0.08, 1.45)
 
 
 ## 只在完全空闲持枪时驱动(换弹/泵动/左轮动作/检视期间由各自动画系统控制,不抢手)。

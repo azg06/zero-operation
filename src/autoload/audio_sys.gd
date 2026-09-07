@@ -311,16 +311,15 @@ func _gen_snd(snd_name: String) -> AudioStream:
 ## 16-bit 22.05kHz 单声道,启动时一次性构建并缓存,运行时零合成开销。
 func _synth_gen(snd_name: String) -> AudioStream:
 	var sr := 22050
-	var seed := _gen_hash(snd_name)
+	var h := _gen_hash(snd_name)
 	var rng := RandomNumberGenerator.new()
-	rng.seed = seed
+	rng.seed = h
 	var dur := 0.42
 	var body := 0.0
 	var ring_f := 620.0
 	var ring_amp := 0.18
 	var low_f := 68.0
 	var low_amp := 0.55
-	var noise_env := 14.0
 	var noise_amp := 0.5
 	var attack := 0.003
 	var band := 0.72
@@ -330,11 +329,10 @@ func _synth_gen(snd_name: String) -> AudioStream:
 		if kind.begins_with("shotgun"):
 			dur = 0.52
 			body = 7.5
-			ring_f = 340.0 + float(seed % 90)
+			ring_f = 340.0 + float(h % 90)
 			ring_amp = 0.12
-			low_f = 44.0 + float(seed % 21)
+			low_f = 44.0 + float(h % 21)
 			low_amp = 0.85
-			noise_env = 16.0
 			noise_amp = 0.38
 			band = 0.5
 		elif kind == "revolver_500":
@@ -344,17 +342,15 @@ func _synth_gen(snd_name: String) -> AudioStream:
 			ring_amp = 0.22
 			low_f = 95.0
 			low_amp = 0.7
-			noise_env = 30.0
 			noise_amp = 0.85
 			band = 0.82
 		else:
 			dur = 0.4
 			body = 16.0
-			ring_f = 690.0 + float(seed % 130)
+			ring_f = 690.0 + float(h % 130)
 			ring_amp = 0.2
 			low_f = 150.0
 			low_amp = 0.38
-			noise_env = 28.0
 			noise_amp = 0.82
 			band = 0.76
 	elif snd_name.begins_with("pump_"):
@@ -364,17 +360,15 @@ func _synth_gen(snd_name: String) -> AudioStream:
 		ring_amp = 0.08
 		low_f = 80.0
 		low_amp = 0.32
-		noise_env = 40.0
 		noise_amp = 0.6
 		band = 0.4
 	elif snd_name.begins_with("revolver_"):
 		dur = 0.22 if "rotate" in snd_name or "round" in snd_name else 0.3
 		body = 34.0
-		ring_f = 980.0 + float(seed % 420)
+		ring_f = 980.0 + float(h % 420)
 		ring_amp = 0.3 if "hammer" in snd_name else 0.16
 		low_f = 130.0
 		low_amp = 0.14
-		noise_env = 55.0
 		noise_amp = 0.55
 		band = 0.82
 	else:
@@ -384,7 +378,6 @@ func _synth_gen(snd_name: String) -> AudioStream:
 		ring_amp = 0.1
 		low_f = 110.0
 		low_amp = 0.1
-		noise_env = 60.0
 		noise_amp = 0.3
 		band = 0.7
 	var n := int(sr * dur)
@@ -608,10 +601,10 @@ func reload(stage: int) -> void:
 func reload_action(action: String, pitch_scale := 1.0) -> void:
 	if GEN_ACTION_NAMES.has(action):
 		var use_file: bool = ResourceLoader.exists("res://audio/reload/" + action + ".wav") or ResourceLoader.exists("res://audio/reload/" + action + ".ogg")
-		var gain: float = 1.0
+		var g1: float = 1.0
 		if use_file:
-			gain = clampf(float(RELOAD_ACTION_GAIN.get(action, 1.0)), 0.4, 6.0)
-			_play_2d(action, gain, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "reload")
+			g1 = clampf(float(RELOAD_ACTION_GAIN.get(action, 1.0)), 0.4, 6.0)
+			_play_2d(action, g1, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "reload")
 		else:
 			_play_2d(action, 0.9, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "gen")
 		return
@@ -626,12 +619,12 @@ func reload_action(action: String, pitch_scale := 1.0) -> void:
 func weapon_mech(event: String, pitch_scale := 1.0, vol := 1.0) -> void:
 	if GEN_ACTION_NAMES.has(event):
 		var use_file: bool = ResourceLoader.exists("res://audio/reload/" + event + ".wav") or ResourceLoader.exists("res://audio/reload/" + event + ".ogg")
-		var gain: float = clampf(vol, 0.2, 1.4)
+		var g2: float = clampf(vol, 0.2, 1.4)
 		if use_file:
-			gain = clampf(float(RELOAD_ACTION_GAIN.get(event, 1.0)) * vol, 0.2, 3.5)
-			_play_2d(event, gain, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "reload")
+			g2 = clampf(float(RELOAD_ACTION_GAIN.get(event, 1.0)) * vol, 0.2, 3.5)
+			_play_2d(event, g2, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "reload")
 		else:
-			_play_2d(event, gain, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "gen")
+			_play_2d(event, g2, clampf(pitch_scale, 0.75, 1.3), BUS_SFX, "gen")
 		return
 	reload_action(event, pitch_scale)
 
