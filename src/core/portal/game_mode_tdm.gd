@@ -327,7 +327,7 @@ func on_damage(attacker, victim, amount: float) -> void:
 	_register_damage(attacker, victim, amount)
 
 
-func end() -> void:
+func end(_result: Dictionary = {}) -> void:
 	if not started or ended:
 		return
 	var win := us_score > ru_score
@@ -521,7 +521,7 @@ func _end_match(win: bool, why: String) -> void:
 		{ "id": "streak_3", "name": "达成连杀 3", "done": _player_max_streak >= 3, "goal": 3, "value": _player_max_streak },
 		{ "id": "mvp", "name": "全场最佳", "done": mvp.get("key", "") == PLAYER_KEY, "goal": 1, "value": 1 if mvp.get("key", "") == PLAYER_KEY else 0 },
 	]
-	var result := {
+	var tbl := {
 		"mode": "tdm", "map_id": _map_id, "win": win, "reason": reason,
 		"winner_team": "us" if win else ("ru" if not win else "draw"),
 		"scores": { "us": us_score, "ru": ru_score },
@@ -539,7 +539,7 @@ func _end_match(win: bool, why: String) -> void:
 	# ---- 收尾:PortalManager 存在时交给它(结算屏/音频/状态由它统一处理);缺省自收尾(测试/独立运行) ----
 	var pm = G.get("portal")
 	if pm != null and is_instance_valid(pm):
-		pm.end_match(result)
+		pm.end_match(tbl)
 	else:
 		G.tickets = { "us": us_score, "ru": ru_score }
 		G.state = "over"
@@ -557,7 +557,7 @@ func _end_match(win: bool, why: String) -> void:
 			else:
 				AudioSys.lose()
 	print("[TDM] round_ended win=%s reason=%s us=%d ru=%d mvp=%s exp=%d" % [win, reason, us_score, ru_score, str(mvp.get("name", "-")), exp_earned])
-	round_ended.emit(result)
+	round_ended.emit(tbl)
 
 
 ## 按 PortalManager 约定生成 player_stats:{ 名字: { kills, deaths, assists } }

@@ -32,6 +32,8 @@ class WeaponDef extends RefCounted:
 	var projectile := false
 	var splash := 6.5
 	var speed := 38.0
+	var proj_grav := 12.0                # 抛射物等效重力 m/s²(火箭 12 偏平直;榴弹 9.8 真实抛物线)
+	var proj_arm := 10.0                 # 抛射物最小解除保险飞行距离(m):不足此距离命中只销毁不炸
 	var veh_dmg := 0.5
 	var view_hip: Variant = null         # Vector3 覆盖腰射位
 	var view_ads: Variant = null         # Vector3 覆盖瞄准位
@@ -46,6 +48,15 @@ class WeaponDef extends RefCounted:
 	var recoil_cam := 0.006              # 摄像机微后坐(开火视角震动)
 	# === 换弹 ===
 	var reload_tac := 0.0                # 战术换弹时长(0=自动 = reload_time×0.78)
+	# === [9/10] 泵动霰弹枪 / 左轮结构参数 ===
+	var pump_action := false             # 泵动式(护木后拉/前推循环)
+	var pump_stroke := 0.065             # 泵体行程(m)
+	var pump_dur := 0.45                 # 泵动循环时长(s)
+	var revolver := false                # 左轮弹巢装填逻辑
+	var chambers := 6                    # 弹巢容量
+	var barrel_len := 0.1                # 左轮枪管长度(m,模型区分)
+	var quick_reload := 0.0              # 左轮快速装弹器换弹时长
+	var single_reload := 0.0             # 左轮逐发装填总时长
 
 
 class ClassDef extends RefCounted:
@@ -61,6 +72,9 @@ class ClassDef extends RefCounted:
 	var gadget_cn := ""
 	var gadget_count := 2
 	var desc := ""
+	# 兵种技能可选列表(部署界面「兵种装备」槽二选一;索引 0 = 默认,与上面三个字段一致)
+	# 每项:{ "id","cn","count","desc","weapon" };weapon=true 表示占用武器槽(按 3 切换)
+	var gadgets: Array = []
 
 
 static func _w(id_name: String, cn: String, kind: String, auto: bool, damage: float, head_mult: float,
@@ -124,11 +138,11 @@ static func build_weapons() -> Dictionary:
 		{ "scope": true, "scope_mag": 8, "bullet_speed": 950, "bullet_drop": 0.55, "recoil_cam": 0.014, "reload_tac": 2.7 })
 	# 狙击镜独立 PIP:scope_mag 为真实倍率(4/6/7/8×),运行时按基础 FOV 换算镜内 FOV;
 	# zoom_fov 仍作为旧数据/非 PIP 路径兼容值保留。
-	WD["m1014"] = _w("M1014", "M1014 霰弹枪", "shotgun", false, 11, 1.5, 78, 7, 42, 4.9, 0.13, 62,
+	WD["m1014"] = _w("M1014", "M1014 半自动霰弹枪", "shotgun", false, 11, 1.5, 210, 7, 42, 4.9, 0.13, 62,
 		[10, 26, 0.25], 0.096, -0.24, [1.8, 0.4, 0.12], [3.2, 2.2, 0.8, 0, 0], Color(1, 0.75, 0.56),
 		{ "pellets": 9, "bullet_speed": 380, "bullet_drop": 1.35 })
 	WD["m1911"] = _w("M1911", "M1911 手枪", "pistol", false, 28, 2.0, 380, 8, 64, 1.7, 0.09, 62,
-		[20, 50, 0.5], 0.073, -0.2, [0.55, 0.2, 0.05], [1.0, 0.15, 0.8, 0.25, 1.4], Color(1, 0.94, 0.75),
+		[20, 50, 0.5], 0.073, -0.34, [0.55, 0.2, 0.05], [1.0, 0.15, 0.8, 0.25, 1.4], Color(1, 0.94, 0.75),
 		{ "bullet_speed": 350, "bullet_drop": 1.05, "reload_tac": 1.15 })
 	WD["scar"] = _w("SCAR-H", "SCAR-H 战斗步枪", "rifle", true, 34, 2.0, 550, 20, 100, 2.5, 0.15, 54,
 		[35, 80, 0.6], 0.112, -0.24, [0.62, 0.24, 0.06], [1.6, 0.14, 1.2, 0.28, 1.8], Color(1, 0.82, 0.56),
@@ -140,7 +154,7 @@ static func build_weapons() -> Dictionary:
 		[20, 48, 0.5], 0.1, -0.23, [0.34, 0.12, 0.035], [1.1, 0.13, 0.7, 0.2, 1.3], Color(1, 0.94, 0.75),
 		{ "bullet_speed": 410, "bullet_drop": 1.05, "reload_tac": 1.4 })
 	WD["p90"] = _w("P90", "P90 个人防卫武器", "smg", true, 20, 1.8, 900, 50, 200, 2.5, 0.11, 60,
-		[18, 45, 0.5], 0.078, -0.22, [0.28, 0.16, 0.03], [1.3, 0.16, 0.8, 0.16, 1.2], Color(0.75, 0.88, 1),
+		[18, 45, 0.5], 0.09, -0.22, [0.28, 0.16, 0.03], [1.3, 0.16, 0.8, 0.16, 1.2], Color(0.75, 0.88, 1),
 		{ "bullet_speed": 715, "bullet_drop": 0.95, "reload_tac": 1.7 })
 	WD["pkm"] = _w("PKM", "PKM 通用机枪", "lmg", true, 32, 1.8, 650, 100, 200, 6.0, 0.24, 58,
 		[38, 85, 0.65], 0.122, -0.25, [0.58, 0.32, 0.06], [2.7, 0.32, 1.9, 0.13, 1.2], Color(1, 0.69, 0.38),
@@ -156,25 +170,60 @@ static func build_weapons() -> Dictionary:
 		[90, 180, 0.8], 0.115, -0.15, [1.4, 0.35, 0.09], [3.5, 0.05, 2.2, 0.5, 1.5], Color(1, 0.82, 0.63),
 		{ "scope": true, "scope_mag": 4, "bullet_speed": 830, "bullet_drop": 0.7, "recoil_cam": 0.01, "reload_tac": 1.7 })
 	# 狙击 zoom_fov 12-14:镜内视野更窄、放大更强(svd 张角 35.7°/14° ≈ 感知 2.55×)
-	WD["rpg"] = _w("RPG-7", "RPG-7 火箭筒", "rpg", false, 120, 1.0, 30, 1, 4, 3.0, 0.2, 60,
+	WD["rpg"] = _w("反载具毒刺导弹", "反载具毒刺导弹", "rpg", false, 120, 1.0, 30, 1, 4, 3.0, 0.2, 60,
 		[999, 999, 1], 0.0755, -0.24, [1.5, 0.3, 0.12], [0.5, 0.1, 0.5, 0, 0], Color(1, 0.88, 0.63),
 		{ "projectile": true, "splash": 6.5, "speed": 48.0,  # 非锁定直射弹速 38→48:射程提升
-		  "view_hip": Vector3(0.24, -0.24, -0.52), "view_ads": Vector3(0, -0.085, -0.4) })
+		  "scope": true, "scope_mag": 4.0, "zoom_fov": 18.0,
+		  "view_hip": Vector3(0.34, -0.14, -0.36), "view_ads": Vector3(0.102, -0.163, 0.047) })
+	# 突击兵第二技能:中折式 40mm 榴弹发射器(膛内 1 发 + 备弹 2 发 = 共 3 发)
+	# proj_grav 9.8 = 真实抛物线弹道;proj_arm 5m 保险,近距不自炸
+	WD["gl"] = _w("M320 榴弹发射器", "M320 榴弹发射器", "rpg", false, 105, 1.0, 30, 1, 2, 2.9, 0.22, 62,
+		[999, 999, 1], 0.0755, -0.22, [1.2, 0.28, 0.1], [0.6, 0.12, 0.5, 0, 0], Color(1, 0.9, 0.62),
+		{ "projectile": true, "splash": 5.2, "speed": 76.0, "proj_grav": 9.8, "proj_arm": 5.0,
+		  "view_hip": Vector3(0.2, -0.16, -0.33), "view_ads": Vector3(0.0, -0.083, -0.235) })
 	WD["g17"] = _w("G17", "格洛克17 手枪", "pistol", false, 21, 2.0, 520, 17, 102, 1.4, 0.07, 63,
-		[16, 42, 0.5], 0.0685, -0.2, [0.3, 0.11, 0.034], [1.15, 0.18, 0.85, 0.15, 0.9], Color(1, 0.94, 0.75),
+		[16, 42, 0.5], 0.0685, -0.34, [0.3, 0.11, 0.034], [1.15, 0.18, 0.85, 0.15, 0.9], Color(1, 0.94, 0.75),
 		{ "bullet_speed": 380, "bullet_drop": 1.0, "reload_tac": 0.95 })
 	WD["p226"] = _w("P226", "P226 手枪", "pistol", false, 34, 2.1, 300, 12, 60, 1.8, 0.1, 61,
-		[24, 56, 0.52], 0.0735, -0.2, [0.52, 0.16, 0.048], [0.8, 0.07, 0.65, 0.2, 1.0], Color(0.85, 0.93, 1),
+		[24, 56, 0.52], 0.0735, -0.34, [0.52, 0.16, 0.048], [0.8, 0.07, 0.65, 0.2, 1.0], Color(0.85, 0.93, 1),
 		{ "bullet_speed": 400, "bullet_drop": 0.95, "reload_tac": 1.25 })
 	WD["deagle"] = _w("沙漠之鹰", "沙漠之鹰 手枪", "pistol", false, 56, 2.2, 155, 7, 28, 2.3, 0.13, 58,
-		[30, 70, 0.45], 0.0825, -0.2, [2.3, 0.6, 0.16], [1.9, 0.24, 1.3, 0.9, 2.6], Color(1, 0.85, 0.63),
+		[30, 70, 0.45], 0.0825, -0.34, [2.3, 0.6, 0.16], [1.9, 0.24, 1.3, 0.9, 2.6], Color(1, 0.85, 0.63),
 		{ "bullet_speed": 470, "bullet_drop": 0.85, "recoil_cam": 0.011, "reload_tac": 1.6 })
 	WD["m93r"] = _w("M93R", "M93R 冲锋手枪", "pistol", true, 16, 1.8, 1100, 21, 126, 1.7, 0.08, 62,
-		[13, 34, 0.42], 0.07, -0.2, [0.36, 0.3, 0.038], [1.7, 0.42, 1.15, 0.14, 1.6], Color(1, 0.91, 0.69),
+		[13, 34, 0.42], 0.07, -0.34, [0.36, 0.3, 0.038], [1.7, 0.42, 1.15, 0.14, 1.6], Color(1, 0.91, 0.69),
 		{ "bullet_speed": 400, "bullet_drop": 1.05, "reload_tac": 1.1 })
-	WD["spas12"] = _w("SPAS-12", "SPAS-12 战斗霰弹枪", "shotgun", false, 13, 1.5, 68, 8, 40, 5.3, 0.14, 62,
+	WD["spas12"] = _w("SPAS-12", "SPAS-12 半自动霰弹枪", "shotgun", false, 13, 1.5, 190, 8, 40, 5.3, 0.14, 62,
 		[12, 30, 0.28], 0.1, -0.24, [2.1, 0.45, 0.13], [3.0, 2.0, 0.8, 0, 0], Color(1, 0.75, 0.56),
 		{ "pellets": 8, "bullet_speed": 400, "bullet_drop": 1.35 })
+	# ==================== [9/10 泵动霰弹枪扩充] 3 把独立管式弹仓泵动霰弹枪 ====================
+	# 三把枪拥有不同结构/材质/弹容/后坐/散布/泵动行程与换弹节奏,全部走逐发装填 + 真泵动循环。
+	WD["rem870"] = _w("Remington 870", "雷明顿 M870 泵动霰弹枪", "shotgun", false, 12, 1.5, 70, 7, 42, 4.6, 0.13, 62,
+		[11, 27, 0.26], 0.098, -0.24, [1.95, 0.42, 0.125], [3.1, 2.1, 0.8, 0, 0], Color(0.92, 0.78, 0.6),
+		{ "pellets": 9, "bullet_speed": 385, "bullet_drop": 1.35,
+		  "pump_action": true, "pump_stroke": 0.065, "pump_dur": 0.46, "reload_tac": 3.4 })
+	WD["m590"] = _w("M590A1", "莫斯伯格 M590A1 泵动霰弹枪", "shotgun", false, 13, 1.5, 65, 8, 40, 5.1, 0.14, 62,
+		[12, 30, 0.27], 0.101, -0.24, [2.15, 0.48, 0.14], [3.4, 2.3, 0.85, 0, 0], Color(0.8, 0.88, 0.74),
+		{ "pellets": 8, "bullet_speed": 400, "bullet_drop": 1.3,
+		  "pump_action": true, "pump_stroke": 0.075, "pump_dur": 0.5, "reload_tac": 3.9 })
+	WD["win1897"] = _w("M1897", "温彻斯特 M1897 堑壕霰弹枪", "shotgun", false, 14, 1.5, 62, 5, 35, 3.7, 0.14, 62,
+		[13, 32, 0.3], 0.103, -0.24, [1.75, 0.38, 0.115], [2.7, 1.85, 0.7, 0, 0], Color(0.72, 0.62, 0.48),
+		{ "pellets": 10, "bullet_speed": 375, "bullet_drop": 1.4,
+		  "pump_action": true, "pump_stroke": 0.07, "pump_dur": 0.52, "reload_tac": 2.9 })
+	# ==================== [9/10 左轮手枪扩充] 3 把独立弹巢左轮 ====================
+	# kind 保持 pistol(与现有副武器/BR/菜单/后坐体系完全兼容),revolver 标记驱动独立弹巢换弹逻辑。
+	WD["python"] = _w("Colt Python", "柯尔特蟒蛇 左轮手枪", "pistol", false, 58, 2.3, 260, 6, 36, 2.5, 0.11, 60,
+		[28, 62, 0.5], 0.093, -0.34, [1.55, 0.34, 0.105], [1.2, 0.1, 0.7, 0.45, 1.6], Color(0.78, 0.86, 0.98),
+		{ "bullet_speed": 440, "bullet_drop": 0.85, "recoil_cam": 0.009,
+		  "revolver": true, "chambers": 6, "barrel_len": 0.152, "quick_reload": 2.1, "single_reload": 3.2 })
+	WD["sw686"] = _w("S&W 686", "史密斯韦森 686 左轮手枪", "pistol", false, 50, 2.2, 290, 6, 36, 2.3, 0.1, 60,
+		[26, 58, 0.5], 0.091, -0.34, [1.35, 0.3, 0.092], [1.1, 0.09, 0.65, 0.4, 1.4], Color(0.9, 0.92, 0.96),
+		{ "bullet_speed": 430, "bullet_drop": 0.9, "recoil_cam": 0.008,
+		  "revolver": true, "chambers": 6, "barrel_len": 0.102, "quick_reload": 1.9, "single_reload": 2.9 })
+	WD["sw500"] = _w("S&W 500", "史密斯韦森 M500 左轮手枪", "pistol", false, 82, 2.4, 170, 5, 25, 2.9, 0.14, 58,
+		[34, 78, 0.45], 0.096, -0.34, [2.75, 0.62, 0.185], [1.7, 0.16, 1.0, 0.7, 2.4], Color(0.8, 0.82, 0.88),
+		{ "bullet_speed": 500, "bullet_drop": 0.8, "recoil_cam": 0.014,
+		  "revolver": true, "chambers": 5, "barrel_len": 0.213, "quick_reload": 2.5, "single_reload": 3.5 })
 	# ==================== [8/10 武器扩充] 新增 10 把武器(定位差异化) ====================
 	# 卡宾枪:高射速低后座,近距离压枪利器(比 M4 轻快)
 	WD["g36c"] = _w("G36C", "G36C 卡宾枪", "rifle", true, 25, 2.0, 800, 30, 150, 2.6, 0.1, 56,
@@ -276,46 +325,91 @@ static func build_weapons() -> Dictionary:
 
 
 static func build_classes() -> Dictionary:
-	var secondaries := ["m1911", "g17", "p226", "deagle", "m93r"]
+	var secondaries := ["m1911", "g17", "p226", "deagle", "m93r", "python", "sw686", "sw500"]
 	var CD := {}
 	# 突击兵:前线破阵(步枪 + 霰弹 + 烟雾弹 + C5 + 医疗针自用)
 	var assault := ClassDef.new()
 	assault.cn = "突击兵"; assault.en = "ASSAULT"; assault.icon = "突"; assault.color = Color(0.5, 0.82, 1.0)
 	assault.primary = "m4"; assault.weapons = ["m4", "ak", "scar", "aug", "g36c", "ak74", "famas", "g3"]
-	assault.shotguns = ["m1014", "spas12"]; assault.secondaries = secondaries
+	assault.shotguns = ["m1014", "spas12", "rem870", "m590", "win1897"]; assault.secondaries = secondaries
 	assault.gadget = "medkit"; assault.gadget_cn = "医疗针"; assault.gadget_count = 2
 	assault.desc = "前线破阵者。冲锋夺点、近战歼敌;烟雾弹掩护推进,C5 炸药摧毁工事载具,医疗针仅限自救。"
+	assault.gadgets = [
+		{ "id": "medkit", "cn": "医疗针", "count": 2, "weapon": false,
+		  "desc": "按 F 注射肾上腺素,持续恢复自身生命(仅限自救)。" },
+		{ "id": "gl", "cn": "榴弹发射器", "count": 3, "weapon": true,
+		  "desc": "按 3 切换 M320 中折式榴弹发射器,共 3 发 40mm 榴弹,抛物线弹道 + 溅射杀伤。" },
+	]
 	CD["assault"] = assault
 	# 工程兵:载具克星与守护者(轻机枪 + RPG-7 + 反坦克地雷 + 维修工具)
 	var engineer := ClassDef.new()
 	engineer.cn = "工程兵"; engineer.en = "ENGINEER"; engineer.icon = "工"; engineer.color = Color(1.0, 0.77, 0.42)
 	engineer.primary = "m249"; engineer.weapons = ["m249", "pkm", "rpd", "mg42", "m60", "mk48", "negev", "mg3"]
 	engineer.secondaries = secondaries
-	engineer.gadget = "rpg"; engineer.gadget_cn = "RPG-7"; engineer.gadget_count = 4
-	engineer.desc = "载具克星与守护者。RPG-7 反载具(按 3),维修工具修复己方载具(靠近按 F),反坦克地雷预埋。"
+	engineer.gadget = "rpg"; engineer.gadget_cn = "反载具毒刺导弹"; engineer.gadget_count = 4
+	engineer.desc = "载具克星与守护者。反载具毒刺导弹(按 3),维修工具修复己方载具(靠近按 F),反坦克地雷预埋。"
+	engineer.gadgets = [
+		{ "id": "rpg", "cn": "反载具毒刺导弹", "count": 4, "weapon": true,
+		  "desc": "按 3 切换毒刺发射器,4 发导弹;对空可锁定制导,对地为直射弹道。" },
+		{ "id": "coverkit", "cn": "掩体制造器", "count": 2, "weapon": false,
+		  "desc": "按 F 在正前方架起半身高装甲掩体,可蹲在后面躲子弹、站起来越顶射击。" },
+	]
 	CD["engineer"] = engineer
-	# 支援兵:战场生命线(冲锋枪 + 弹药箱/医疗箱 + 烟雾弹)
+	# 支援兵:战场生命线(冲锋枪 + 医疗包/弹药包二选一 + 烟雾弹)
 	var support := ClassDef.new()
 	support.cn = "支援兵"; support.en = "SUPPORT"; support.icon = "援"; support.color = Color(0.62, 0.88, 0.54)
 	support.primary = "mp5"; support.weapons = ["mp5", "ump", "p90", "vector", "pp19", "mpx", "mp7", "pp2000"]
 	support.secondaries = secondaries
-	support.gadget = "ammopack"; support.gadget_cn = "弹药箱"; support.gadget_count = 2
-	support.desc = "战场生命线。紧随小队提供弹药与医疗补给(按 F 部署补给箱,圈内回血+补弹),烟雾弹掩护转移。"
+	support.gadget = "medpack"; support.gadget_cn = "医疗包"; support.gadget_count = 2
+	support.desc = "战场生命线。医疗包与弹药包二选一(按 F 部署):医疗包只治疗,弹药包只补弹,两种功能不再合一。"
+	support.gadgets = [
+		{ "id": "medpack", "cn": "医疗包", "count": 2, "weapon": false,
+		  "desc": "按 F 部署医疗包,圈内友军持续恢复生命(不补弹药)。" },
+		{ "id": "ammopack", "cn": "弹药包", "count": 2, "weapon": false,
+		  "desc": "按 F 部署弹药包,圈内友军持续补充弹药与手雷(不回血)。" },
+	]
 	CD["support"] = support
-	# 侦察兵:战场之眼(狙击 + 标记 + 重生信标)
+	# 侦察兵:战场之眼(狙击 + 标记 + 重生信标 / 无人侦察机)
 	var recon := ClassDef.new()
 	recon.cn = "侦察兵"; recon.en = "RECON"; recon.icon = "侦"; recon.color = Color(0.88, 0.63, 1.0)
 	recon.primary = "awm"; recon.weapons = ["awm", "m24", "svd", "m40", "m82a1", "l115", "sv98", "m2010"]
 	recon.secondaries = secondaries
-	recon.gadget = "sensor"; recon.gadget_cn = "动态探测器"; recon.gadget_count = 2
-	recon.desc = "战场之眼。狙击与情报标记(Q 索敌),部署重生信标为小队提供隐蔽重生点(按 F)。"
+	recon.gadget = "beacon"; recon.gadget_cn = "重生信标"; recon.gadget_count = 2
+	recon.desc = "战场之眼。狙击与情报标记(Q 索敌);重生信标为小队提供隐蔽重生点,或改带无人侦察机远程侦察地形(按 F)。"
+	recon.gadgets = [
+		{ "id": "beacon", "cn": "重生信标", "count": 2, "weapon": false,
+		  "desc": "按 F 部署重生信标,为小队提供前线隐蔽重生点。" },
+		{ "id": "drone", "cn": "无人侦察机", "count": 1, "weapon": false,
+		  "desc": "按 F 起飞无人机并接管操控,可在自身 150 米圆形范围内侦察地形与标记敌人。" },
+	]
 	CD["recon"] = recon
 	return CD
 
 
+## 兵种技能可选列表(始终非空:老数据回退为单一默认技能)
+static func gadget_options(class_id: String) -> Array:
+	var cls = C().get(class_id)
+	if cls == null:
+		return []
+	if not cls.gadgets.is_empty():
+		return cls.gadgets
+	return [{ "id": cls.gadget, "cn": cls.gadget_cn, "count": cls.gadget_count, "weapon": cls.gadget == "rpg", "desc": "" }]
+
+
+## 按 id 取兵种技能条目;id 无效则回退该兵种默认技能(索引 0)
+static func gadget_option(class_id: String, gadget_id: String) -> Dictionary:
+	var opts := gadget_options(class_id)
+	if opts.is_empty():
+		return {}
+	for o in opts:
+		if String(o.get("id", "")) == gadget_id:
+			return o
+	return opts[0]
+
+
 static var _weapons: Dictionary = {}
 static var _classes: Dictionary = {}
-const SECONDARIES: Array = ["m1911", "g17", "p226", "deagle", "m93r"]
+const SECONDARIES: Array = ["m1911", "g17", "p226", "deagle", "m93r", "python", "sw686", "sw500"]
 
 
 ## 惰性初始化(GDScript 静态变量初始化限制)

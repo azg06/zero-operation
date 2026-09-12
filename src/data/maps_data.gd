@@ -1,4 +1,4 @@
-﻿class_name MapsData
+class_name MapsData
 ## 地图主题数据(对应 map.js 中的 MAPS)
 
 class MapDef extends RefCounted:
@@ -156,6 +156,10 @@ static func build_maps() -> Dictionary:
 			{ "x": -150.0, "z": 40.0 },
 			{ "x": 160.0, "z": -50.0 },
 			{ "x": 20.0, "z": 235.0 },
+			{ "x": -270.0, "z": -275.0 },
+			{ "x": -245.0, "z": 270.0 },
+			{ "x": 270.0, "z": 190.0 },
+			{ "x": 150.0, "z": -305.0 },
 		],
 		"roads": [
 			[0.0, -240.0, -150.0, 40.0],
@@ -164,25 +168,35 @@ static func build_maps() -> Dictionary:
 			[160.0, -50.0, 0.0, -240.0],
 			[160.0, -50.0, 215.0, 45.0],       # 村庄3 → 城市西缘(接入街道 z=45)
 			[20.0, 235.0, 215.0, 225.0],       # 村庄4 → 城市北缘(接入街道 z=225)
+			[0.0, -240.0, -270.0, -275.0],
+			[-270.0, -275.0, -150.0, 40.0],
+			[-150.0, 40.0, -245.0, 270.0],
+			[-245.0, 270.0, 20.0, 235.0],
+			[20.0, 235.0, 270.0, 190.0],
+			[270.0, 190.0, 160.0, -50.0],
+			[160.0, -50.0, 150.0, -305.0],
+			[150.0, -305.0, 0.0, -240.0],
+			[-270.0, -275.0, -245.0, 270.0],
 		],
 		"loot_points": [],
 		"vehicle_points": [],
 		"drop_zone": Rect2(-200, -370, 400, 740),   # 跳伞航线参考区:地图中线纵向带
 		"zone_bounds": 390.0,                        # 毒圈计算区域 = G.bounds(800m 地图半宽)
 	}
-	# ---- 城市区(东北部密集街区:5 排 × 5-6 栋 + 街道 + 广场;可进入房 5 栋,固定种子可复现) ----
+	# ---- 城市区(东北部高密度街区:8 排 × 6-8 栋 + 横竖街道 + 广场;可进入房 16 栋,固定种子) ----
 	var crng := RandomNumberGenerator.new()
 	crng.seed = 20240808
 	var city_blocks := []
-	var city_streets := [-225.0, -135.0, -45.0, 45.0, 135.0, 225.0, -315.0, 315.0]
-	var city_rows := [-180.0, -90.0, 0.0, 90.0, 180.0]
+	var city_streets := [-360.0, -315.0, -225.0, -135.0, -45.0, 45.0, 135.0, 225.0, 315.0, 360.0]
+	var city_rows := [-315.0, -225.0, -135.0, -45.0, 45.0, 135.0, 225.0, 315.0]
+	var city_avenues := [225.0, 315.0]
 	var ent_city := 0
 	for ri in city_rows.size():
-		var rx := 205.0 + crng.randf_range(0, 10)
+		var rx := 190.0 + crng.randf_range(0, 8)
 		var guard := 0
-		while rx < 345.0 and guard < 40:
+		while rx < 365.0 and guard < 60:
 			guard += 1
-			var ent: bool = crng.randf() < 0.42 and ent_city < 5
+			var ent: bool = crng.randf() < 0.5 and ent_city < 16
 			var bw := 0.0
 			var bd := 0.0
 			var bh := 0.0
@@ -192,81 +206,69 @@ static func build_maps() -> Dictionary:
 				bd = crng.randf_range(6.6, 8.0)
 				bh = 3.3
 			else:
-				bw = crng.randf_range(14.0, 19.0)
-				bd = crng.randf_range(17.0, 24.0)
-				bh = crng.randf_range(8.0, 15.0)
+				bw = crng.randf_range(12.0, 18.0)
+				bd = crng.randf_range(16.0, 23.0)
+				bh = crng.randf_range(10.0, 26.0)
 			var cx := rx + bw / 2.0
 			var cz: float = float(city_rows[ri]) + crng.randf_range(-2.0, 2.0)
 			city_blocks.append({
 				"x": cx, "z": cz, "w": bw, "d": bd, "h": bh, "enter": ent,
 				"street": city_streets[ri],  # 南侧临街(门朝向/物资贴街)
 			})
-			rx += bw + crng.randf_range(4.0, 8.0)
-	# 追加 2 排街区(z=-270/+270,街道 ±315;沿用同一 crng,旧 5 排布局不变;每排固定 1 栋可进入 → 城市可进入 5+2)
-	var extra_rows := [[-270.0, -315.0], [270.0, 315.0]]
-	for nr_i in extra_rows.size():
-		var nz: float = extra_rows[nr_i][0]
-		var nst: float = extra_rows[nr_i][1]
-		var rx2 := 206.0 + (24.0 if nr_i == 1 else 0.0)
-		var guard2 := 0
-		var bi := 0
-		while rx2 < 345.0 and guard2 < 40:
-			guard2 += 1
-			var ent2: bool = (nr_i == 0 and bi == 2) or (nr_i == 1 and bi == 4)
-			var bw2 := 0.0
-			var bd2 := 0.0
-			var bh2 := 0.0
-			if ent2:
-				bw2 = crng.randf_range(8.0, 10.0)
-				bd2 = crng.randf_range(6.6, 8.0)
-				bh2 = 3.3
-			else:
-				bw2 = crng.randf_range(14.0, 19.0)
-				bd2 = crng.randf_range(17.0, 24.0)
-				bh2 = crng.randf_range(8.0, 15.0)
-			city_blocks.append({
-				"x": rx2 + bw2 / 2.0, "z": nz + crng.randf_range(-2.0, 2.0),
-				"w": bw2, "d": bd2, "h": bh2, "enter": ent2, "street": nst,
-			})
-			rx2 += bw2 + crng.randf_range(4.0, 8.0)
-			bi += 1
-	# 沿街填充:新区街道(±315)外侧 4 座小商店(网格外沿,避让路灯/街面道具)
-	for sk in [[-315.0, -1.0], [315.0, 1.0]]:
+			rx += bw + crng.randf_range(3.0, 6.0)
+	# 沿街填充:新区街道(±360)外侧 4 座小商店(网格外沿,避让路灯/街面道具)
+	for sk in [[-360.0, -1.0], [360.0, 1.0]]:
 		for sx4 in [230.0, 300.0]:
 			city_blocks.append({
 				"x": sx4 + crng.randf_range(-3.0, 3.0),
 				"z": sk[0] + sk[1] * 14.0 + crng.randf_range(-2.0, 2.0),
 				"w": crng.randf_range(6.0, 9.0), "d": crng.randf_range(6.0, 9.0),
-				"h": crng.randf_range(4.0, 6.0), "enter": false, "street": sk[0],
+				"h": crng.randf_range(5.0, 9.0), "enter": false, "street": sk[0],
 			})
 	br_valley.extra["city_blocks"] = city_blocks
 	br_valley.extra["city_streets"] = city_streets
-	# ---- 野外农场(西/外围散落;1 栋可进入农舍) ----
+	br_valley.extra["city_avenues"] = city_avenues
+	# ---- 野外农场(西/外围散落;4 栋可进入农舍) ----
 	br_valley.extra["farms"] = [
 		{ "x": -245.0, "z": -150.0, "style": 1 },
 		{ "x": -265.0, "z": 60.0, "style": 0 },
 		{ "x": -225.0, "z": 210.0, "style": 1 },
 		{ "x": 250.0, "z": -265.0, "style": 0, "enter": true },
 		{ "x": 170.0, "z": 265.0, "style": 1 },
+		{ "x": -320.0, "z": -310.0, "style": 0, "enter": true },
+		{ "x": -330.0, "z": 320.0, "style": 1, "enter": true },
+		{ "x": 330.0, "z": -330.0, "style": 0, "enter": true },
+		{ "x": 320.0, "z": 330.0, "style": 1 },
+		{ "x": -30.0, "z": -350.0, "style": 0 },
 	]
-	# 物资点:每村 13 个 + 道路沿线 8 个 = 60 个(固定种子,可复现)
+	# 物资点:每村 16 个 + 道路沿线 14 个 + 野外网格 24 个(固定种子,可复现;地图不再空旷)
 	var br_rng := RandomNumberGenerator.new()
 	br_rng.seed = 20240807
 	for v in br_valley.extra["villages"]:
-		for k in 13:
+		for k in 16:
 			br_valley.extra["loot_points"].append(Vector3(
 				v["x"] + br_rng.randf_range(-26, 26), 0.0,
 				v["z"] + br_rng.randf_range(-26, 26)))
-	for k in 8:
+	for k in 14:
 		br_valley.extra["loot_points"].append(Vector3(
 			br_rng.randf_range(-180, 180), 0.0,
 			br_rng.randf_range(-340, 340)))
+	# 野外网格物资:把物资铺到远离聚落的空地(网格 + 抖动,保证全图可搜)
+	for gy in 4:
+		for gx in 4:
+			br_valley.extra["loot_points"].append(Vector3(
+				-280.0 + gx * 180.0 + br_rng.randf_range(-30, 30), 0.0,
+				-280.0 + gy * 180.0 + br_rng.randf_range(-30, 30)))
 	# 村庄新楼配套物资点(每村 2 个,聚落外环 28-34m,避开河道/城市区)
 	var v_extra := [
 		[28.0, 0.0], [-28.0, 0.0],       # 村1(0,-240) 东西侧
 		[0.0, 30.0], [0.0, -30.0],       # 村2(-150,40) 南北侧
 		[-34.0, 0.0], [-26.0, 14.0],     # 村3(160,-50) 西/西南(避城市)
 		[30.0, 0.0], [-30.0, 0.0],       # 村4(20,235) 东西侧
+		[0.0, 34.0], [0.0, -34.0],       # 村5(-270,-275) 南北侧
+		[-34.0, 0.0], [34.0, 0.0],       # 村6(-245,270) 东西侧
+		[0.0, -32.0], [26.0, 18.0],      # 村7(270,190) 南/西南(避城市)
+		[-30.0, 0.0], [30.0, 0.0],       # 村8(150,-305) 东西侧
 	]
 	for vi2 in br_valley.extra["villages"].size():
 		var vv2: Dictionary = br_valley.extra["villages"][vi2]
@@ -274,29 +276,31 @@ static func build_maps() -> Dictionary:
 			br_valley.extra["loot_points"].append(Vector3(
 				vv2["x"] + v_extra[vi2 * 2 + k2][0], 0.0,
 				vv2["z"] + v_extra[vi2 * 2 + k2][1]))
-	# 城市物资点:约 2/3 栋临街 1 个 + 可进入房内 1 个 + 广场 4 个(贴合街区布局)
+	# 城市物资点:约 85% 栋临街 1 个 + 可进入房内 2 个 + 广场 8 个(贴合街区布局)
 	var cr2 := RandomNumberGenerator.new()
 	cr2.seed = 20240809
 	var city_loot := 0
 	for blk in city_blocks:
-		if cr2.randf() < 0.72:
+		if cr2.randf() < 0.85:
 			br_valley.extra["loot_points"].append(Vector3(
 				blk["x"] + cr2.randf_range(-5, 5), 0.0,
 				blk["street"] + 5.0))
 			city_loot += 1
 		if blk["enter"]:
 			br_valley.extra["loot_points"].append(Vector3(blk["x"], 0.0, blk["z"]))
-			city_loot += 1
-	for k in 4:
+			br_valley.extra["loot_points"].append(Vector3(blk["x"] + 2.0, 0.0, blk["z"] + 2.0))
+			city_loot += 2
+	for k in 8:
 		br_valley.extra["loot_points"].append(Vector3(275.0 + cr2.randf_range(-8, 8), 0.0, 45.0 + cr2.randf_range(-6, 6)))
-	# 农场物资点:每农场 2 个(谷仓/农舍旁 + 草垛旁)
+	# 农场物资点:每农场 3 个(谷仓/农舍旁 + 草垛旁 + 场院入口)
 	for f in br_valley.extra["farms"]:
 		br_valley.extra["loot_points"].append(Vector3(f["x"] + 4.0, 0.0, f["z"]))
 		br_valley.extra["loot_points"].append(Vector3(f["x"] - 6.0, 0.0, f["z"] - 5.0))
+		br_valley.extra["loot_points"].append(Vector3(f["x"] + 2.0, 0.0, f["z"] + 8.0))
 	# 城市接驳道路口 2 个
 	br_valley.extra["loot_points"].append(Vector3(190.0, 0.0, 40.0))
 	br_valley.extra["loot_points"].append(Vector3(190.0, 0.0, 220.0))
-	print("[MAPS] br_valley 城市区: 街区=", city_blocks.size(), " 可进入房=", ent_city + 2, " 城市物资点=", city_loot,
+	print("[MAPS] br_valley 城市区: 街区=", city_blocks.size(), " 可进入房=", ent_city + 4, " 城市物资点=", city_loot,
 		" 物资总数=", br_valley.extra["loot_points"].size())
 	# 载具点:每村外围 2 个 + 道路旁 2 个 + 城市外围 4 个 = 14 个
 	for v in br_valley.extra["villages"]:
@@ -353,6 +357,127 @@ static func build_maps() -> Dictionary:
 	print("[MAPS] br_valley 载具点=", br_valley.extra["vehicle_points"].size(),
 		"(村庄 8 + 道路旁 ", br_valley.extra["vehicle_points"].size() - 14, " + 城市 4 + 中心 2)")
 	MD["br_valley"] = br_valley
+
+	# ==================== 秋津市(AKITSU;全 Blender 手工建模静态城市,960m 征服) ====================
+	# 布局真源:tools/blender/jp_city_design.md。10 区 GLB 拼装(models/map_akitsu/zone_N.glb),
+	# 引擎侧不做程序化生成;垂直玩法由 walk_ 面烘焙进 G.floor_h(天桥/月台/屋顶/地下通道)。
+	var akitsu := MapDef.new()
+	akitsu.id = "akitsu"; akitsu.cn = "秋津市"; akitsu.mode = "conquest"
+	akitsu.size = 960; akitsu.road = 120
+	# 黄金黄昏(15.2):暖天穹 + 低斜长影;靠天穹/光色而非压低太阳(用户定,部署界面保持可辨)
+	akitsu.sky_top = Color.html("#3f6398"); akitsu.sky_mid = Color.html("#b08a6a"); akitsu.sky_bot = Color.html("#eab887")
+	akitsu.fog_color = Color.html("#d3b193"); akitsu.fog_near = 320; akitsu.fog_far = 2800   # 960m 图:雾太近会吃掉海滨/港区的远距交火视野
+	akitsu.hemi_sky = Color.html("#f2caa0"); akitsu.hemi_ground = Color.html("#5a5244"); akitsu.hemi_energy = 2.30
+	akitsu.sun_color = Color.html("#ffd7a0"); akitsu.sun_energy = 1.65; akitsu.sun_pos = Vector3(-150, 95, 70)
+	akitsu.cloud_color = Color.html("#ecc8a4")
+	akitsu.tdm_ok = false   # 960m 大图不进 TDM 圈定池
+	akitsu.extra = {
+		# 分区偏移(局部原点 → 世界坐标;与 tools/blender/assemble_jp_city.py 的 ZONES 同源)
+		"zones": [
+			{ "id": 1, "x": -300.0, "z": 60.0 },
+			{ "id": 2, "x": -140.0, "z": -120.0 },
+			{ "id": 3, "x": 50.0, "z": 170.0 },
+			{ "id": 4, "x": 250.0, "z": 340.0 },
+			{ "id": 5, "x": -270.0, "z": 340.0 },
+			{ "id": 6, "x": 325.0, "z": -160.0 },
+			{ "id": 7, "x": -80.0, "z": -360.0 },
+			{ "id": 8, "x": 200.0, "z": -60.0 },
+			{ "id": 9, "x": 0.0, "z": 0.0 },
+			{ "id": 10, "x": 0.0, "z": 0.0 },
+		],
+		# 8 个主要征服点(非对称:西神社/中央车站/东港区/北寺院/南海滨)
+		"flags": [
+			{ "id": "A", "x": -300.0, "z": 60.0 },     # 秋津神社
+			{ "id": "B", "x": 30.0, "z": 60.0 },       # 秋津站前(中央核心)
+			{ "id": "C", "x": -140.0, "z": -100.0 },   # 本町商店街
+			{ "id": "D", "x": 230.0, "z": 310.0 },     # 若叶住宅区
+			{ "id": "E", "x": 340.0, "z": -120.0 },    # 秋津港
+			{ "id": "F", "x": 180.0, "z": -20.0 },     # 临海新都心(办公)
+			{ "id": "G", "x": -60.0, "z": -360.0 },    # 汐见海滨公园
+			{ "id": "H", "x": -260.0, "z": 330.0 },    # 西念寺
+		],
+		# 出生点(2026-09-10 用户定):我方(us) 固定 G 汐见海滨 / 敌方(ru) 固定 D 若叶住宅,
+		# 各 32 个点(离旗 11~35m 的净空环),玩家与 NPC 共用;载具同基地起(离旗 30~64m)。
+		"spawns": {
+			"us": [
+				Vector3(-56.1, 0, -349.7), Vector3(-58.9, 0, -349.1), Vector3(-61.8, 0, -349.1),
+				Vector3(-64.5, 0, -350.0), Vector3(-67.0, 0, -351.5), Vector3(-68.9, 0, -353.6),
+				Vector3(-70.3, 0, -356.1), Vector3(-70.9, 0, -358.9), Vector3(-70.9, 0, -361.8),
+				Vector3(-70.0, 0, -364.5), Vector3(-68.5, 0, -367.0), Vector3(-66.4, 0, -368.9),
+				Vector3(-63.9, 0, -370.3), Vector3(-61.1, 0, -370.9), Vector3(-58.2, 0, -370.9),
+				Vector3(-55.5, 0, -370.0), Vector3(-53.0, 0, -368.5), Vector3(-51.1, 0, -366.4),
+				Vector3(-49.7, 0, -363.9), Vector3(-49.1, 0, -361.1), Vector3(-49.1, 0, -358.2),
+				Vector3(-50.0, 0, -355.5), Vector3(-51.5, 0, -353.0), Vector3(-53.6, 0, -351.1),
+				Vector3(-61.2, 0, -348.6), Vector3(-65.0, 0, -345.9), Vector3(-68.5, 0, -347.6),
+				Vector3(-71.4, 0, -350.3), Vector3(-73.5, 0, -353.6), Vector3(-74.8, 0, -357.3),
+				Vector3(-75.0, 0, -361.2), Vector3(-74.1, 0, -365.0),
+			],
+			"ru": [
+				Vector3(233.9, 0, 320.3), Vector3(231.1, 0, 320.9), Vector3(228.2, 0, 320.9),
+				Vector3(225.5, 0, 320.0), Vector3(223.0, 0, 318.5), Vector3(219.7, 0, 313.9),
+				Vector3(219.1, 0, 311.1), Vector3(219.1, 0, 308.2), Vector3(220.0, 0, 305.5),
+				Vector3(221.5, 0, 303.0), Vector3(226.1, 0, 299.7), Vector3(228.9, 0, 299.1),
+				Vector3(231.8, 0, 299.1), Vector3(234.5, 0, 300.0), Vector3(237.0, 0, 301.5),
+				Vector3(238.9, 0, 303.6), Vector3(240.9, 0, 308.9), Vector3(240.9, 0, 311.8),
+				Vector3(240.0, 0, 314.5), Vector3(238.5, 0, 317.0), Vector3(228.8, 0, 325.0),
+				Vector3(225.0, 0, 324.1), Vector3(221.5, 0, 322.4), Vector3(218.6, 0, 319.7),
+				Vector3(216.5, 0, 316.4), Vector3(215.2, 0, 312.7), Vector3(215.0, 0, 308.8),
+				Vector3(215.9, 0, 305.0), Vector3(217.6, 0, 301.5), Vector3(220.3, 0, 298.6),
+				Vector3(223.6, 0, 296.5), Vector3(227.3, 0, 295.2),
+			],
+		},
+		# 载具出生(24 = 每侧 12:坦克×2 + 步战×3 + 吉普×7),全部固定在 G / D 基地
+		"vehicles": [
+			{ "x": -75.1, "z": -334.1, "yaw": 3.23, "type": "tank" },   # US-1
+			{ "x": -81.3, "z": -338.9, "yaw": 3.39, "type": "tank" },   # US-2
+			{ "x": -86.1, "z": -345.1, "yaw": 3.55, "type": "apc" },   # US-3
+			{ "x": -97.7, "z": -346.6, "yaw": 3.71, "type": "apc" },   # US-4
+			{ "x": -96.1, "z": -377.2, "yaw": 3.87, "type": "apc" },   # US-5
+			{ "x": -90.4, "z": -385.9, "yaw": 3.23, "type": "jeep" },   # US-6
+			{ "x": -105.7, "z": -384.9, "yaw": 3.39, "type": "jeep" },   # US-7
+			{ "x": -97.7, "z": -395.8, "yaw": 3.55, "type": "jeep" },   # US-8
+			{ "x": -87.1, "z": -404.4, "yaw": 3.71, "type": "jeep" },   # US-9
+			{ "x": -74.7, "z": -422.3, "yaw": 3.87, "type": "jeep" },   # US-10
+			{ "x": -58.1, "z": -424.0, "yaw": 3.23, "type": "jeep" },   # US-11
+			{ "x": -41.6, "z": -421.3, "yaw": 3.39, "type": "jeep" },   # US-12
+			{ "x": 214.9, "z": 335.9, "yaw": 0.09, "type": "tank" },   # RU-1
+			{ "x": 208.7, "z": 331.1, "yaw": 0.25, "type": "tank" },   # RU-2
+			{ "x": 201.0, "z": 317.6, "yaw": 0.41, "type": "apc" },   # RU-3
+			{ "x": 192.3, "z": 323.4, "yaw": 0.57, "type": "apc" },   # RU-4
+			{ "x": 190.1, "z": 313.2, "yaw": 0.73, "type": "apc" },   # RU-5
+			{ "x": 207.3, "z": 277.1, "yaw": 0.09, "type": "jeep" },   # RU-6
+			{ "x": 184.3, "z": 285.1, "yaw": 0.25, "type": "jeep" },   # RU-7
+			{ "x": 192.3, "z": 274.2, "yaw": 0.41, "type": "jeep" },   # RU-8
+			{ "x": 202.9, "z": 265.6, "yaw": 0.57, "type": "jeep" },   # RU-9
+			{ "x": 231.9, "z": 246.0, "yaw": 0.73, "type": "jeep" },   # RU-10
+			{ "x": 248.4, "z": 248.7, "yaw": 0.09, "type": "jeep" },   # RU-11
+			{ "x": 263.6, "z": 255.5, "yaw": 0.25, "type": "jeep" },   # RU-12
+			# 基地快速反应摩托(2026-09-11 新增: 960m 图需要快穿插单位)
+			{ "x": -76.2, "z": -352.4, "yaw": 3.55, "type": "motorcycle" },  # US-M1
+			{ "x": -80.6, "z": -357.0, "yaw": 3.71, "type": "motorcycle" },  # US-M2
+			{ "x": -71.8, "z": -357.9, "yaw": 3.39, "type": "motorcycle" },  # US-M3
+			{ "x": 222.4, "z": 251.0, "yaw": 0.41, "type": "motorcycle" },   # RU-M1
+			{ "x": 228.0, "z": 245.6, "yaw": 0.57, "type": "motorcycle" },   # RU-M2
+			{ "x": 219.0, "z": 244.8, "yaw": 0.73, "type": "motorcycle" },   # RU-M3
+			# 旗点就近载具(用户: "刷的载具要多一些") —— 每面中立旗旁 1 吉普 + 1 摩托,
+			# 距旗 20~25m, 便于夺点后快速转场; 具体格子由 safe_spawn_pos 自动避障吸附。
+			{ "x": -322.0, "z": 42.0, "yaw": 1.57, "type": "jeep" },          # A 神社
+			{ "x": -278.0, "z": 42.0, "yaw": 1.57, "type": "motorcycle" },
+			{ "x": 52.0, "z": 42.0, "yaw": 1.57, "type": "jeep" },             # B 站前
+			{ "x": 8.0, "z": 42.0, "yaw": 1.57, "type": "motorcycle" },
+			{ "x": -118.0, "z": -118.0, "yaw": 0.79, "type": "jeep" },         # C 商店街
+			{ "x": -162.0, "z": -118.0, "yaw": 0.79, "type": "motorcycle" },
+			{ "x": 362.0, "z": -138.0, "yaw": 5.50, "type": "jeep" },          # E 秋津港
+			{ "x": 318.0, "z": -138.0, "yaw": 5.50, "type": "motorcycle" },
+			{ "x": 158.0, "z": -38.0, "yaw": 2.36, "type": "jeep" },           # F 临海新都心
+			{ "x": 202.0, "z": -38.0, "yaw": 2.36, "type": "motorcycle" },
+			{ "x": -238.0, "z": 312.0, "yaw": 3.93, "type": "jeep" },          # H 西念寺
+			{ "x": -282.0, "z": 312.0, "yaw": 3.93, "type": "motorcycle" },
+		],
+		# 每队 AI 数:秋津市 960m 大图 → 64 v 64(玩家占我方 1 席,故我方 AI=63)
+		"bot_per_team": 63,
+	}
+	MD["akitsu"] = akitsu
 
 	return MD
 

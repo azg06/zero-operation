@@ -124,11 +124,105 @@ const SKINS := {
 }
 
 
+## ---- GLB 骨骼士兵(盒子拼装的替代管线,2026-09 重建) ----
+## Blender 管线(tools/blender/build_soldier.py):17 骨人形 + 顶点色分区 +
+## 4 条骨骼动画(Idle/Walk/Run/Death)。顶点色 R 通道存部件 id(0.1~0.8),
+## 配 soldier_palette.gdshader 按兵种/皮肤/队伍调色,一个 GLB 通吃 24 变体。
+## 每兵种一个 GLB(建模差异,Blender 管线分 4 兵种导出);assault 兼作兜底基准。
+const SOLDIER_GLB := "res://models/soldiers/soldier.glb"
+const USE_GLB_SOLDIER := true
+
+static var _glb_scenes: Dictionary = {}
+static var _glb_mats: Dictionary = {}
+
+
+## 按兵种取 GLB 场景(缺失兵种文件时回退 assault 基准)
+static func _glb_scene_for(class_id: String) -> PackedScene:
+	var path := "res://models/soldiers/soldier_%s.glb" % class_id
+	if not ResourceLoader.exists(path):
+		path = SOLDIER_GLB
+	if not _glb_scenes.has(path):
+		_glb_scenes[path] = load(path)
+	return _glb_scenes[path]
+
+
+## 调色材质(兵种/皮肤/队伍)——全局缓存共享实例,不增加 draw call
+static func _glb_material(class_id: String, skin: String, team: String) -> ShaderMaterial:
+	var key := "%s/%s/%s" % [class_id, skin, team]
+	var m: ShaderMaterial = _glb_mats.get(key)
+	if m != null:
+		return m
+	var cl_skins: Dictionary = SKINS.get(class_id, SKINS["assault"])
+	if not cl_skins.has(skin):
+		skin = "standard"
+	var pal: Dictionary = cl_skins[skin]
+	m = ShaderMaterial.new()
+	m.shader = load("res://src/shaders/soldier_palette.gdshader")
+	m.set_shader_parameter("pal_uniform", Color.html(pal["uniform"]))
+	m.set_shader_parameter("pal_vest", Color.html(pal["vest"]))
+	m.set_shader_parameter("pal_helmet", Color.html(pal["helmet"]))
+	m.set_shader_parameter("pal_gear", Color.html(pal["gear"]))
+	m.set_shader_parameter("pal_skin", Color.html("#c8a080"))
+	m.set_shader_parameter("pal_boot", Color.html("#26221e"))
+	m.set_shader_parameter("pal_accent", Color.html("#00ff88") if team == "us" else Color.html("#ff5500"))
+	m.set_shader_parameter("pal_gear2", Color.html(pal["gear2"]))
+	_glb_mats[key] = m
+	return m
+
+
+## GLB 士兵:Skeleton3D + AnimationPlayer + 真枪挂右手骨
+## meta: anim / skel / gun_mount / far_hide(供 bot.gd LOD 与死亡处理)
+static func build_soldier_glb(team: String, weapon_id: String, class_id := "assault", skin := "standard") -> Node3D:
+	var scn: PackedScene = _glb_scene_for(class_id)
+	var g: Node3D = scn.instantiate()
+	g.name = "Soldier"
+	var mat := _glb_material(class_id, skin, team)
+	var skel: Skeleton3D = null
+	var anim: AnimationPlayer = null
+	var stack: Array = [g]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if n is Skeleton3D:
+			skel = n as Skeleton3D
+		elif n is AnimationPlayer and anim == null:
+			anim = n as AnimationPlayer
+		elif n is MeshInstance3D:
+			(n as MeshInstance3D).material_override = mat
+		for c in n.get_children():
+			stack.append(c)
+	var far_hide: Array = []
+	var gun_mount: Node3D = null
+	if skel != null and not weapon_id.is_empty():
+		var ba := BoneAttachment3D.new()
+		ba.name = "GunMount"
+		ba.bone_name = "HandR"
+		skel.add_child(ba)
+		# 第三人称枪:同款 WeaponModels 管线(带全改装件,与玩家视觉一致)
+		var gun: Node3D = WeaponModels.build(weapon_id, false, WeaponModsData.load_cfg(weapon_id))
+		gun.name = "Weapon_" + weapon_id
+		# 手骨局部系(骨骼延伸=局部 -Y):绕 X +90° 把枪管从竖直转到沿骨前指
+		gun.rotation_degrees = Vector3(90, 0, 0)
+		gun.position = Vector3(0, 0, 0)
+		ba.add_child(gun)
+		far_hide.append(ba)
+		gun_mount = ba
+	g.set_meta("anim", anim)
+	g.set_meta("skel", skel)
+	g.set_meta("gun_mount", gun_mount)
+	g.set_meta("far_hide", far_hide)
+	return g
+
+
 ## AI 士兵:膝关节双腿 + 可编程持枪臂组 + 兵种专属外观
 ## 返回 Node3D,meta: leg_l{thigh,knee}, leg_r, upper, rig
 static func build_soldier(team: String, weapon_id: String, class_id := "assault", skin := "standard") -> Node3D:
+	if USE_GLB_SOLDIER:
+		return build_soldier_glb(team, weapon_id, class_id, skin)
 	var g := Node3D.new()
 	g.name = "Soldier"
+	# [PERF] 远距可藏件收集:护膝/靴/手/枪在 >LOD_FAR_DIST 亚像素不可辨,
+	# bot 按距离分级隐藏(战地同款 LOD 思想),每远 bot 省 ~15+ drawcall
+	var far_hide: Array = []
 	var is_us: bool = team == "us"
 	# 防御:未知皮肤 id(含跨兵种皮肤)一律回退本兵种 standard
 	var cl_skins: Dictionary = SKINS.get(class_id, SKINS["assault"])
@@ -169,6 +263,8 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 		bt.position = Vector3(0, -0.31, -0.03)
 		bt.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 		knee.add_child(bt)
+		far_hide.append(kp)
+		far_hide.append(bt)
 		thigh.add_child(knee)
 		g.add_child(thigh)
 		return { "thigh": thigh, "knee": knee }
@@ -287,6 +383,7 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 		hand.position = Vector3(0, 0, -0.2)
 		hand.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 		elbow.add_child(hand)
+		far_hide.append(hand)
 		arm.add_child(elbow)
 		rig.add_child(arm)
 		return { "arm": arm, "elbow": elbow }
@@ -297,11 +394,13 @@ static func build_soldier(team: String, weapon_id: String, class_id := "assault"
 	gun.scale = Vector3.ONE * 1.15
 	gun.position = Vector3(0.1, 0.02, -0.45)
 	rig.add_child(gun)
+	far_hide.append(gun)  # [PERF] 枪 GLB 是最大单体 drawcall,远距整体隐藏
 	upper.add_child(rig)
 	g.set_meta("rig", rig)
 	g.set_meta("arm_l_elbow", arm_l["elbow"])
 	g.set_meta("arm_r_elbow", arm_r["elbow"])
 	g.set_meta("upper", upper)
+	g.set_meta("far_hide", far_hide)
 	return g
 
 
@@ -345,85 +444,85 @@ static func _cylx(rt: float, rb: float, h: float, mat: Material) -> MeshInstance
 	return mi
 
 
-## 玩家第一人称下半身(低头可见 + 投影)
-## skin: 皮肤 id(与 build_soldier 共用 SKINS 表);本身体无渲染头(避免遮挡第一人称相机),
-##       但带 SHADOWS_ONLY 头/盔与当前武器投影(地面影子完整:有头、手持当前武器)
-## weapon_id: 当前主武器(影子中手持的枪;空则回退通用长条投影)
-## 返回 Node3D,meta: leg_l{thigh,knee}, leg_r, upper
-static func build_player_body(skin := "standard", weapon_id := "") -> Node3D:
-	var g := Node3D.new()
-	g.name = "PlayerBody"
-	var pal: Dictionary = SKINS.get("assault", SKINS["assault"]).get(skin, SKINS["assault"]["standard"])
-	var uniform := _mat(Color.html(pal["uniform"]), 0.95)
-	var vest := _mat(Color.html(pal["vest"]), 0.9)
-	var boot := _mat(Color.html("#2a2622"), 0.9)
-	var accent := _mat(Color.html("#00ff88"), 0.9, true)
-	var skin_mat := _mat(Color.html("#c8a080"), 0.8)
-	var helmet := _mat(Color.html(pal["helmet"]), 0.85)
+## ★第一人称身体的"眼—胸口"间距(米):由 player.gd 每帧把 Chest 骨下压这个量。
+## 士兵 GLB 的背心顶面 1.595m / 冲刺前倾最高 ~1.62m,与站立眼高 1.70m 只差 ~10cm;
+## 主相机 near=0.08 ⇒ 相机平面会把背心顶面切出一条可见裂缝(Blender 逐帧量化:
+## Idle -17° 最小视深 0.077m < 0.08 ⇒ 穿模)。下压 0.15 后间距 ~25cm(真人 ≈30cm),
+## 全兵种 x 全动画 x 全俯角最小视深 ≥0.143m,且低头看到的是正常大小的胸口。
+const FP_CHEST_DROP := 0.15
 
-	var mk_leg := func(x: float) -> Dictionary:
-		var leg := Node3D.new()
-		leg.position = Vector3(x, 0.85, 0)
-		var thigh := _box(0.18, 0.4, 0.2, uniform)
-		thigh.position.y = -0.2
-		thigh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		leg.add_child(thigh)
-		var knee := Node3D.new()
-		knee.position = Vector3(0, -0.42, 0)
-		var shin := _box(0.17, 0.45, 0.19, boot)
-		shin.position.y = -0.21
-		shin.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		knee.add_child(shin)
-		leg.add_child(knee)
-		g.add_child(leg)
-		return { "thigh": leg, "knee": knee }
-	var leg_l: Dictionary = mk_leg.call(-0.11)
-	var leg_r: Dictionary = mk_leg.call(0.11)
-	g.set_meta("leg_l", leg_l["thigh"])
-	g.set_meta("leg_l_knee", leg_l["knee"])
-	g.set_meta("leg_r", leg_r["thigh"])
-	g.set_meta("leg_r_knee", leg_r["knee"])
-	# 上半身组(髋部枢轴)
-	var upper := Node3D.new()
-	upper.position = Vector3(0, 0.95, 0)
-	g.add_child(upper)
-	_add(upper, _box(0.4, 0.6, 0.24, uniform), 0, 0.12, 0)        # 躯干
-	_add(upper, _box(0.42, 0.4, 0.28, vest), 0, 0.15, 0)          # 背心
-	_add(upper, _box(0.43, 0.05, 0.29, accent), 0, 0.33, 0)       # 识别条
-	# 双肩/上臂
-	var sho_l := _box(0.13, 0.36, 0.15, uniform)
-	sho_l.name = "sho_l"
-	sho_l.position = Vector3(-0.27, 0.22, 0)
-	sho_l.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	upper.add_child(sho_l)
-	var sho_r := _box(0.13, 0.36, 0.15, uniform)
-	sho_r.name = "sho_r"
-	sho_r.position = Vector3(0.27, 0.22, 0)
-	sho_r.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	upper.add_child(sho_r)
-	# 影子头部(只投影不渲染:地面影子带完整头部)
-	var head_s := _box(0.2, 0.24, 0.2, skin_mat)
-	head_s.position = Vector3(0, 0.57, 0)
-	head_s.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
-	upper.add_child(head_s)
-	var helmet_s := _box(0.24, 0.12, 0.24, helmet)
-	helmet_s.position = Vector3(0, 0.7, 0)
-	helmet_s.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
-	upper.add_child(helmet_s)
-	# 持枪投影:真实武器模型(只投影不渲染:地面影子手持当前枪)
-	var gun_node: Node3D = WeaponModels.build(weapon_id, false) if not weapon_id.is_empty() else null
-	if gun_node != null:
-		gun_node.name = "BodyGun"
-		gun_node.scale = Vector3.ONE * 1.15
-		gun_node.position = Vector3(0.16, 0.28, -0.35)
-		_set_shadow_only_recursive(gun_node)
-		upper.add_child(gun_node)
-	# 前伸小臂投影代理
-	var arm_proxy := _box(0.1, 0.1, 0.38, uniform)
-	arm_proxy.position = Vector3(-0.2, 0.2, -0.28)
-	arm_proxy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
-	upper.add_child(arm_proxy)
-	g.set_meta("upper", upper)
+
+## 玩家第一人称身体(骨骼 GLB 版):低头可见真实胸口/腿部,阴影 = 人形轮廓
+## - 复用士兵骨骼 GLB;头/脖/双臂骨骼 pose 缩至 0.01(动画不轨 scale 不会被覆盖):
+##   头/脖收进躯干防挡视线;手臂隐藏(第一人称手臂由 viewmodel 锥形臂+手模独立渲染,防双臂)
+##   **胸腔 Chest 必须保持 1.0**(低头要看得见自己的胸口,见 main.gd 身体可见性注释);
+##   胸段整体下移由 player.gd::_apply_fp_chest_drop() 用 pose position 实现(见 FP_CHEST_DROP)
+## - 影子补偿:Head 骨附件挂 SHADOWS_ONLY 头/盔代理(地面影子有头);
+##   影子枪挂 AimPitch 骨附件(臂链已缩不可挂,枪影仍随视线俯仰)
+## meta: skel / anim / gun_mount / far_hide
+static func build_player_body(skin := "standard", weapon_id := "", class_id := "assault") -> Node3D:
+	var g := build_soldier_glb("us", "", class_id, skin)
+	g.name = "PlayerBody"
+	# 玩家身体用**独立材质副本**:NPC 共享的调色材质不能被写 uniform(否则所有人一起让位)
+	var src_m: ShaderMaterial = null
+	var st0: Array = [g]
+	while not st0.is_empty():
+		var n0: Node = st0.pop_back()
+		if n0 is MeshInstance3D and (n0 as MeshInstance3D).material_override is ShaderMaterial:
+			src_m = (n0 as MeshInstance3D).material_override
+			break
+		for c0 in n0.get_children():
+			st0.append(c0)
+	if src_m != null:
+		var pm: ShaderMaterial = src_m.duplicate() as ShaderMaterial
+		var st1: Array = [g]
+		while not st1.is_empty():
+			var n1: Node = st1.pop_back()
+			if n1 is MeshInstance3D and (n1 as MeshInstance3D).material_override is ShaderMaterial:
+				(n1 as MeshInstance3D).material_override = pm
+			for c1 in n1.get_children():
+				st1.append(c1)
+		g.set_meta("fp_mat", pm)
+	var skel: Skeleton3D = g.get_meta("skel")
+	if skel != null:
+		# 藏头/脖/双臂:缩到 1cm 藏进躯干(GLB 动画只轨 rotation/location,scale 设置永久生效)
+		# ★Chest 严禁缩(缩掉 = 低头看不见自己的胸口,用户已明确否决):旧版把 Chest 一起缩到
+		#   1cm 是治标——穿模真根因是**站姿眼高错配**:GLB 胸口(背心顶面 1.595,冲刺前倾最高
+		#   ~1.62)与旧眼高 1.62 几乎等高,相机等于贴在胸腔里,主相机 near=0.08 把胸口整片裁掉
+		#   ⇒ 低头"看不到胸部/看到内部"。正解 = 眼高对齐模型真实眼位(1.62→1.70,净空 ~8cm)。
+		for bn in ["Head", "Neck", "ShoulderL", "ShoulderR",
+				"UpperArmL", "UpperArmR", "ForearmL", "ForearmR", "HandL", "HandR"]:
+			var bi := skel.find_bone(bn)
+			if bi >= 0:
+				skel.set_bone_pose_scale(bi, Vector3.ONE * 0.01)
+		# 影子头代理(只投影不渲染)
+		var ha := BoneAttachment3D.new()
+		ha.name = "ShadowHead"
+		ha.bone_name = "Head"
+		skel.add_child(ha)
+		var hs := _box(0.2, 0.24, 0.2, _mat(Color.html("#c8a080"), 0.8))
+		hs.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+		ha.add_child(hs)
+		# (影子躯干代理已删:胸腔本体恢复渲染后自身即影子投手,再挂代理会双层叠影)
+		var hpal: Dictionary = SKINS.get(class_id, SKINS["assault"]).get(skin, SKINS["assault"]["standard"])
+		var hel := _box(0.24, 0.12, 0.24, _mat(Color.html(hpal["helmet"]), 0.85))
+		hel.position = Vector3(0, 0.14, 0)
+		hel.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+		ha.add_child(hel)
+		# 影子武器挂点:AimPitch 骨(未缩;跟随瞄准俯仰) + 右手 rest 偏移
+		# 手世界位 (0.14, 1.44, -0.26) - 骨原点 (0, 1.40, -0.04) ≈ (0.14, 0.04, -0.22)
+		var ba := BoneAttachment3D.new()
+		ba.name = "BodyGun"
+		ba.bone_name = "AimPitch"
+		skel.add_child(ba)
+		ba.position = Vector3(0.14, 0.04, -0.22)
+		if not weapon_id.is_empty() and weapon_id != "rpg":
+			var gn := WeaponModels.build(weapon_id, false, WeaponModsData.load_cfg(weapon_id))
+			gn.rotation_degrees = Vector3(90, 0, 0)
+			_set_shadow_only_recursive(gn)
+			ba.add_child(gn)
+		g.set_meta("gun_mount", ba)
+	g.set_meta("far_hide", [])
 	return g
 
 
@@ -450,7 +549,26 @@ static func make_health_bar() -> Dictionary:
 
 
 static func update_health_bar(hb: Dictionary, health: float, team: String) -> void:
+	# [PERF] 血条上传节流:ImageTexture.update 每次触发 GPU 纹理上传(渲染队列同步点),
+	# 64 人混战下受击频繁,每秒几十次 stall;同 bot 0.25s 内或 hp 变化 <6 点时跳过重绘
+	var now: float = Time.get_ticks_msec() / 1000.0
+	if hb.has("_last_t"):
+		var dtu: float = now - float(hb["_last_t"])
+		var dhp: float = absf(health - float(hb["_last_hp"]))
+		if dtu < 0.25 and dhp < 6.0:
+			(hb["sprite"] as Sprite3D).visible = true
+			return
+	hb["_last_t"] = now
+	hb["_last_hp"] = health
 	var img: Image = hb["img"]
+	# [FIX 纹理空图] img 意外为空时跳过上传(引擎 _texture_2d_update 报错根),
+	# 首次发生打诊断日志定位来源
+	if img == null or img.is_empty():
+		if not hb.has("_img_bad"):
+			hb["_img_bad"] = true
+			push_warning("[TEX] 血条 Image 为空,跳过纹理上传 (诊断: img=", img, ")")
+		(hb["sprite"] as Sprite3D).visible = true
+		return
 	img.fill(Color(0, 0, 0, 0.7))
 	var col := Color(0.0, 1.0, 0.53) if team == "us" else Color(1.0, 0.33, 0.0)
 	var w := int(clampf(health / 100.0, 0.0, 1.0) * 62.0)

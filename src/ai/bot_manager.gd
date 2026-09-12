@@ -10,6 +10,8 @@ var target_per_team := 11
 var balance_cd := 0.0
 var enemy_skill_mod := 0.0       # 敌队技能系数修正(胶带平衡:票差越大敌方越强)
 var enemy_respawn_mod := 1.0     # 敌方重生延迟倍率
+var ally_skill_mod := 0.0        # 友方技能系数修正(票差过大时削弱领先的友方)
+var ally_respawn_mod := 1.0      # 友方重生延迟倍率
 
 const CLASS_POOL := ["assault", "assault", "assault", "assault", "engineer", "engineer", "support", "support", "recon", "recon", "recon"]
 const WEAPONS := {
@@ -30,6 +32,9 @@ func reset(per_team := 11, ru_bonus := 1) -> void:
 	enemy_skill_mod = 0.0
 	enemy_respawn_mod = 1.0
 	Bot._noise_log = []  # 换图:清空战场噪音日志,防止 AI 听到上一张图的枪声
+	# [PERF 9/6] 换图清空阵亡检测表(审计 P3-13:旧 bot instance_id key 永久残留,每次换图泄漏)
+	if G.effects != null and G.effects.has_method("death_dust"):
+		G.effects._bot_alive.clear()
 	for b in bots:
 		b.queue_free()
 	bots = []
@@ -153,7 +158,8 @@ func update_bots(dt: float) -> void:
 	if _ai_dbg:
 		_update_ai_debug(dt)
 	# [PERF-AUDIT] --noai 临时禁用 AI 更新(仅性能审计用,测量 AI 占 CPU 比例)
-	if OS.get_cmdline_user_args().has("--noai"):
+	# [PERF 9/6] 开关静态缓存,免每帧新建字符串数组(审计 P1-7)
+	if Utils.FLAG_NOAI:
 		return
 	var _bt0 := 0
 	if _bb_on:
@@ -174,8 +180,9 @@ func update_bots(dt: float) -> void:
 				_set_shadow_recursive(b.mesh, near)
 	for b in bots:
 		if not b.alive:
-			if b.mesh.visible:
-				b.update_bot(dt)  # 死亡动画
+			# [修] 无条件跑死亡动画:旧版 mesh 隐藏时跳过(载具乘员/过场隐形时死亡),
+			# 若死亡期间 mesh 被外部重新点亮会留下"直立/趴姿定格"的不动尸体
+			b.update_bot(dt)
 			b.respawn_t -= dt
 			# 实时 3D 战场部署(征服/突破):玩家死亡观察期间战场持续运转,AI 正常补充
 			var battlefield_live: bool = G.deployment != null and G.deployment.active
@@ -184,14 +191,13 @@ func update_bots(dt: float) -> void:
 					# TDM 契约:bot 死亡 2s 后从本队出生点复活(立即复活节奏)
 					b.respawn_t = 2.0 + Utils.rand(0, 0.6)
 				else:
-					b.respawn_t = Utils.rand(4, 7) * (enemy_respawn_mod if b.team != (G.player.team if G.player != null else "us") else 1.0)
+					var p_team_t: String = G.player.team if G.player != null else "us"
+					var resp_mod: float = enemy_respawn_mod if b.team != p_team_t else ally_respawn_mod
+					b.respawn_t = Utils.rand(4, 7) * resp_mod
 				G.game.spawn_actor(b)
 			continue
-		# [PERF] 远距 bot 更新频率分级:>60m(LOD2)每 2 帧完整更新,中间帧位置外推(移动不冻结,无碰撞远距容忍)
-		if b._anim_lod >= 2 and (Engine.get_process_frames() + b.id) % 2 == 1:
-			b.pos += b.vel * dt
-			b.mesh.position = b.pos
-			continue
+		# [PERF] 远距 bot 也保持每帧完整位置/动画更新,消除“远处 NPC 一卡一顿/静止”;
+		# 性能优化交给内部 _think_every 错峰与 _anim_lod 动画分级,不再整帧跳过移动。
 		b.update_bot(dt)
 	if _bb_on:
 		var _bb_dt := Time.get_ticks_usec() - _bt0
@@ -236,23 +242,43 @@ func _update_balance(dt: float) -> void:
 	# 突破模式票数天生不对称(攻 320/def ∞),票差胶带不适用,跳过
 	if G.mode == "breakthrough":
 		return
-	# 票差胶带:我方大优 → 敌方变强/复活变快;我方大劣 → 敌方变弱
+	# 票差胶带:相差 >100 时最大程度加强敌方并削弱友方;>50 中等;回落 25 以内恢复
 	var tdiff: float = G.tickets[G.player.team] - (G.tickets["ru"] if G.player.team == "us" else G.tickets["us"])
-	if tdiff > 80:
-		enemy_skill_mod = 0.15
-		enemy_respawn_mod = 0.8
-	elif tdiff > 30:
-		enemy_skill_mod = 0.06
-		enemy_respawn_mod = 0.92
-	elif tdiff < -80:
-		enemy_skill_mod = -0.12
+	if tdiff > 100:
+		enemy_skill_mod = 0.25
+		enemy_respawn_mod = 0.7
+		ally_skill_mod = -0.12
+		ally_respawn_mod = 1.3
+	elif tdiff > 50:
+		enemy_skill_mod = 0.12
+		enemy_respawn_mod = 0.85
+		ally_skill_mod = -0.05
+		ally_respawn_mod = 1.1
+	elif tdiff > 25:
+		enemy_skill_mod = 0.05
+		enemy_respawn_mod = 0.95
+		ally_skill_mod = 0.0
+		ally_respawn_mod = 1.0
+	elif tdiff < -100:
+		enemy_skill_mod = -0.25
 		enemy_respawn_mod = 1.4
-	elif tdiff < -30:
+		ally_skill_mod = 0.12
+		ally_respawn_mod = 0.75
+	elif tdiff < -50:
+		enemy_skill_mod = -0.12
+		enemy_respawn_mod = 1.15
+		ally_skill_mod = 0.05
+		ally_respawn_mod = 0.9
+	elif tdiff < -25:
 		enemy_skill_mod = -0.05
-		enemy_respawn_mod = 1.2
+		enemy_respawn_mod = 1.05
+		ally_skill_mod = 0.0
+		ally_respawn_mod = 1.0
 	else:
 		enemy_skill_mod = 0.0
 		enemy_respawn_mod = 1.0
+		ally_skill_mod = 0.0
+		ally_respawn_mod = 1.0
 	# 玩家 K/D 窗口:表现越好敌方越多(上限 13/队),越差越少(下限 8/队)
 	var kd := (float(G.stats.kills) + 1.0) / (float(G.stats.deaths) + 1.0)
 	if kd > 2.2:
@@ -278,7 +304,8 @@ func _update_balance(dt: float) -> void:
 			var cid: String = Utils.choice(CLASS_POOL)
 			var nb := Bot.new(team)
 			nb.apply_loadout(cid, Utils.choice(WEAPONS[cid][team]))
-			nb.skill = clampf(0.8 + Utils.rand(-0.14, 0.14), 0.45, 1.1)
+			var skill_mod := ally_skill_mod if team == p_team else enemy_skill_mod
+			nb.skill = clampf(0.8 + skill_mod + Utils.rand(-0.14, 0.14), 0.45, 1.1)
 			bots.append(nb)
 			G.bots = bots
 			G.main.add_child(nb)
@@ -295,7 +322,9 @@ func _update_balance(dt: float) -> void:
 				if b.team == team and not b.alive:
 					b.respawn_t = maxf(b.respawn_t, 9.0)
 					cut += 1
-	# 敌队技能基线随胶带调整(玩家队保持 0.8 基线,公平性)
+	# 敌我技能基线随胶带调整(大优时友方被削弱,敌方被加强;大劣反之)
 	for b in bots:
 		if b.team != p_team:
 			b.skill = clampf(0.82 + enemy_skill_mod + Utils.rand(-0.1, 0.1), 0.45, 1.1)
+		else:
+			b.skill = clampf(0.8 + ally_skill_mod + Utils.rand(-0.1, 0.1), 0.45, 1.1)

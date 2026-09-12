@@ -49,6 +49,11 @@ static func TYPES() -> Dictionary:
 			"tank": { "hp": 3600.0, "max_speed": 8.5, "max_rev": -3.5, "accel": 4.5, "brake": 8.0, "turn": 0.85,
 				"radius": 2.6, "seat": Vector3(0, 2.45, 0.3), "vehicle_name": "主战坦克", "weapon": null, "sus": 0.35,
 				"sus_ground": 15.0, "sus_rate": 5.0 },
+			# 突击摩托:最快最灵活、装甲最薄(1 驾 1 乘,无炮塔)。960m 大图的快速穿插单位。
+			"motorcycle": { "hp": 460.0, "max_speed": 27.0, "max_rev": -7.0, "accel": 16.0, "brake": 13.0,
+				"turn": 2.4, "radius": 0.85, "seat": Vector3(0, 1.02, 0.10),
+				"vehicle_name": "突击摩托", "weapon": null, "sus": 1.7,
+				"sus_ground": 30.0, "sus_rate": 10.0 },
 		}
 	return _types
 
@@ -57,6 +62,12 @@ var type := "jeep"
 var def: Dictionary
 var pos := Vector3.ZERO
 var yaw := 0.0
+
+
+## 贴地高度: **可行驶面**(秋津市桥面/引道 drive_)优先, 否则回退地形高度场。
+## 旧版直接读 ground_h → 载具永远在地面高度, 任何桥都上不去(用户报"有几座桥车上不去")。
+func _vh(x: float, z: float) -> float:
+	return G.veh_h.call(x, z, pos.y)
 var speed := 0.0
 var steer := 0.0
 var driver = null                # 驾驶员(控制移动;只能驾驶,不能开炮)
@@ -67,10 +78,19 @@ var turret_yaw := 0.0
 var turret_pitch := 0.0
 var cannon_t := 0.0
 var cannon_ammo := 20   # [8/10] 坦克主炮弹药(打空自动 8s 补弹)
+var auto_ammo := 1600   # 机炮弹链(AA/APC;打空自动 3.5s 换链)
+# === 开炮机械反馈(视觉层:炮管后坐/炮塔震颤,不影响弹道) ===
+var cannon_recoil := 0.0
+var cannon_recoil_pitch := 0.0
+var turret_shake_yaw := 0.0
+var turret_shake_pitch := 0.0
+var _cannon_base_z := 0.0
+var _muzzle_base_z := 0.0
+var _turret_prev_yaw := 0.0
 var ai_input = null              # 驾驶员 AI 输入(由 Bot 每帧填充:fwd/steer)
 var gunner_ai_input = null       # 炮手 AI 输入(由 Bot 每帧填充:turret_yaw/turret_pitch/fire)
 var mesh: Node3D = null
-var camera_ctl: VehicleCameraController = null   # 视角统一控制器(座位/状态机/第三人称)
+var camera_ctl: FirstPersonVehicleController = null   # 统一第一人称乘员控制器(座位/观瞄/火控/HUD 数据源)
 # === 部位伤害(战地风格) ===
 var track_hp := 1.0              # 履带/轮胎:低于 0.35 减速 + 转向变差
 var engine_hp := 1.0             # 引擎:低于 0.35 动力下降
@@ -115,10 +135,16 @@ func _init(x: float, z: float, p_yaw: float, p_type := "jeep") -> void:
 			mesh = VehicleModels.build_apc()
 		"aa":
 			mesh = VehicleModels.build_aa()
+		"motorcycle":
+			mesh = VehicleModels.build_motorcycle()
 	mesh.position = pos
 	mesh.rotation.y = yaw
 	add_child(mesh)
-	camera_ctl = VehicleCameraController.new(self)
+	if mesh.has_meta("cannon"):
+		_cannon_base_z = (mesh.get_meta("cannon") as Node3D).position.z
+	if mesh.has_meta("muzzle"):
+		_muzzle_base_z = (mesh.get_meta("muzzle") as Node3D).position.z
+	camera_ctl = FirstPersonVehicleController.new(self)
 	add_child(camera_ctl)
 
 
@@ -127,7 +153,8 @@ func is_tank() -> bool:
 
 
 func has_turret() -> bool:
-	return type != "jeep"
+	# 摩托车与吉普同为无炮塔载具(乘客位 = 后座,不接管炮塔)
+	return type == "tank" or type == "apc" or type == "aa"
 
 
 func team():
@@ -149,8 +176,11 @@ func passenger_world() -> Vector3:
 	return pos + (def["seat"] as Vector3).rotated(Vector3.UP, yaw)
 
 
-## 炮口世界坐标与方向
+## 炮口世界坐标与方向(无炮车型兜底:车头方向虚拟 muzzle,防 Nil 崩)
 func muzzle_world() -> Array:
+	if not mesh.has_meta("muzzle"):
+		var dir0 := Vector3(-sin(yaw), 0, -cos(yaw))
+		return [pos + Vector3(0, 1.5, 0) + dir0 * 1.5, dir0]
 	var mz: Node3D = mesh.get_meta("muzzle")
 	var out := mz.global_position
 	var ty := yaw + turret_yaw
@@ -174,14 +204,39 @@ func fire_cannon(shooter) -> void:
 	var shell_def := { "damage": 230.0, "splash": 8.5, "speed": 75.0, "cn": "125mm 主炮", "name": "坦克主炮", "tracer": Color.html("#ffe0a0") }
 	G.effects.spawn_rocket(shooter, shell_def, md[0], md[1])
 	AudioSys.veh_weapon(type, pos)
-	G.effects.muzzle(md[0], md[1], true)
-	G.effects.shake(1.1 if driver == G.player else 0.0)
+	if G.player != null and (gunner == G.player or driver == G.player):
+		AudioSys.veh_mech("bolt_cycle_heavy", 0.55)
+		AudioSys.veh_mech("rumble", 0.5)
+	# 大口径炮口焰:更大、更锐、烟更浓
+	G.effects.muzzle(md[0], md[1], true, 1.55, 0.065, 2.0, 2.0)
+	# 炮口烟雾:向后喷出 + 侧向扩散(数团,重量感)
+	for k in 4:
+		G.effects.smoke_spawn(
+			md[0].x + md[1].x * (0.3 + k * 0.25) + Utils.rand(-0.25, 0.25),
+			md[0].y + md[1].y * (0.3 + k * 0.25) + Utils.rand(-0.15, 0.15),
+			md[0].z + md[1].z * (0.3 + k * 0.25) + Utils.rand(-0.25, 0.25),
+			md[1].x * Utils.rand(-2.5, -0.8), Utils.rand(0.5, 1.3), md[1].z * Utils.rand(-2.5, -0.8),
+			Utils.rand(0.7, 1.2), 0.55, 0.5, 0.42, 0.1)
+	# 机械后坐动画与乘员视觉冲击(主炮重后坐)
+	cannon_recoil = 0.30
+	cannon_recoil_pitch = Utils.rand(0.030, 0.042)
+	turret_shake_yaw = Utils.rand(-0.006, 0.006)
+	turret_shake_pitch = Utils.rand(-0.010, -0.004)
+	if camera_ctl != null:
+		camera_ctl.notify_weapon_fire("cannon")
 
 
 ## 机炮(APC/AA,直射)
 func fire_auto(shooter) -> void:
 	if cannon_t > 0 or dead or def["weapon"] == null:
 		return
+	if auto_ammo <= 0:
+		cannon_t = 3.5
+		auto_ammo = 1600
+		if gunner == G.player or driver == G.player:
+			G.hud.hint("弹链耗尽 — 正在更换弹链 3.5s")
+		return
+	auto_ammo -= 1
 	var w = def["weapon"]
 	cannon_t = 60.0 / w.rpm
 	var md := muzzle_world()
@@ -194,8 +249,26 @@ func fire_auto(shooter) -> void:
 	dir = (dir + right * (cos(a) * r) + up2 * (sin(a) * r)).normalized()
 	# 弹道结算(下坠补偿 + 穿透 + 部位倍率)
 	Utils.ballistic_fire(shooter, w, md[0], dir, md[0])
-	G.effects.muzzle(md[0], dir, true)
+	G.effects.muzzle(md[0], dir, true, 1.1, 0.04, 1.35, 1.5)
 	AudioSys.veh_weapon(type, pos)
+	# AA/机炮:高频机械震动 + 供弹机构声 + 断续炮口烟
+	cannon_recoil = minf(cannon_recoil + 0.011, 0.045)
+	cannon_recoil_pitch = Utils.rand(-0.0035, 0.0025)
+	turret_shake_yaw += Utils.rand(-0.0016, 0.0016)
+	turret_shake_pitch += Utils.rand(-0.0016, 0.0016)
+	turret_shake_yaw = clampf(turret_shake_yaw, -0.006, 0.006)
+	turret_shake_pitch = clampf(turret_shake_pitch, -0.006, 0.006)
+	if G.player != null and (gunner == G.player or driver == G.player) and randf() < 0.18:
+		AudioSys.veh_mech("belt_in_heavy", 0.32)
+	if randf() < 0.3:
+		G.effects.smoke_spawn(
+			md[0].x + dir.x * 0.35, md[0].y + dir.y * 0.35, md[0].z + dir.z * 0.35,
+			-dir.x * Utils.rand(0.6, 1.6) + Utils.rand(-0.3, 0.3),
+			Utils.rand(0.4, 1.1),
+			-dir.z * Utils.rand(0.6, 1.6) + Utils.rand(-0.3, 0.3),
+			Utils.rand(0.3, 0.55), 0.4, 0.36, 0.3, 0.2)
+	if camera_ctl != null:
+		camera_ctl.notify_weapon_fire("autocannon")
 
 
 func damage(amount: float, attacker) -> void:
@@ -483,7 +556,26 @@ func _begin_unstuck() -> void:
 	unstuck_t = unstuck_turn_t + 0.8
 
 
+var _int_t := 0.0
+var _int_visible := true
+
+
 func update_vehicle(dt: float) -> void:
+	# [PERF] 空车内饰按需显隐:座椅/火控屏/操纵杆约 30 散件,空车外观完全不可见。
+	# 有乘员或玩家近旁(<40m,能从窗口瞄到内饰)时显示;节流 0.5s。
+	_int_t -= dt
+	if _int_t <= 0.0:
+		_int_t = 0.5
+		var want: bool = driver != null or gunner != null or (G.player != null and not dead and pos.distance_to(G.player.pos) < 40.0)
+		if want != _int_visible:
+			_int_visible = want
+			if mesh != null and is_instance_valid(mesh):
+				var it: Node3D = mesh.get_meta("interior") if mesh.has_meta("interior") else null
+				var it2: Node3D = mesh.get_meta("interior_turret") if mesh.has_meta("interior_turret") else null
+				if it != null:
+					it.visible = want
+				if it2 != null:
+					it2.visible = want
 	if dead:
 		# 残骸燃烧:被炸毁的载具保持残骸、不可驾驶不可开火,绝不自动复活
 		# (车位载具由 _on_point_captured 在点位易主时重新部署新车)
@@ -551,14 +643,32 @@ func update_vehicle(dt: float) -> void:
 	# ---- 炮手位:炮塔瞄准 + 开火(驾驶位不能开炮;只有坐在炮手位才能开火) ----
 	if has_turret():
 		var pitch_max := 1.22 if type == "aa" else 0.32
+		# 炮塔机电伺服速率:坦克最重、AA 最快但仍有机械延迟(弧度/秒级阻尼)
+		var turret_rate := 12.0
+		var pitch_rate := 12.0
+		match type:
+			"tank":
+				turret_rate = 8.5
+				pitch_rate = 6.5
+			"aa":
+				turret_rate = 15.0
+				pitch_rate = 10.0
+			"apc":
+				turret_rate = 11.0
+				pitch_rate = 7.5
 		var player_gunning: bool = gunner != null and gunner == G.player and gunner.alive
 		if player_gunning:
-			# 玩家炮手:炮塔跟随观察角瞄准(指哪打哪),左键开火
+			# 玩家炮手(战地式:炮手位=驾驶+开炮一体):炮塔跟随相机视线
+			# 指哪打哪(第三人称/ADS 目镜同一条视线),左键开火
 			var ctl = camera_ctl
-			if ctl != null and ctl.turret_chase():
-				turret_yaw = Utils.damp(turret_yaw, clampf(ctl.look_yaw, -2.6, 2.6), 12.0, dt)
-				turret_pitch = Utils.damp(turret_pitch, clampf(ctl.look_pitch, -0.14, pitch_max), 12.0, dt)
-			if Input.is_action_pressed("fire"):
+			var weapons_hot: bool = ctl == null or ctl.turret_chase()
+			if ctl != null and ctl.turret_chase() and G.camera != null:
+				var aim_dir: Vector3 = -G.camera.global_transform.basis.z
+				var wy: float = atan2(-aim_dir.x, -aim_dir.z)
+				turret_yaw = Utils.damp(turret_yaw, clampf(wrapf(wy - yaw, -PI, PI), -2.6, 2.6), turret_rate, dt)
+				turret_pitch = Utils.damp(turret_pitch,
+					clampf(asin(clampf(aim_dir.y, -1.0, 1.0)), -0.14, pitch_max), pitch_rate, dt)
+			if Input.is_action_pressed("fire") and weapons_hot:
 				if is_tank():
 					fire_cannon(gunner)
 				else:
@@ -566,13 +676,18 @@ func update_vehicle(dt: float) -> void:
 		elif gunner != null and gunner_ai_input != null:
 			# AI 炮手:按目标角瞄准 + 开火
 			var gai: Dictionary = gunner_ai_input
-			turret_yaw = Utils.damp(turret_yaw, clampf(gai.get("turret_yaw", 0.0), -2.6, 2.6), 5.0, dt)
-			turret_pitch = Utils.damp(turret_pitch, clampf(gai.get("turret_pitch", 0.0), -0.14, pitch_max), 5.0, dt)
+			turret_yaw = Utils.damp(turret_yaw, clampf(gai.get("turret_yaw", 0.0), -2.6, 2.6), turret_rate * 0.6, dt)
+			turret_pitch = Utils.damp(turret_pitch, clampf(gai.get("turret_pitch", 0.0), -0.14, pitch_max), pitch_rate * 0.6, dt)
 			if gai.get("fire", false):
 				if is_tank():
 					fire_cannon(gunner)
 				else:
 					fire_auto(gunner)
+		# 炮塔液压/电机随动声(有乘员且实际转动时,低频偶发,不淹没炮声)
+		var turret_dyaw: float = wrapf(turret_yaw - _turret_prev_yaw, -PI, PI)
+		if G.player != null and (gunner == G.player or driver == G.player) and randf() < dt * 3.0 and absf(turret_dyaw) > 0.004:
+			AudioSys.veh_mech("turret", 0.4)
+		_turret_prev_yaw = turret_yaw
 	# 踩油门判定(前进/倒车都算;AI 阈值避开到点后的 0.1 蠕动,防止原地误判)
 	var throttle_on := false
 	if player_driving:
@@ -595,6 +710,13 @@ func update_vehicle(dt: float) -> void:
 		if unstuck_t <= 0:
 			unstuck_t = 0.0
 	cannon_t = maxf(0, cannon_t - dt)
+	# 开炮机械反馈衰减:炮管后坐先快后慢回位,炮塔震颤快速收敛
+	cannon_recoil = Utils.damp(cannon_recoil, 0.0, 5.5, dt)
+	cannon_recoil_pitch = Utils.damp(cannon_recoil_pitch, 0.0, 3.2, dt)
+	turret_shake_yaw = Utils.damp(turret_shake_yaw, 0.0, 9.0, dt)
+	turret_shake_pitch = Utils.damp(turret_shake_pitch, 0.0, 9.0, dt)
+	if absf(cannon_recoil) < 0.001:
+		cannon_recoil = 0.0
 	# 部位恢复:停火 6 秒后缓慢自愈(工程兵维修是主要手段)
 	part_regen_t = maxf(0, part_regen_t - dt)
 	if part_regen_t <= 0:
@@ -624,6 +746,8 @@ func update_vehicle(dt: float) -> void:
 				speed *= 0.35
 			else:
 				speed *= 0.8
+			if camera_ctl != null:
+				camera_ctl.notify_suspension_impact(clampf(absf(speed) * 0.06, 0.25, 1.0))
 		if absf(speed) > 5 and randf() < 0.5:
 			G.effects.smoke_spawn(
 				pos.x + Utils.rand(-1, 1), 0.25, pos.z + Utils.rand(-1, 1),
@@ -656,6 +780,8 @@ func update_vehicle(dt: float) -> void:
 				v.pos.x -= dx * push * 0.5
 				v.pos.z -= dz * push * 0.5
 			speed *= 0.6
+			if camera_ctl != null:
+				camera_ctl.notify_suspension_impact(0.5)
 
 	# 卡死检测:持续踩油门但净位移 < 0.05m/s(窗口内平均值)连续 1.5s → 判定卡住,进入脱困
 	if throttle_on:
@@ -683,16 +809,16 @@ func update_vehicle(dt: float) -> void:
 	# 0.055,实测 5-8Hz 恒晃 97% 时间);短波长真颠簸(碎石/凸起/棱坎)差值显著 → 照常触发。
 	var rough := 0.0
 	if G.ground_h.is_valid():
-		var gh0: float = G.ground_h.call(pos.x, pos.z)
+		var gh0: float = _vh(pos.x, pos.z)
 		var d2_2 := 0.0
 		var d2_6 := 0.0
 		for ax in 2:
 			var px: float = sin(yaw) if ax == 0 else cos(yaw)
 			var pz: float = cos(yaw) if ax == 0 else -sin(yaw)
-			var h2p: float = G.ground_h.call(pos.x - px * 2, pos.z - pz * 2)
-			var h2n: float = G.ground_h.call(pos.x + px * 2, pos.z + pz * 2)
-			var h6p: float = G.ground_h.call(pos.x - px * 6, pos.z - pz * 6)
-			var h6n: float = G.ground_h.call(pos.x + px * 6, pos.z + pz * 6)
+			var h2p: float = _vh(pos.x - px * 2, pos.z - pz * 2)
+			var h2n: float = _vh(pos.x + px * 2, pos.z + pz * 2)
+			var h6p: float = _vh(pos.x - px * 6, pos.z - pz * 6)
+			var h6n: float = _vh(pos.x + px * 6, pos.z + pz * 6)
 			d2_2 += absf(h2p + h2n - 2.0 * gh0)
 			d2_6 += absf(h6p + h6n - 2.0 * gh0)
 		rough = 0.5 * maxf(0.0, d2_2 - d2_6 / 9.0)
@@ -710,12 +836,12 @@ func update_vehicle(dt: float) -> void:
 
 	# 地形贴合(BR 起伏:阻尼贴地 + 坡度速率限制;旧图平地 target 恒 0 → 行为不变)
 	if G.ground_h.is_valid():
-		var gh_t: float = G.ground_h.call(pos.x, pos.z)
+		var gh_t: float = _vh(pos.x, pos.z)
 		# 车体随地形倾斜采样(前后/左右 ±2m)
-		var h_f: float = G.ground_h.call(pos.x - sin(yaw) * 2, pos.z - cos(yaw) * 2)
-		var h_b: float = G.ground_h.call(pos.x + sin(yaw) * 2, pos.z + cos(yaw) * 2)
-		var h_l: float = G.ground_h.call(pos.x + cos(yaw) * 2, pos.z - sin(yaw) * 2)
-		var h_r: float = G.ground_h.call(pos.x - cos(yaw) * 2, pos.z + sin(yaw) * 2)
+		var h_f: float = _vh(pos.x - sin(yaw) * 2, pos.z - cos(yaw) * 2)
+		var h_b: float = _vh(pos.x + sin(yaw) * 2, pos.z + cos(yaw) * 2)
+		var h_l: float = _vh(pos.x + cos(yaw) * 2, pos.z - sin(yaw) * 2)
+		var h_r: float = _vh(pos.x - cos(yaw) * 2, pos.z + sin(yaw) * 2)
 		if not _ground_ready:
 			_sus_y = gh_t
 			_pitch_s = atan2(h_f - h_b, 4)
@@ -742,17 +868,30 @@ func update_vehicle(dt: float) -> void:
 	# 高速行驶悬挂冲击(仅玩家驾驶时震相机;仅地面起伏时触发,平地无源震动禁止)
 	if driver == G.player and absf(speed) > 12 and rough > 0.0 and randf() < dt * 3:
 		G.effects.shake(0.05)
+		if camera_ctl != null:
+			camera_ctl.notify_suspension_impact(0.3)
 	if mesh.has_meta("wheels"):
 		for w in mesh.get_meta("wheels"):
 			w.rotation.x += speed * dt / 0.42
-	if type == "jeep":
+	if not has_turret():
+		# 无炮塔载具(吉普/摩托):前轮转向枢轴
 		if mesh.has_meta("front_wheels"):
 			for p in mesh.get_meta("front_wheels"):
 				p.rotation.y = steer * 0.42
-	else:
-		(mesh.get_meta("turret") as Node3D).rotation.y = turret_yaw
+	elif mesh.has_meta("turret") and mesh.has_meta("cannon"):
+		var turret_node := mesh.get_meta("turret") as Node3D
+		var cannon_node := mesh.get_meta("cannon") as Node3D
+		var muzzle_node: Node3D = null
+		if mesh.has_meta("muzzle"):
+			muzzle_node = mesh.get_meta("muzzle") as Node3D
+		# 炮塔伺服角度 + 开炮机械震颤
+		turret_node.rotation.y = turret_yaw + turret_shake_yaw
 		# rotation.x 正值=炮口上扬,与 turret_pitch 同号(原负号导致俯仰反向)
-		(mesh.get_meta("cannon") as Node3D).rotation.x = turret_pitch
+		cannon_node.rotation.x = turret_pitch + cannon_recoil_pitch
+		# 主炮后坐:炮管/制退器/炮口标记沿身管轴向后滑再回位
+		cannon_node.position.z = _cannon_base_z + cannon_recoil
+		if muzzle_node != null:
+			muzzle_node.position.z = _muzzle_base_z + cannon_recoil
 
 
 func dispose() -> void:
@@ -761,6 +900,14 @@ func dispose() -> void:
 
 
 ## ==================== 步兵 vs 载具实体碰撞 ====================
+## 载具出生点安全化:推离静态碰撞体,避免生成在废墟/拒马/箱体等小物件内部
+static func safe_spawn_pos(p: Vector3, radius: float) -> Vector3:
+	var y: float = G.veh_h.call(p.x, p.z, p.y)
+	var q := Utils.move_collide(Vector3(p.x, y, p.z), radius, 2.2)
+	# 第二次推挤兜底:窄缝/多物夹缝中再往外挪一轮
+	return Utils.move_collide(q, radius, 2.2)
+
+
 static func vehicle_collide(p_pos: Vector3, radius: float) -> Vector3:
 	for v in G.vehicles:
 		var rr: float = radius + v.def["radius"] * 0.92

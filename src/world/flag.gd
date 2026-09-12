@@ -76,12 +76,14 @@ func _init(flag_id: String, x: float, z: float) -> void:
 	position = Vector3(x, 0, z)
 	_t = randf() * 10.0
 
-	# 旗杆
+	# 旗杆(C 点中央:旧版 11m+3.2m 旗面+25m 圆环从俯视看像"几栋楼叠起来 + 大黑块"
+	# ——用户多次反馈"中央 C 点那个大楼还在"。改 7m 旗杆 + 2.2×1.1 小旗面 + 不绘制
+	# 圆环底圈(LABEL 字母牌保留),整体判读从"楼"改为"广场旗杆",不再穿屏
 	var pole := MeshInstance3D.new()
 	var pole_mesh := CylinderMesh.new()
-	pole_mesh.top_radius = 0.09
-	pole_mesh.bottom_radius = 0.12
-	pole_mesh.height = 11.0
+	pole_mesh.top_radius = 0.07
+	pole_mesh.bottom_radius = 0.09
+	pole_mesh.height = 7.0
 	pole_mesh.radial_segments = 8
 	pole.mesh = pole_mesh
 	var pole_mat := StandardMaterial3D.new()
@@ -89,7 +91,7 @@ func _init(flag_id: String, x: float, z: float) -> void:
 	pole_mat.roughness = 0.4
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
-	pole.position.y = 5.5
+	pole.position.y = 3.5
 	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	add_child(pole)
 	_pole = pole
@@ -97,24 +99,24 @@ func _init(flag_id: String, x: float, z: float) -> void:
 	# 旗面(顶点着色器波动)
 	var cloth := MeshInstance3D.new()
 	var cloth_mesh := PlaneMesh.new()
-	cloth_mesh.size = Vector2(3.2, 1.9)
+	cloth_mesh.size = Vector2(2.2, 1.1)
 	cloth_mesh.subdivide_width = 10
 	cloth_mesh.subdivide_depth = 6
 	cloth.mesh = cloth_mesh
 	_cloth_mat = make_cloth_material(Color.html("#888888"))
 	cloth.material_override = _cloth_mat
-	cloth.position = Vector3(1.7, 9.6, 0)
+	cloth.position = Vector3(1.2, 6.4, 0)
 	add_child(cloth)
 	_cloth = cloth
 
-	# 占领圈
-	var ring := MeshInstance3D.new()
-	ring.mesh = make_ring_mesh(radius - 0.5, radius)
+	# 占领圈:不绘制底圈(从俯视看像大黑块,玩家凭字母牌+地面半径纹理感知占点范围)
+	# 游戏内判定仍按 radius=13.0,只是不画这条 25m 直径的圆环 mesh
+	# [FIX] _ring_mat 仍需实例化(update_flag 每帧写入颜色,Nil 会刷屏报错)
 	_ring_mat = StandardMaterial3D.new()
 	_ring_mat.albedo_color = Color(0.6, 0.6, 0.6, 0.55)
-	_ring_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_ring_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_ring_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var ring := MeshInstance3D.new()
+	ring.mesh = make_ring_mesh(0.001, 0.001)
+	ring.visible = false
 	ring.material_override = _ring_mat
 	ring.position.y = 0.06
 	add_child(ring)
@@ -129,7 +131,7 @@ func _init(flag_id: String, x: float, z: float) -> void:
 	sign_lbl.modulate = Color.WHITE
 	sign_lbl.outline_size = 12
 	sign_lbl.outline_modulate = Color(0.04, 0.05, 0.07, 0.85)
-	sign_lbl.position.y = 12.3
+	sign_lbl.position.y = 8.5
 	sign_lbl.no_depth_test = true
 	add_child(sign_lbl)
 	_sign = sign_lbl

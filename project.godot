@@ -24,6 +24,16 @@ G="*res://src/autoload/g.gd"
 AudioSys="*res://src/autoload/audio_sys.gd"
 GraphicsQuality="*res://src/autoload/graphics_quality.gd"
 
+[debug]
+
+gdscript/warnings/shadowed_variable=0
+gdscript/warnings/shadowed_variable_base_class=0
+gdscript/warnings/shadowed_global_identifier=0
+gdscript/warnings/incompatible_ternary=0
+gdscript/warnings/integer_division=0
+gdscript/warnings/narrowing_conversion=0
+gdscript/warnings/integer_used_as_enum=0
+
 [display]
 
 window/size/viewport_width=1920
@@ -39,12 +49,12 @@ enabled=PackedStringArray("sky_3d")
 
 [rendering]
 
+driver/threads/thread_model=2
 textures/vram_compression/import_etc2_astc=true
 lights_and_shadows/directional_shadow/soft_shadow_filter_quality=3
-lights_and_shadows/directional_shadow/16_bits=false
 lights_and_shadows/positional_shadow/soft_shadow_filter_quality=3
 textures/default_filters/anisotropic_filtering_level=4
-anti_aliasing/quality/msaa_3d=2
+anti_aliasing/quality/msaa_3d=1
 anti_aliasing/quality/use_debanding=true
 environment/volumetric_fog/volume_size=32
 occlusion_culling/use_occlusion_culling=true

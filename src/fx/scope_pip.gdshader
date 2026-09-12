@@ -10,6 +10,8 @@ uniform vec2 center_uv = vec2(0.5, 0.5);        // 镜片中心(根视口 UV,随
 uniform vec2 screen_size = vec2(1920.0, 1080.0); // 根视口逻辑分辨率(像素)
 uniform float radius_px = 260.0;                 // 镜片投影半径(逻辑像素)
 uniform float radius_scale = 1.0;                // ADS 过渡:镜片半径缩放
+uniform float rect_mode = 0.0;                   // 1=方形/矩形镜片(毒刺 CLU),0=圆形狙击镜
+uniform vec2 rect_half_px = vec2(300.0, 260.0);  // 方形镜片半宽/半高(逻辑像素)
 uniform float alpha = 0.0;                       // ADS 过渡:整体透明度
 uniform float edge_soft_px = 2.5;                // 镜片边缘柔化宽度(逻辑像素)
 uniform float vignette_strength : hint_range(0.0, 1.0) = 0.32;
@@ -23,15 +25,23 @@ void fragment() {
 	// 都稳定不随窗口物理像素变化。
 	vec2 d = (UV - center_uv) * screen_size;
 	float eff_r = max(radius_px * radius_scale, 1.0);
-	float nr = length(d) / eff_r;
+	float nr;
+	vec2 eff_half = vec2(eff_r);
+	if (rect_mode > 0.5) {
+		eff_half = max(rect_half_px, vec2(1.0));
+		vec2 nd = d / eff_half;
+		nr = max(abs(nd.x), abs(nd.y));
+	} else {
+		nr = length(d) / eff_r;
+	}
 
 	if (alpha > 0.001) {
-		float edge = edge_soft_px / eff_r;
-		// 镜内不透明、镜外透明;镜筒实体由 Gun 在 ADS 时隐藏。
+		float edge = edge_soft_px / max(max(eff_half.x, eff_half.y), 1.0);
+		// 镜内不透明、镜外透明;镜筒实体由 Gun 保持显示并作为取景框。
 		float mask = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, nr);
 
 		// 轻量桶形光学失真(只作用于镜内采样,强度很低)
-		vec2 q = d / eff_r;
+		vec2 q = d / eff_half;
 		vec2 suv = vec2(0.5) + q * (1.0 + distortion * dot(q, q)) * 0.5;
 		suv = clamp(suv, vec2(0.0), vec2(1.0));
 		vec3 col = texture(scope_tex, suv).rgb;

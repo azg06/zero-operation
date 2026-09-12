@@ -14,10 +14,10 @@ var selected_class := "assault"
 var br_selected_class := "assault"   # 任务1:BR 兵种选择屏所选兵种(GameMode_BR 开局读取)
 var _br_class_cards: Dictionary = {} # 任务1:cid -> PanelContainer(选中高亮)
 var loadout := {
-	"assault": { "primary": "m4", "secondary": "m1911", "shotgun": "m1014" },
-	"engineer": { "primary": "m249", "secondary": "m1911" },
-	"support": { "primary": "mp5", "secondary": "m1911" },
-	"recon": { "primary": "awm", "secondary": "m1911" },
+	"assault": { "primary": "m4", "secondary": "m1911", "shotgun": "m1014", "gadget": "medkit" },
+	"engineer": { "primary": "m249", "secondary": "m1911", "gadget": "rpg" },
+	"support": { "primary": "mp5", "secondary": "m1911", "gadget": "medpack" },
+	"recon": { "primary": "awm", "secondary": "m1911", "gadget": "beacon" },
 }
 # TDM 装备屏选择(任意武器主副搭配,不限兵种;默认 M4 + M1911)
 var tdm_loadout := { "primary": "m4", "secondary": "m1911" }
@@ -134,7 +134,29 @@ func _ready() -> void:
 		_open_tdm_loadout()
 
 
+## 空白界面兜底:菜单态(未进入对局)下若所有页面都不可见,说明 UI 状态机出了岔子,
+## 玩家会卡在没有 UI、也退不出去的黑屏里。持续 0.5s 仍为空白就强制恢复主菜单。
+## 0.5s 去抖是为了避开"hide_all → start_match"这一帧的正常空窗,不会误盖游戏画面。
+var _blank_t := 0.0
+
+func _watchdog_blank_ui(dt: float) -> void:
+	if G.state != "menu" or _ui_lock or _ui_state == "closing":
+		_blank_t = 0.0
+		return
+	for k in _screens:
+		if _screens[k].visible:
+			_blank_t = 0.0
+			return
+	_blank_t += dt
+	if _blank_t < 0.5:
+		return
+	_blank_t = 0.0
+	G.log_err("UI", "菜单态下所有页面均不可见,已自动恢复主菜单", _ui_state + "/" + _active_screen)
+	_show_screen("menu", true)
+
+
 func _process(dt: float) -> void:
+	_watchdog_blank_ui(dt)
 	# 战役 signal 懒连接(campaign 由 main 在 Menus 之后创建);
 	# 实例变化(切换/重建 Campaign)时先断开旧实例再重连,防结算信号挂到废弃实例上
 	if G.campaign != null and G.campaign != _campaign_src:
@@ -142,7 +164,7 @@ func _process(dt: float) -> void:
 			_campaign_src.chapter_finished.disconnect(_on_chapter_finished)
 		_campaign_src = G.campaign
 		G.campaign.chapter_finished.connect(_on_chapter_finished)
-	# 新闻滚动条
+	# 新闻/情报轮播(主菜单右侧 INTEL 卡 + 指示点)
 	if _news_label != null and _screens.has("menu") and _screens["menu"].visible:
 		_news_t += dt
 		if _news_t > 5.0:
@@ -151,6 +173,8 @@ func _process(dt: float) -> void:
 			_news_label.text = NEWS[_news_i]
 			if _news_label.text == "":
 				_news_label.text = NEWS[0]
+			for di in _intel_dots.size():
+				(_intel_dots[di] as ColorRect).color = UiTheme.PRIMARY if di == _news_i else Color(1, 1, 1, 0.22)
 	# 枪械改装 3D 预览:自动旋转(拖拽暂停)+ 槽位聚焦镜头平滑过渡
 	if _screens.has("armory") and _screens["armory"].visible:
 		if _arm_pivot != null and not _arm_dragging:
@@ -223,9 +247,10 @@ func _show_screen(id: String, instant := false) -> void:
 	if not _screens.has(id):
 		G.log_err("UI", "尝试打开不存在的页面: " + id, _active_screen)
 		return
-	# 正在播放关闭动画时,禁止中途再开别的页面,避免两个页面同时抢输入
-	if _ui_lock and _active_screen != id:
-		return
+	# 正在播放关闭动画时,不能因此拒绝打开新页面:
+	# 「旧页面已淡出 + 新页面被 UI 锁挡住」会留下没有任何 UI、也退不出去的空白画面
+	# (战役/门户「返回主菜单」历史 bug 即此)。打开动作直接接管状态机 ——
+	# 下面会强制隐藏其它页面,不存在两个页面同时抢输入的问题。
 	if _active_screen == id and _screens[id].visible:
 		return
 	_ui_lock = true
@@ -235,6 +260,9 @@ func _show_screen(id: String, instant := false) -> void:
 	for k in _screens:
 		if k != id and _screens[k].visible:
 			_screens[k].visible = false
+			# 上一次淡出可能把 alpha 停在 0:一并复位,避免下次打开时"可见但全透明"
+			_screens[k].modulate.a = 1.0
+			_screens[k].scale = Vector2.ONE
 	var sc: Control = _screens[id]
 	if instant:
 		sc.visible = true
@@ -287,7 +315,8 @@ func _bg(parent: Control, color := Color(0.04, 0.05, 0.08, 1)) -> ColorRect:
 	return bg
 
 
-## ==================== 主菜单(BF2042 风格:左侧竖排模式列表 + 顶部标签 + 战场背景) ====================
+## ==================== 主菜单(BF2042 布局:顶部导航条(货币/XP/玩家卡) +
+## 左上赛季标识 + 左侧竖排模式列表 + 右侧信息栏(通行证/经验/任务/情报)) ====================
 func _build_main_menu() -> void:
 	var s := _add_screen("menu")
 	# 半透明底色(战场景色透出,左侧压暗便于阅读)
@@ -301,44 +330,50 @@ func _build_main_menu() -> void:
 	dim.custom_minimum_size = Vector2(460, 0)
 	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	s.add_child(dim)
-	# ---- 顶部标签栏(BF2042:PLAY / ARMORY / BATTLE PASS / PROFILE / STORE,可点击切换) ----
+	# ---- 顶部全宽导航条(BF2042:深色横条承载 Tab;货币/XP/玩家卡靠右) ----
+	var topbar := ColorRect.new()
+	topbar.color = Color(0.01, 0.02, 0.03, 0.72)
+	topbar.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	topbar.custom_minimum_size = Vector2(0, 56)
+	topbar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	s.add_child(topbar)
 	_make_tab_bar(s, "menu")
-	# ---- 右上:玩家卡 ----
-	var trow := VBoxContainer.new()
-	trow.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	trow.position = Vector2(-226, 14)
-	trow.add_theme_constant_override("separation", 1)
-	s.add_child(trow)
-	var pc1 := UiTheme.make_label("等级 32", 16, UiTheme.PRIMARY)
-	pc1.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	trow.add_child(pc1)
-	var pc2 := UiTheme.make_label("指挥官 · SF-7749", 12, UiTheme.TXT)
-	pc2.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	trow.add_child(pc2)
-	var pc3 := UiTheme.make_label("在线好友 3 · 幽灵 猎鹰 毒蛇", 11, UiTheme.TXT_DIM)
-	pc3.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	trow.add_child(pc3)
-	# ---- 左侧:游戏标题 + 竖排模式列表 ----
+	_mm_topright(s)
+	# ---- 左上:赛季标识(小标签行 + 红色赛季大字 + 英文副题) ----
+	var season := VBoxContainer.new()
+	season.position = Vector2(46, 84)
+	season.add_theme_constant_override("separation", 2)
+	s.add_child(season)
+	var srow := HBoxContainer.new()
+	srow.add_theme_constant_override("separation", 10)
+	season.add_child(srow)
+	var st := UiTheme.make_label("零度行动", 17, UiTheme.TXT)
+	st.add_theme_font_size_override("font_size", 17)
+	srow.add_child(st)
+	var stag := Label.new()
+	stag.text = " SEASON 01 "
+	stag.add_theme_font_size_override("font_size", 13)
+	stag.add_theme_color_override("font_color", Color(0.01, 0.04, 0.06))
+	stag.add_theme_stylebox_override("normal", UiTheme.stylebox(UiTheme.PRIMARY, Color.TRANSPARENT, 0, 2, 4))
+	srow.add_child(stag)
+	var big := UiTheme.make_label("寒潮协议", 42, UiTheme.ENEMY)
+	big.add_theme_font_size_override("font_size", 42)
+	season.add_child(big)
+	season.add_child(UiTheme.make_label("COLD FRONT · 第一赛季作战", 12, UiTheme.TXT_DIM))
+	# ---- 左侧:竖排模式列表(图标 + 大字名 + 英文副题) ----
 	var left := VBoxContainer.new()
 	left.set_anchors_preset(Control.PRESET_CENTER_LEFT)
-	left.position = Vector2(46, -190)
+	left.position = Vector2(46, -150)
 	left.add_theme_constant_override("separation", 6)
 	s.add_child(left)
-	var title := UiTheme.make_label("零度行动", 44, UiTheme.TXT)
-	left.add_child(title)
-	var en := UiTheme.make_label("ZERO OPERATION · 大型多兵种征服/突破作战", 12, UiTheme.PRIMARY)
-	left.add_child(en)
-	var sep := Control.new()
-	sep.custom_minimum_size = Vector2(0, 16)
-	left.add_child(sep)
-	left.add_child(_make_mode_row("征服模式", "CONQUEST · 全面战场 占点为王", false, func():
+	left.add_child(_make_mode_row("◉", "征服模式", "CONQUEST · 全面战场 占点为王", func():
 		G.mode = "conquest"; AudioSys.ui(); on_start.call()))
-	left.add_child(_make_mode_row("突破模式", "BREAKTHROUGH · 攻防推进 逐区争夺", false, func():
+	left.add_child(_make_mode_row("▲", "突破模式", "BREAKTHROUGH · 攻防推进 逐区争夺", func():
 		G.mode = "breakthrough"; AudioSys.ui(); on_start.call()))
-	left.add_child(_make_mode_row("门户模式", "PORTAL · 自定义规则作战", false, func():
+	left.add_child(_make_mode_row("◆", "门户模式", "PORTAL · 自定义规则作战", func():
 		AudioSys.ui()
 		_open_portal_select()))
-	left.add_child(_make_mode_row("战争故事", "WAR STORIES · 单人战役", false, func():
+	left.add_child(_make_mode_row("★", "战争故事", "WAR STORIES · 单人战役", func():
 		AudioSys.ui()
 		_open_campaign_select()))
 	# ---- 左下:功能按钮 + 连续服役统计 ----
@@ -363,43 +398,231 @@ func _build_main_menu() -> void:
 	bq.pressed.connect(func(): AudioSys.ui(); get_tree().quit())
 	fn_row.add_child(bq)
 	bl.add_child(UiTheme.make_label("连续服役 142 场 · 胜率 61%", 12, UiTheme.TXT_DIM))
-	# ---- 右下:新闻滚动条 ----
-	_news_label = UiTheme.make_label(NEWS[0], 12, UiTheme.TXT_DIM)
-	_news_label.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_news_label.position = Vector2(-560, -34)
-	s.add_child(_news_label)
+	# ---- 右侧信息栏(BF2042:通行证/经验/任务/情报 四卡纵排) ----
+	_mm_infobar(s)
+
+
+## 右上:货币 + 经验 + 玩家卡 + 等级徽章(BF2042 顶部条右段)
+func _mm_topright(s: Control) -> void:
+	var row := HBoxContainer.new()
+	row.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	row.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	row.position = Vector2(-26, 12)
+	row.add_theme_constant_override("separation", 18)
+	s.add_child(row)
+	# 货币 ×2(红晶核 / 补给币)
+	for cur in [["◆", "48", UiTheme.ENEMY], ["◉", "2,500", UiTheme.WARN]]:
+		var c := HBoxContainer.new()
+		c.add_theme_constant_override("separation", 5)
+		row.add_child(c)
+		var ic := UiTheme.make_label(cur[0], 15, cur[2])
+		c.add_child(ic)
+		var v := UiTheme.make_label(cur[1], 15, UiTheme.TXT)
+		c.add_child(v)
+	# 经验:小进度条 + 数值
+	var xp := HBoxContainer.new()
+	xp.add_theme_constant_override("separation", 7)
+	row.add_child(xp)
+	var xpcol := VBoxContainer.new()
+	xpcol.add_theme_constant_override("separation", 3)
+	xp.add_child(xpcol)
+	var xpbar_bg := ColorRect.new()
+	xpbar_bg.color = Color(1, 1, 1, 0.14)
+	xpbar_bg.custom_minimum_size = Vector2(72, 5)
+	xpcol.add_child(xpbar_bg)
+	var xpbar := ColorRect.new()
+	xpbar.color = UiTheme.PRIMARY
+	xpbar.custom_minimum_size = Vector2(72, 5)
+	xpbar.size = Vector2(46, 5)
+	xpbar_bg.add_child(xpbar)
+	xpcol.add_child(UiTheme.make_label("经验 0/133,500", 11, UiTheme.TXT_DIM))
+	# 玩家卡(头像块 + 名字/称号)
+	var pc := HBoxContainer.new()
+	pc.add_theme_constant_override("separation", 9)
+	row.add_child(pc)
+	var av := Panel.new()
+	av.custom_minimum_size = Vector2(36, 36)
+	av.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.05, 0.14, 0.18, 0.9), UiTheme.PRIMARY, 1, 3, 2))
+	pc.add_child(av)
+	var avl := UiTheme.make_label("指", 16, UiTheme.PRIMARY)
+	avl.set_anchors_preset(Control.PRESET_FULL_RECT)
+	avl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	avl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	av.add_child(avl)
+	var pcol := VBoxContainer.new()
+	pcol.add_theme_constant_override("separation", 0)
+	pc.add_child(pcol)
+	pcol.add_child(UiTheme.make_label("指挥官 · SF-7749", 13, UiTheme.TXT))
+	pcol.add_child(UiTheme.make_label("新晋指挥官", 11, UiTheme.TXT_DIM))
+	# 等级徽章(方块 + 数字)
+	var bd := Panel.new()
+	bd.custom_minimum_size = Vector2(36, 36)
+	bd.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0, 0, 0, 0.5), UiTheme.PRIMARY, 2, 3, 1))
+	row.add_child(bd)
+	var bdl := UiTheme.make_label("32", 15, UiTheme.TXT)
+	bdl.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bdl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	bdl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	bd.add_child(bdl)
+
+
+## 右侧信息栏:通行证卡 + 经验卡 + 任务列表 + 情报轮播卡
+func _mm_infobar(s: Control) -> void:
+	var col := VBoxContainer.new()
+	col.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	col.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	col.grow_vertical = Control.GROW_DIRECTION_END
+	col.position = Vector2(-356, 84)
+	col.custom_minimum_size = Vector2(330, 0)
+	col.add_theme_constant_override("separation", 10)
+	s.add_child(col)
+	var card_bg := UiTheme.stylebox(Color(0.01, 0.03, 0.05, 0.62), Color(1, 1, 1, 0.07), 1, 4, 12)
+	# ---- 卡1:下一通行证等级 ----
+	var bp := PanelContainer.new()
+	bp.add_theme_stylebox_override("panel", card_bg)
+	col.add_child(bp)
+	var bph := HBoxContainer.new()
+	bph.add_theme_constant_override("separation", 10)
+	bp.add_child(bph)
+	var bpcol := VBoxContainer.new()
+	bpcol.add_theme_constant_override("separation", 6)
+	bpcol.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bph.add_child(bpcol)
+	bpcol.add_child(UiTheme.make_label("下一通行证等级", 12, UiTheme.PRIMARY))
+	var dots := HBoxContainer.new()
+	dots.add_theme_constant_override("separation", 5)
+	bpcol.add_child(dots)
+	for i in 10:
+		var dot := ColorRect.new()
+		dot.custom_minimum_size = Vector2(12, 8)
+		dot.color = UiTheme.PRIMARY if i < 8 else Color(1, 1, 1, 0.16)
+		dots.add_child(dot)
+	bpcol.add_child(UiTheme.make_label("8/10 点数", 13, UiTheme.TXT))
+	var badge := Panel.new()
+	badge.custom_minimum_size = Vector2(52, 52)
+	badge.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	badge.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.08, 0.1, 0.12, 0.9), UiTheme.PRIMARY, 2, 4, 1))
+	bph.add_child(badge)
+	var bl2 := UiTheme.make_label("33", 17, UiTheme.PRIMARY)
+	bl2.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bl2.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	bl2.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	badge.add_child(bl2)
+	# ---- 卡2:经验收益 ----
+	var xp := PanelContainer.new()
+	xp.add_theme_stylebox_override("panel", card_bg)
+	col.add_child(xp)
+	var xpcol := VBoxContainer.new()
+	xpcol.add_theme_constant_override("separation", 6)
+	xp.add_child(xpcol)
+	xpcol.add_child(UiTheme.make_label("经验收益", 12, UiTheme.PRIMARY))
+	var bigxp := UiTheme.make_label("1,740 / 2,250", 19, UiTheme.TXT)
+	xpcol.add_child(bigxp)
+	var bar_bg := ColorRect.new()
+	bar_bg.color = Color(1, 1, 1, 0.13)
+	bar_bg.custom_minimum_size = Vector2(0, 5)
+	xpcol.add_child(bar_bg)
+	var bar := ColorRect.new()
+	bar.color = UiTheme.PRIMARY
+	bar.custom_minimum_size = Vector2(0, 5)
+	bar.size = Vector2(240, 5)
+	bar_bg.add_child(bar)
+	# ---- 卡3:今日作战目标 ×3 ----
+	var tasks := PanelContainer.new()
+	tasks.add_theme_stylebox_override("panel", card_bg)
+	col.add_child(tasks)
+	var tcol := VBoxContainer.new()
+	tcol.add_theme_constant_override("separation", 0)
+	tasks.add_child(tcol)
+	for t in [["◈", "完成一场征服对局", "0/1"], ["◈", "驾驶载具达成击杀", "0/3"], ["◈", "占领或夺取据点", "0/5"]]:
+		var tr := HBoxContainer.new()
+		tr.custom_minimum_size = Vector2(0, 40)
+		tr.add_theme_constant_override("separation", 10)
+		tcol.add_child(tr)
+		var ti := UiTheme.make_label(t[0], 14, UiTheme.PRIMARY)
+		ti.custom_minimum_size = Vector2(20, 0)
+		tr.add_child(ti)
+		var tn := UiTheme.make_label(t[1], 13, UiTheme.TXT)
+		tn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		tr.add_child(tn)
+		tr.add_child(UiTheme.make_label(t[2], 13, UiTheme.TXT_DIM))
+	# ---- 卡4:情报轮播(INTEL) ----
+	var intel := PanelContainer.new()
+	intel.add_theme_stylebox_override("panel", card_bg)
+	col.add_child(intel)
+	var icol := VBoxContainer.new()
+	icol.add_theme_constant_override("separation", 8)
+	intel.add_child(icol)
+	var art := Panel.new()
+	art.custom_minimum_size = Vector2(0, 96)
+	art.add_theme_stylebox_override("panel", UiTheme.stylebox(Color(0.09, 0.05, 0.05, 0.9), Color(1, 1, 1, 0.06), 1, 3, 0))
+	icol.add_child(art)
+	var wm := UiTheme.make_label("零度行动", 30, Color(1, 1, 1, 0.10))
+	wm.set_anchors_preset(Control.PRESET_FULL_RECT)
+	wm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	wm.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	art.add_child(wm)
+	var itag := Label.new()
+	itag.text = " INTEL "
+	itag.add_theme_font_size_override("font_size", 11)
+	itag.add_theme_color_override("font_color", Color(0.01, 0.04, 0.06))
+	itag.add_theme_stylebox_override("normal", UiTheme.stylebox(UiTheme.PRIMARY, Color.TRANSPARENT, 0, 2, 3))
+	icol.add_child(itag)
+	_news_label = UiTheme.make_label(NEWS[0], 12, UiTheme.TXT)
+	_news_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_news_label.custom_minimum_size = Vector2(0, 34)
+	icol.add_child(_news_label)
+	# 轮播指示点(4 点,随新闻切换)
+	var drow := HBoxContainer.new()
+	drow.alignment = BoxContainer.ALIGNMENT_END
+	drow.add_theme_constant_override("separation", 6)
+	icol.add_child(drow)
+	for i in 4:
+		var d := ColorRect.new()
+		d.custom_minimum_size = Vector2(14, 4)
+		d.color = UiTheme.PRIMARY if i == 0 else Color(1, 1, 1, 0.22)
+		drow.add_child(d)
+		_intel_dots.append(d)
 
 
 var _news_label: Label = null
 var _news_t := 0.0
 var _news_i := 0
+var _intel_dots: Array = []   # 情报卡轮播指示点
 const NEWS := [
-	"［公告］门户模式上线:团队死斗 11v11 · 大逃杀 25 队同场竞技",
-	"［战报］大逃杀更新:100 名参赛者 · 开局仅手枪,物资/空投/毒圈每局随机",
-	"［公告］团队死斗装备选择:任意武器主副搭配,死亡 2 秒自动复活",
+	"门户模式上线:团队死斗 11v11 · 大逃杀 25 队同场竞技",
+	"大逃杀更新:100 名参赛者 · 开局仅手枪,物资/空投/毒圈每局随机",
+	"团队死斗装备选择:任意武器主副搭配,死亡 2 秒自动复活",
+	"第二赛季「寒潮协议」:全新极地战区与低温视觉特效即将上线",
 ]
 
 
-## BF2042 风格模式行(大标题 + 英文副题,悬停高亮左移)
-func _make_mode_row(cn: String, en: String, disabled: bool, cb: Callable) -> Button:
+## BF2042 风格模式行:图标 + 大字名 + 英文副题,悬停高亮
+func _make_mode_row(icon: String, cn: String, en: String, cb: Callable) -> Button:
 	var b := Button.new()
 	b.theme = UiTheme.theme()
-	b.custom_minimum_size = Vector2(400, 62)
-	b.text = cn + "\n" + en
-	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	b.add_theme_font_size_override("font_size", 20)
-	b.add_theme_color_override("font_color", UiTheme.TXT if not disabled else UiTheme.TXT_DIM)
-	b.add_theme_stylebox_override("normal", UiTheme.stylebox(Color(0, 0, 0, 0), Color.TRANSPARENT, 0, 2, 8))
-	b.add_theme_stylebox_override("hover", UiTheme.stylebox(Color(0.0, 0.16, 0.22, 0.6), UiTheme.PRIMARY, 1, 2, 8))
-	b.add_theme_stylebox_override("pressed", UiTheme.stylebox(Color(0.0, 0.24, 0.3, 0.75), UiTheme.PRIMARY, 1, 2, 8))
-	b.add_theme_stylebox_override("focus", UiTheme.stylebox(Color(0, 0, 0, 0), Color.TRANSPARENT, 0, 2, 8))
-	b.add_theme_stylebox_override("disabled", UiTheme.stylebox(Color(0, 0, 0, 0), Color.TRANSPARENT, 0, 2, 8))
-	b.add_theme_color_override("font_hover_color", Color(1, 1, 1))
-	b.add_theme_color_override("font_disabled_color", UiTheme.TXT_DIM)
-	if disabled:
-		b.disabled = true
-		b.modulate = Color(1, 1, 1, 0.45)
-	elif cb.is_valid():
+	b.custom_minimum_size = Vector2(400, 64)
+	b.add_theme_stylebox_override("normal", UiTheme.stylebox(Color(0.0, 0.0, 0.0, 0.45), Color(1, 1, 1, 0.08), 1, 3, 8))
+	b.add_theme_stylebox_override("hover", UiTheme.stylebox(Color(0.0, 0.16, 0.22, 0.6), UiTheme.PRIMARY, 1, 3, 8))
+	b.add_theme_stylebox_override("pressed", UiTheme.stylebox(Color(0.0, 0.24, 0.3, 0.75), UiTheme.PRIMARY, 1, 3, 8))
+	b.add_theme_stylebox_override("focus", UiTheme.stylebox(Color(0, 0, 0, 0), Color.TRANSPARENT, 0, 3, 8))
+	var hb := HBoxContainer.new()
+	hb.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hb.position = Vector2(14, 0)
+	hb.add_theme_constant_override("separation", 14)
+	hb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	b.add_child(hb)
+	var ic := UiTheme.make_label(icon, 22, UiTheme.PRIMARY)
+	ic.custom_minimum_size = Vector2(28, 0)
+	ic.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	hb.add_child(ic)
+	var vc := VBoxContainer.new()
+	vc.add_theme_constant_override("separation", 0)
+	vc.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hb.add_child(vc)
+	vc.add_child(UiTheme.make_label(cn, 20, UiTheme.TXT))
+	vc.add_child(UiTheme.make_label(en, 11, UiTheme.TXT_DIM))
+	if cb.is_valid():
 		UiTheme.wire_button(b)
 		b.pressed.connect(cb)
 	return b
@@ -449,7 +672,7 @@ Q 索敌标记 · G 手雷 · F 兵种装备 · E 驾驶/离开载具 · Tab 记
 
 [b][color=#7fd0ff]兵种[/color][/b]
 [color=#7fd0ff]突击兵[/color]:M4A1 / AK-47 / SCAR-H / AUG,可额外携带一把霰弹枪(按 2),医疗包。
-[color=#ffc46b]工程兵[/color]:M249 / PKM / RPD + RPG-7(按 3)。瞄准空中载具 1 秒自动锁定,发射防空导弹。
+[color=#ffc46b]工程兵[/color]:M249 / PKM / RPD + 反载具毒刺导弹(按 3)。瞄准空中载具 1 秒自动锁定,发射制导导弹。
 [color=#9fe08a]支援兵[/color]:MP5 / UMP45 / P90 + 弹药箱(按 F 部署,圈内友军持续补给弹药并恢复生命)。
 [color=#e0a0ff]侦察兵[/color]:AWM / M24 / SVD + 动态探测器。
 副武器(全兵种通用):M1911 均衡 / 格洛克17 速射 / P226 精准 / 沙漠之鹰 手炮 / M93R 冲锋手枪。
@@ -739,11 +962,10 @@ func _build_deploy() -> void:
 	bar.add_child(_slot_shotgun)
 	_slot_secondary = _make_slot("副武器", "", func(): _toggle_submenu("secondary"))
 	bar.add_child(_slot_secondary)
-	var gadget_slot := _make_slot("兵种装备", "", Callable())
+	var gadget_slot := _make_slot("兵种装备", "", func(): _toggle_submenu("gadget"))
 	bar.add_child(gadget_slot)
 	var nade_slot := _make_slot("投掷物", "", Callable())
 	bar.add_child(nade_slot)
-	gadget_slot.disabled = true
 	nade_slot.disabled = true
 	_gadget_slot_btn = gadget_slot
 	_nade_slot_btn = nade_slot
@@ -812,11 +1034,17 @@ func show_deploy(is_redeploy := false) -> void:
 		info_panel.visible = not in_deploy
 	if _deploy_btn != null:
 		_deploy_btn.text = "部  署"
-	# 调试:--dbg-submenu <class|primary|shotgun|secondary> 自动打开兵种二级菜单
+	# 调试:--dbg-submenu <class|primary|shotgun|secondary|gadget> 自动打开兵种二级菜单
 	var ua := OS.get_cmdline_user_args()
 	var dbg_idx := ua.find("--dbg-submenu")
 	if dbg_idx != -1 and ua.size() > dbg_idx + 1:
 		_toggle_submenu(ua[dbg_idx + 1])
+		# QA:打印二级菜单实际生成的卡片首行,便于无头文本断言(不依赖截图)
+		var titles: PackedStringArray = PackedStringArray()
+		for node in _submenu.find_children("*", "Button", true, false):
+			titles.append(String((node as Button).text).split("\n")[0])
+		print("[SUBMENU] ", ua[dbg_idx + 1], " 槽位=", _gadget_slot_btn.text.replace("\n", " | "),
+			" 卡片=[", ", ".join(titles), "]")
 	_build_map_select()
 	_show_screen("deploy")
 
@@ -879,7 +1107,8 @@ func _refresh_slots() -> void:
 	if not cls.shotguns.is_empty():
 		_set_slot(_slot_shotgun, "随身霰弹枪", WeaponsData.W()[lo.get("shotgun", cls.shotguns[0])].cn)
 	_set_slot(_slot_secondary, "副武器", WeaponsData.W()[lo["secondary"]].cn)
-	_set_slot(_gadget_slot_btn, "兵种装备", cls.gadget_cn + " ×" + str(cls.gadget_count))
+	var gopt: Dictionary = WeaponsData.gadget_option(selected_class, String(lo.get("gadget", "")))
+	_set_slot(_gadget_slot_btn, "兵种装备", String(gopt.get("cn", cls.gadget_cn)) + " ×" + str(int(gopt.get("count", cls.gadget_count))))
 	_set_slot(_nade_slot_btn, "投掷物", "手雷 ×2")
 
 
@@ -946,6 +1175,16 @@ func _open_submenu(kind: String) -> void:
 			for wid in cls.secondaries:
 				grid.add_child(_make_weapon_card(wid, lo["secondary"] == wid,
 					func(): _select_weapon("secondary", wid)))
+		"gadget":
+			v.add_child(UiTheme.make_label(cls.cn + " — 选择兵种技能(二选一,按 F 使用 / 占武器槽者按 3 切换)", 14, UiTheme.PRIMARY))
+			var grid := GridContainer.new()
+			grid.columns = 2
+			grid.add_theme_constant_override("h_separation", 8)
+			grid.add_theme_constant_override("v_separation", 8)
+			v.add_child(grid)
+			var cur_g: String = String(WeaponsData.gadget_option(selected_class, String(lo.get("gadget", ""))).get("id", ""))
+			for opt in WeaponsData.gadget_options(selected_class):
+				grid.add_child(_make_gadget_card(opt, String(opt.get("id", "")) == cur_g, cls.color))
 	_submenu.visible = true
 
 
@@ -956,9 +1195,11 @@ func _make_class_card(cid: String, selected: bool) -> Button:
 	card.toggle_mode = true
 	card.button_pressed = selected
 	card.custom_minimum_size = Vector2(240, 108)
-	var role_line: String = { "assault": "破阵 / 烟雾 / C5 / 自疗", "engineer": "反载具 / 维修 / RPG",
-		"support": "补给 / 医疗 / 烟雾", "recon": "狙击 / 标记 / 信标" }.get(cid, "")
-	card.text = cls.icon + " " + cls.cn + "  " + cls.en + "\n" + role_line + "\n" + cls.gadget_cn + " ×" + str(cls.gadget_count)
+	var role_line: String = { "assault": "破阵 / 烟雾 / C5 / 自疗或榴弹", "engineer": "反载具 / 维修 / 毒刺或掩体",
+		"support": "补给 / 医疗包或弹药包", "recon": "狙击 / 标记 / 信标或无人机" }.get(cid, "")
+	var gsel: Dictionary = WeaponsData.gadget_option(cid, String((loadout.get(cid, {}) as Dictionary).get("gadget", "")))
+	card.text = cls.icon + " " + cls.cn + "  " + cls.en + "\n" + role_line + "\n" \
+		+ String(gsel.get("cn", cls.gadget_cn)) + " ×" + str(int(gsel.get("count", cls.gadget_count)))
 	card.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	card.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	card.add_theme_font_size_override("font_size", 13)
@@ -980,6 +1221,31 @@ func _style_card(card: Button, selected: bool, accent: Color) -> void:
 	card.add_theme_stylebox_override("hover", UiTheme.stylebox(Color(0.0, 0.18, 0.24, 0.95), border, 2, 3, 8))
 	card.add_theme_stylebox_override("pressed", UiTheme.stylebox(bg, border, 2, 3, 8))
 	card.add_theme_stylebox_override("focus", UiTheme.stylebox(bg, border, 2, 3, 8))
+
+
+## 兵种技能卡(第二技能二选一:名称 + 携带量 + 用法说明 + 占槽提示)
+func _make_gadget_card(opt: Dictionary, selected: bool, accent: Color) -> Button:
+	var gid := String(opt.get("id", ""))
+	var card := Button.new()
+	card.theme = UiTheme.theme()
+	card.toggle_mode = true
+	card.button_pressed = selected
+	card.custom_minimum_size = Vector2(372, 112)
+	var slot_line: String = "武器槽 · 按 3 切换" if bool(opt.get("weapon", false)) else "装备槽 · 按 F 使用"
+	card.text = String(opt.get("cn", gid)) + "  ×" + str(int(opt.get("count", 2))) + "\n" \
+		+ slot_line + "\n" + String(opt.get("desc", ""))
+	card.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	card.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	card.add_theme_font_size_override("font_size", 13)
+	card.add_theme_color_override("font_color", UiTheme.TXT)
+	_style_card(card, selected, accent)
+	UiTheme.wire_button(card)
+	card.pressed.connect(func():
+		AudioSys.ui()
+		loadout[selected_class]["gadget"] = gid
+		_refresh_slots()
+		_close_submenu())
+	return card
 
 
 func _make_weapon_card(wid: String, selected: bool, cb: Callable) -> Button:
@@ -1271,7 +1537,7 @@ func _build_campaign_select() -> void:
 	back.custom_minimum_size = Vector2(200, 38)
 	back.pressed.connect(func():
 		AudioSys.ui()
-		_hide_screen("campaign")
+		# 只需 _show_screen:它会自行隐藏其它页面。先 _hide_screen 会加锁挡住打开(空白界面 bug)
 		_show_screen("menu"))
 	v.add_child(back)
 
@@ -1343,6 +1609,71 @@ func _open_campaign_select() -> void:
 	_campaign_load_save()
 	_refresh_campaign_cards()
 	_show_screen("campaign")
+
+
+## QA:当前可见页面列表(空 = 没有任何 UI,玩家会被卡在空白画面里)
+func qa_visible_screens() -> String:
+	var out: PackedStringArray = PackedStringArray()
+	for k in _screens:
+		if _screens[k].visible and _screens[k].modulate.a > 0.01:
+			out.append(k)
+	return ", ".join(out)
+
+
+## QA:按标题找页面里的按钮并真实触发 pressed(走玩家点击的同一条回调)
+func qa_press_button(screen_id: String, label: String) -> bool:
+	if not _screens.has(screen_id):
+		return false
+	for node in _screens[screen_id].find_children("*", "Button", true, false):
+		var b := node as Button
+		if b != null and String(b.text).begins_with(label):
+			b.pressed.emit()
+			return true
+	return false
+
+
+## QA 诊断:菜单导航状态机快照(锁/状态/活动页/可见页)
+func qa_nav_state() -> String:
+	return "lock=%s state=%s active=%s visible=[%s]" % [
+		str(_ui_lock), _ui_state, _active_screen, qa_visible_screens()]
+
+
+## QA:遍历所有菜单类页面的「返回/取消」按钮,逐个点击并断言点完仍有可见 UI。
+## 用于回归"点进子页面再返回 → 全部页面消失、无法退出"这类空白界面死锁。
+## 只覆盖不需要活体玩家的页面(deploy/death/pause/end/loading 依赖对局状态,跳过)。
+func qa_back_button_sweep() -> String:
+	const MENU_SCREENS := ["campaign", "portal", "tdm_loadout", "br_class",
+		"armory", "battlepass", "profile", "store", "settings", "help", "campaign_end"]
+	var report: PackedStringArray = PackedStringArray()
+	for id in MENU_SCREENS:
+		if not _screens.has(id):
+			continue
+		_show_screen(id, true)
+		if not _screens[id].visible:
+			report.append("%s → 打不开(跳过)" % id)
+			continue
+		var pressed := ""
+		for node in _screens[id].find_children("*", "Button", true, false):
+			var b := node as Button
+			if b == null:
+				continue
+			var t := String(b.text)
+			if t.find("返回") >= 0 or t.find("取消") >= 0:
+				pressed = t.replace("\n", " ")
+				b.pressed.emit()
+				break
+		if pressed == "":
+			report.append("%s → 无返回按钮(跳过)" % id)
+			continue
+		# 只看 visible:淡入首帧 alpha 仍为 0,而 bug 表现是所有页面 visible=false
+		var vis: PackedStringArray = PackedStringArray()
+		for k in _screens:
+			if _screens[k].visible:
+				vis.append(k)
+		var vtxt := ", ".join(vis)
+		report.append("%s -[%s]-> %s" % [id, pressed, vtxt if vtxt != "" else "空白!!(BUG)"])
+	_show_screen("menu", true)
+	return "\n".join(report)
 
 
 ## ==================== 战役结算屏 ====================
@@ -1559,7 +1890,7 @@ func _build_portal() -> void:
 	back.custom_minimum_size = Vector2(200, 38)
 	back.pressed.connect(func():
 		AudioSys.ui()
-		_hide_screen("portal")
+		# 只需 _show_screen(它会隐藏其它页面);先 _hide_screen 会加锁挡住打开
 		_show_screen("menu"))
 	v.add_child(back)
 
@@ -1646,7 +1977,6 @@ func _open_tdm_loadout() -> void:
 ## 返回门户模式选择页
 func _back_from_tdm_loadout() -> void:
 	AudioSys.ui()
-	_hide_screen("tdm_loadout")
 	_show_screen("portal")
 
 
@@ -1903,7 +2233,6 @@ func _br_card_start_click(mid: String) -> void:
 		_portal_start(mid)
 		return
 	_br_class_highlight()
-	_hide_screen("portal")
 	_show_screen("br_class")
 
 
@@ -1975,7 +2304,6 @@ func _build_br_class_select() -> void:
 	back.custom_minimum_size = Vector2(160, 42)
 	back.pressed.connect(func():
 		AudioSys.ui()
-		_hide_screen("br_class")
 		_show_screen("portal"))
 	row.add_child(back)
 	var confirm := UiTheme.make_cta("确认跳伞", 17)
@@ -2012,7 +2340,7 @@ func show_portal_end(result: Dictionary) -> void:
 	# 旧契约按 winner 阵营推导。优先级 my_win > win > winner
 	if bool(result.get("aborted", false)):
 		# 主动放弃对局(暂停菜单"放弃战斗"):不判定胜负,直接显示退出
-		_end_title.text = "已退出对局"
+		_end_title.text = "演习结束"
 		_end_title.add_theme_color_override("font_color", Color(0.75, 0.8, 0.85))
 		_end_stats.text = _portal_result_text()
 		hide_all()
@@ -2039,12 +2367,15 @@ func _portal_result_text() -> String:
 	var r: Dictionary = _portal_last_result
 	var kd := "%.2f" % (float(G.stats["kills"]) / maxf(1, float(G.stats["deaths"])))
 	var lines: Array = ["击杀 [b]" + str(G.stats["kills"]) + "[/b] · 阵亡 [b]" + str(G.stats["deaths"]) + "[/b] · KD [b]" + kd + "[/b]"]
-	# BR:最终排名(BR result 含 rank/teams,缺省按 25 队)
+	# BR:最终排名(BR result 含 rank/team_rank/teams,缺省按 25 队)
 	if G.mode == "br":
 		var rank: int = int(r.get("rank", 0))
 		var teams_n: int = int(r.get("teams", 25))
 		if rank > 0:
 			lines.append("最终排名 [b]第 " + str(rank) + " 名[/b](共 " + str(teams_n) + " 队)")
+		var team_rank: int = int(r.get("team_rank", 0))
+		if team_rank > 0:
+			lines.append("小队排名 [b]第 " + str(team_rank) + " 名[/b](共 " + str(teams_n) + " 队)")
 	var us_s = r.get("us_score", r.get("us", null))
 	var ru_s = r.get("ru_score", r.get("ru", null))
 	if us_s != null and ru_s != null:
@@ -2340,7 +2671,7 @@ const STAT_CN := {
 }
 const KIND_CN := {
 	"rifle": "突击步枪", "smg": "冲锋枪", "lmg": "轻机枪", "shotgun": "霰弹枪",
-	"sniper": "狙击步枪", "pistol": "手枪", "rpg": "火箭筒", "dmr": "精确射手步枪",
+	"sniper": "狙击步枪", "pistol": "手枪", "rpg": "反载具导弹", "dmr": "精确射手步枪",
 }
 var _arm_weapon := ""                # 记住上次选择的武器(切 Tab 回来不丢)
 var _arm_cfg: Dictionary = {}        # 工作配置 {槽位: 件id}(未保存)

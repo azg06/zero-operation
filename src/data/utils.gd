@@ -94,6 +94,16 @@ static var _bench_fh_n := 0
 static var _bfire_on := false
 static var _bfire := {}          # name -> { t(累计µs), max(单次µs), n }
 static var _bfire_n := 0
+# [PERF 9/6] 命令行调试开关静态缓存(bench_init 一次性解析;运行时只读 bool)
+static var FLAG_NOAI := false
+static var FLAG_ANIM_LOD_OFF := false
+static var FLAG_VEH_LOD_OFF := false
+# [PERF 9/6] GPU 画质项实验开关(A 系列基准归因用)
+static var FLAG_NO_SSR := false
+static var FLAG_NO_SSAO := false
+static var FLAG_SHADOW_2048 := false
+static var FLAG_NO_GLOW := false
+static var FLAG_SCALE50 := false
 
 static func _bfire_tick(name: String, t0: int) -> void:
 	if not _bfire_on:
@@ -130,6 +140,18 @@ static func bench_init() -> void:
 	_bench = ua.has("--bench-collide")
 	_bench_linear = ua.has("--bench-linear")
 	_bfire_on = ua.has("--bench-fire")
+	# [PERF 9/6] 命令行开关一次性解析为静态 bool(热路径禁止每帧/每 bot 调
+	# OS.get_cmdline_user_args——每次调用都新建字符串数组,审计 P1-7)
+	FLAG_NOAI = ua.has("--noai")
+	FLAG_ANIM_LOD_OFF = ua.has("--anim-lod-off")
+	FLAG_VEH_LOD_OFF = ua.has("--veh-lod-off")
+	# [PERF 9/6] GPU 画质项实验开关(--no-ssr/--no-ssao/--shadow2048/--no-glow):
+	# 逐项归因 ULTRA GPU 增量;仅在画质预设应用后由 graphics_quality 读取关闭对应项
+	FLAG_NO_SSR = ua.has("--no-ssr")
+	FLAG_NO_SSAO = ua.has("--no-ssao")
+	FLAG_SHADOW_2048 = ua.has("--shadow2048")
+	FLAG_NO_GLOW = ua.has("--no-glow")
+	FLAG_SCALE50 = ua.has("--scale50")  # 50% 分辨率:区分 CPU 提交瓶颈 vs GPU 填充率瓶颈
 	if _bench:
 		Engine.max_fps = 0  # 基准:解除 144 帧封顶,测真实 CPU 帧时间
 		print("[BENCH] max_fps=0 已生效(当前 %d)" % Engine.max_fps)
@@ -190,6 +212,11 @@ static var _hg_res := 2.0
 static var _hg_x0 := 0.0
 static var _hg_z0 := 0.0
 static var _hg_h: PackedFloat32Array = PackedFloat32Array()
+static var _hg_dirty := true  # [PERF 9/6] world_builder 换图重建 ground_grid 后置脏
+
+## world_builder 每次重建 G.ground_grid 后调用一次(换图期,非热路径)
+static func mark_ground_grid_dirty() -> void:
+	_hg_dirty = true
 
 static func _cache_ground_grid() -> void:
 	var hg: Dictionary = G.ground_grid
@@ -203,7 +230,12 @@ static func _cache_ground_grid() -> void:
 	_hg_h = hg["h"]
 
 static func rebuild_actor_grid() -> void:
-	_cache_ground_grid()
+	# [PERF 9/6] 首帧解析命令行开关(幂等);ground_grid 元信息换图才变,
+	# 由 world_builder 赋值处标记脏位,免每帧重读静态字典(审计 P2-10)
+	bench_init()
+	if _hg_dirty:
+		_cache_ground_grid()
+		_hg_dirty = false
 	_ag_bots.clear()
 	_ag_veh.clear()
 	_ag_air.clear()
@@ -453,8 +485,9 @@ static func move_collide(pos: Vector3, radius: float, height: float) -> Vector3:
 
 
 ## 空间网格邻域查询:返回 pos 半径 radius(+margin)范围内可能相交的碰撞体索引
-## (升序去重,与线性扫描处理顺序一致);网格未建返回 null → 调用方回退线性扫描
-## [PERF] P0-1/P0-2:move_collide / 载具 _push_out 共用
+## (去重;[PERF 9/6] 免升序排序——推挤解算对顺序不敏感,审计 P1-6:每帧 150+ 次
+##  数组分配+排序纯属历史兼容);网格未建返回 null → 调用方回退线性扫描
+## move_collide / 载具 _push_out 共用
 static func colliders_near(pos: Vector3, radius: float, margin := 1.5) -> Variant:
 	if _grid.is_empty():
 		return null
@@ -480,7 +513,6 @@ static func colliders_near(pos: Vector3, radius: float, margin := 1.5) -> Varian
 					continue
 				_stamp[ci] = rid
 				out.append(ci)
-	out.sort()
 	return out
 
 
@@ -613,7 +645,11 @@ static func part_mult(part: String) -> float:
 static func probe_actor(actor, shooter, s_team, origin: Vector3, dir: Vector3, max_d: float) -> Dictionary:
 	if actor is Object and shooter is Object and is_same(actor, shooter):
 		return {}
-	if actor.team == s_team:
+	# BR:同 squad 才是友军,其余 NPC 一律可被命中;常规模式才按 team 过滤
+	if G.mode == "br":
+		if Bot.br_same_squad(shooter, actor):
+			return {}
+	elif actor.team == s_team:
 		return {}
 	if actor.alive == false:
 		return {}
@@ -713,7 +749,10 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 				var pr := probe_actor(b, shooter, s_team, o, fdir, probe_max)
 				if not pr.is_empty() and (probe.is_empty() or pr["dist"] < probe["dist"]):
 					probe = pr
-		if G.player != null and s_team != G.player.team:
+		var can_probe_player: bool = s_team != G.player.team
+		if G.mode == "br":
+			can_probe_player = not Bot.br_same_squad(shooter, G.player)
+		if G.player != null and can_probe_player:
 			var prp := probe_actor(G.player, shooter, s_team, o, fdir, probe_max)
 			if not prp.is_empty() and (probe.is_empty() or prp["dist"] < probe["dist"]):
 				probe = prp
@@ -724,7 +763,11 @@ static func ballistic_fire(shooter, def, origin: Vector3, dir: Vector3, muzzle_p
 		for v in (G.vehicles if _bench_linear else _actor_cells(_ag_veh, o, fdir, best)):
 			if v.dead:
 				continue
-			if v.driver != null and s_team != null and v.driver.team == s_team:
+			var veh_friendly := false
+			if v.driver != null and s_team != null:
+				veh_friendly = (not Bot.br_same_squad(shooter, v.driver)) if G.mode == "br" else (v.driver.team == s_team)
+				veh_friendly = not veh_friendly if G.mode == "br" else veh_friendly
+			if veh_friendly:
 				continue
 			var rv: float = v.def["radius"] + 0.35
 			var _vx: float = v.pos.x - o.x

@@ -98,7 +98,7 @@ func end_match(result: Dictionary) -> void:
 	_abort_pending = bool(result.get("aborted", false))
 	var gm: Variant = active
 	if gm != null:
-		gm.end()  # 模式自身结算(通常会 emit round_ended → 路径 A 接管收尾与展示)
+		gm.end(result)  # 模式自身结算(通常会 emit round_ended → 路径 A 接管收尾与展示)
 		if active == gm:
 			_finish_round(result, true)  # 模式未自行 emit → 本节点收尾 + 接结算屏
 	else:

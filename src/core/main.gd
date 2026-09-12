@@ -57,6 +57,7 @@ var _dbg_prone := false
 var _dbg_slide := false
 var _dbg_lookdown := false
 var _dbg_pose := false
+var _pbody_flat: StandardMaterial3D = null
 var _memwatch := false
 var _memwatch_t := 0.0
 var _memwatch_n := 0
@@ -78,6 +79,9 @@ var _bench_objs := PackedInt32Array()       # 渲染对象数
 var _bench_nodes := PackedInt32Array()      # 场景节点数
 var _bench_mem := PackedFloat64Array()      # 静态内存 MB
 var _bench_label := ""                      # 场景标签(文件名用)
+var _bench_dc_last := 0                     # [PERF 9/6] 渲染统计 30 帧缓存(免每帧 GPU flush)
+var _bench_prims_last := 0
+var _bench_objs_last := 0
 # ---- QA 帧时间尖峰压测:--perf-stress <帧数>(GUI 实机采样:帧时间 p95/尖峰计数;到帧自动退出) ----
 var _ps_stress_on := false
 var _ps_stress_target := 0
@@ -114,6 +118,7 @@ var _room_cam_look := Vector3(0, 81.1, -1.4)   # 房间相机注视点(四陈列
 
 
 func _ready() -> void:
+	print("[PERF] main._ready 开始于 %.2fs" % (Time.get_ticks_msec() / 1000.0))
 	_validate = OS.get_cmdline_user_args().has("--validate")
 	G.main = self
 	# ---- 启动即全屏(桌面) + CPU/GPU 加速 ----
@@ -125,7 +130,9 @@ func _ready() -> void:
 	if OS.has_feature("web"):
 		G.settings["vsync"] = 0
 	else:
-		G.settings["vsync"] = G.settings.get("vsync", 1)
+		# 默认关垂直同步:vsync 开启会把帧率锁到显示器刷新率,120+ 帧目标无从谈起;
+		# 存档里显式设置过的用户保留其选择
+		G.settings["vsync"] = G.settings.get("vsync", 0)
 	# ---- Web 专配:浏览器端 GPU 远弱于桌面 Vulkan,预设低碳 + 禁止自动降级(降级即模糊) ----
 	if OS.has_feature("web"):
 		G.settings.shadows = 1024
@@ -271,6 +278,10 @@ func _ready() -> void:
 	var scope_sys = load("res://src/player/optic_scope.gd").new()
 	add_child(scope_sys)
 	G.scope = scope_sys
+	# ---- 侦察兵无人侦察机(独立相机接管 + 150m 圆形侦察范围) ----
+	var drone_sys = load("res://src/player/recon_drone.gd").new()
+	add_child(drone_sys)
+	G.drone = drone_sys
 	# ---- 实时 3D 战场部署系统(死亡后高空观察部署;征服/突破启用) ----
 	var dep := BattleDeploymentManager.new()
 	add_child(dep)
@@ -338,7 +349,9 @@ func _ready() -> void:
 		if G.campaign != null:
 			G.campaign.abort()   # 清理战役封锁带/路点/破坏物(菜单态无残留)
 		G.input_sys.unlock()
+		print("[PERF] 开始构建菜单 UI %.2fs" % (Time.get_ticks_msec() / 1000.0))
 		_setup_menu_scene()
+		print("[PERF] 菜单 UI 构建完成 %.2fs" % (Time.get_ticks_msec() / 1000.0))
 		_menus.show_menu()
 	_menus.on_again = func():
 		_menus.hide_all()
@@ -354,8 +367,11 @@ func _ready() -> void:
 	G.apply_graphics = apply_graphics
 	apply_graphics()
 	# 默认战场(主菜单背景,不生成载具/飞机,与原版一致)
+	print("[PERF] 菜单显示于 %.2fs,开始构建菜单背景城市" % (Time.get_ticks_msec() / 1000.0))
 	WorldBuilder.build_world(G.world_root, "city")
+	print("[PERF] 菜单背景城市构建完成于 %.2fs" % (Time.get_ticks_msec() / 1000.0))
 	_build_ready_room()  # 特勤处备战屋:主菜单背景 3D 战争房间(高空展厅,四兵种陈列)
+	print("[PERF] 备战屋完成于 %.2fs" % (Time.get_ticks_msec() / 1000.0))
 	GraphicsQuality.load_config()
 	# 启动画质:存档含细项设置(手动开关过)时保留用户开关,只套档位强度;否则完整套用预设
 	if GraphicsQuality.has_custom_settings():
@@ -417,6 +433,12 @@ func _ready() -> void:
 				print("[TEST] 已部署,开始模拟游玩 state=", G.state)
 			else:
 				print("[TEST] 部署界面 state=", G.state)
+	# 征服平衡性实测:--test-balance <秒数>(配合 --test-play conquest <地图>)
+	# 每 12s 打印双方兵力票/旗数/存活/小队任务分布 —— 用硬数据定位"我方优势巨大"。
+	if ua.has("--test-balance"):
+		var bidx := ua.find("--test-balance")
+		var bdur := float(ua[bidx + 1]) if ua.size() > bidx + 1 else 180.0
+		_run_balance_probe(bdur)
 	# 换枪测试:--test-gun <id>
 	if ua.has("--test-gun"):
 		var gidx := ua.find("--test-gun")
@@ -438,6 +460,98 @@ func _ready() -> void:
 			G.player.gun_index = 0
 			G.player.gun().equip()
 		print("[TEST] 已切换武器: ", gid)
+	# 性能剖析:--test-perf(配合 --test-play):部署后采样 8s FPS/draw calls/显存
+	if ua.has("--test-perf"):
+		_run_perf_probe()
+	# 载具战地式视角 QA:--test-vehicle <type>(配合 --test-play conquest)
+	# 自动上车 → 第三人称/开炮 → 右键 ADS 目镜 → 观察位(AA 机枪开火),分阶段截图
+	if ua.has("--test-vehicle"):
+		var vidx := ua.find("--test-vehicle")
+		var vtype_qa: String = ua[vidx + 1] if ua.size() > vidx + 1 else "tank"
+		_run_vehicle_qa(vtype_qa)
+	# 吉普乘客位 QA:--test-jeep-passenger(配合 --test-play conquest)
+	# NPC 司机登车起步 → 玩家上车应坐乘客位(不顶司机)+强制第一人称+可开枪
+	if ua.has("--test-jeep-passenger"):
+		_run_jeep_passenger_qa()
+	# 第一人称腰射枪位截图:--test-hip-shot(配合 --test-play,可前置 --test-gun <id>)
+	if ua.has("--test-hip-shot"):
+		_run_hip_shot()
+	# NPC 第一人称参考图:--test-npc-fp(把相机搬到 NPC 眼位、缩掉头颈、保留手臂,
+	# 看 NPC 的骨骼手臂到底怎么持枪 —— 作为玩家 FP 手臂摆位的基准)
+	if ua.has("--test-npc-fp"):
+		_run_npc_fp_shot()
+	# 主菜单截图:--test-menu-shot(不部署,等背景城市就绪后截主菜单整屏)
+	if ua.has("--test-menu-shot"):
+		_run_menu_shot()
+	# ADS 三点一线批量验证:--test-ads-line <all|枪id>(配合 --test-play)
+	# 每把枪满镜后把 muzzle 世界坐标 unproject 到屏幕,量化枪口与准星(屏幕中心)偏差
+	if ua.has("--test-ads-line"):
+		var alidx := ua.find("--test-ads-line")
+		var alid: String = ua[alidx + 1] if ua.size() > alidx + 1 else "all"
+		_run_ads_line(alid)
+	# 空中载具建模 QA:--test-air <heli|jet>(悬浮多角度认证,不进飞行逻辑)
+	if ua.has("--test-air"):
+		var aidx := ua.find("--test-air")
+		var atype: String = ua[aidx + 1] if ua.size() > aidx + 1 else "heli"
+		_run_aircraft_qa(atype)
+	# 车底专项 QA:--test-belly(配合 --test-play)
+	# 全部 6 台载具悬空,正下方仰拍 + 斜下 45° × 4 + 远景,并数值扫描
+	# 穿透车体底面(局部 y<-0.05)的网格节点 —— 定位"车底多出一截"
+	if ua.has("--test-belly"):
+		_run_belly_qa()
+	# 骑乘/驾驶姿态 QA:--test-ride [motorcycle|jeep|all](配合 --test-play conquest <图>)
+	# 第三人称骑姿多角度(侧/斜前/正前/斜后/俯视) + 第一人称(玩家眼位相机: 平视/低头看
+	# 下半身与方向盘/车把/左转头看手臂)
+	# 可行走面(walk_)可达性断言:--test-floor(配合 --test-play <mode> <map>)
+	#   秋津市的楼梯/站台/室内地面全部是 walk_ 面; 玩家/bot 若只读地形高度场就永远
+	#   上不去(用户报"楼梯上不去")。此 QA 直接对 walk_ 面做"从下方半步处能否测到"
+	#   的断言 —— 与玩家实际接地用同一个 stand_h 入口。
+	if ua.has("--test-floor"):
+		_run_floor_qa()
+	if ua.has("--test-ride"):
+		var rideidx := ua.find("--test-ride")
+		var rkind: String = ua[rideidx + 1] if ua.size() > rideidx + 1 else "all"
+		_run_ride_qa(rkind)
+	# GLB 解剖:--test-xray <vehicle>(headless 打印节点变换/网格 AABB)
+	if ua.has("--test-xray"):
+		var xidx := ua.find("--test-xray")
+		var xid: String = ua[xidx + 1] if ua.size() > xidx + 1 else "tank"
+		_run_veh_xray(xid)
+	# 全导轨枪械认证:--test-rail-all(配合 --test-play)
+	# 16 把带导轨枪逐把:检视动画中段拍全枪照 + 满 ADS 拍实战照
+	# 认证点:顶轨/侧轨方向沿枪管、不横穿、不悬空、不与机匣穿模
+	if ua.has("--test-rail-all"):
+		_run_rail_certify()
+	# 枪械 X 光认证:--test-gun-xray <id|all>(配合 --test-play)
+	# 枪模单独悬空(无地形/HUD/视角模型干扰),独立相机环绕 5 机位:
+	# top(正上方看顶轨齿向)/left34/right34(斜上 3/4)/left/right(正侧看侧轨)
+	# 单把模式额外:拍无改装对照 + 打印超宽网格节点(定位横向穿模零件)
+	if ua.has("--test-gun-xray"):
+		var gxidx := ua.find("--test-gun-xray")
+		var gxid: String = ua[gxidx + 1] if ua.size() > gxidx + 1 else "all"
+		_run_gun_xray(gxid)
+	# NPC 士兵 GLB 管线认证:--test-npc(配合 --test-play)
+	# 结构打印(动画/骨骼名) + 悬空 4 姿态截图(Idle/Walk/Run/Death) + 战场实况
+	if ua.has("--test-npc"):
+		_run_npc_check()
+	# 玩家第一人称身体 + 阴影认证:--test-pbody(配合 --test-play)
+	# ①低头俯视真实腿部 ②侧上视角人形阴影 ③切枪后阴影武器轮廓变化
+	if ua.has("--test-pbody"):
+		_run_pbody_check()
+	# 低头到底遮挡体检:--test-lookdown(配合 --test-play)
+	# 视角拉到下限,量化身体在画面里的占屏比 —— 判断第一人称是否被自己的身体挡死
+	if ua.has("--test-lookdown"):
+		_run_lookdown_check()
+	# 第一人称对齐体检:--test-fpdiag(纯数值,不出截图)
+	if ua.has("--test-fpdiag"):
+		_run_fpdiag_check()
+	# 蹲姿游戏内实拍认证:--test-squat(配合 --test-play)
+	# 玩家真实蹲下 + 强制最近 NPC 蹲下,近景多机位截真实游戏画面(不做悬空摆拍)
+	if ua.has("--test-squat"):
+		_run_squat_check()
+	# 死亡布娃娃 + 趴姿贴地 + 蹲走/匍匐步态认证:--test-death(配合 --test-play)
+	if ua.has("--test-death"):
+		_run_death_check()
 	# 全武器 ADS 互斥冒烟测试:--test-scope-all(配合 --test-play)
 	# 逐把装配所有武器并强制满 ADS,验证:高倍镜启用 PIP 且不隐藏枪身/主相机不缩放,
 	# 普通枪/红点/全息/低倍镜绝不误启 PIP,各枪 ScopeEye/Reticle 构建无缺件。
@@ -495,6 +609,15 @@ func _ready() -> void:
 			await get_tree().process_frame
 		print("[SCOPE-ALL] done weapons=%d scope_ok=%d normal_ok=%d fails=%d %s" % [
 			wids.size(), scope_ok, normal_ok, fails.size(), str(fails)])
+		get_tree().quit()
+		return
+	# 出生点诊断:--test-spawns(配合 --test-play)
+	if ua.has("--test-spawns"):
+		await get_tree().create_timer(1.0).timeout
+		print("[SPAWNS] map=%s size=%s bounds=%.1f world_size=%.1f" % [G.current_map, MapsData.M()[G.current_map].size, G.bounds, G.world_size])
+		print("[SPAWNS] us=%s" % str(G.spawns["us"]))
+		print("[SPAWNS] ru=%s" % str(G.spawns["ru"]))
+		print("[SPAWNS] vehicle_spawns=%s" % str(G.vehicle_spawns))
 		get_tree().quit()
 		return
 	# [8/10] 车内视角诊断:--test-tank [gunner|driver] 自动进入最近坦克(验证内构/乘员位/炮镜)
@@ -578,6 +701,28 @@ func _ready() -> void:
 			print("[ADS-CAP] viewport=root_rect=%s vm_viewport_size=%s vm_visible_rect=%s root_tex=%s" % [get_viewport().get_visible_rect().size, G.vm_viewport.size, G.vm_viewport.get_visible_rect().size, get_viewport().get_texture().get_size()])
 			if G.scope != null and G.scope.has_method("debug_state"):
 				print("[ADS-CAP] scope_pip=", G.scope.debug_state())
+			# 火箭筒弹道等高线诊断:各档刻度像素位置必须全部落在可见画面内
+			if G.hud != null and G.hud._crosshair != null and G.hud._crosshair.has_method("bal_debug"):
+				print("[ADS-CAP] rpg_ballistic=", G.hud._crosshair.bal_debug())
+			# 火箭筒 CLU 三档倍率(0×/2×/4×):镜内 FOV 与弹道等高线刻度都必须随倍率重算
+			if gid == "rpg" and G.hud != null:
+				var keep_zoom: int = g2.zoom_idx
+				for zi in Gun.RPG_ZOOM_LEVELS.size():
+					g2.zoom_idx = zi
+					# 镜内 FOV → 镜片投影 → HUD 分划为逐帧链式采样,等其收敛再读数
+					await get_tree().create_timer(0.2).timeout
+					print("[ADS-CAP] rpg_zoom=%s scope_fov=%.1f %s" % [
+						g2.zoom_label(), g2.scope_fov(), G.hud._crosshair.bal_debug()])
+				g2.zoom_idx = keep_zoom
+				await get_tree().create_timer(0.2).timeout
+				# 滚轮通路验证:直接注入滚轮量(绕开指针锁定判定),
+				# 开镜时必须只改 CLU 倍率、不切换武器(gun_index 不变)
+				var zoom_before: String = g2.zoom_label()
+				var idx_before: int = G.player.gun_index
+				G.input_sys.wheel -= 1
+				await get_tree().create_timer(0.2).timeout
+				print("[ADS-CAP] rpg_wheel_down zoom %s→%s gun_index %d→%d" % [
+					zoom_before, G.player.gun().zoom_label(), idx_before, G.player.gun_index])
 			# 曝光诊断:主世界/主相机的自动曝光状态与曝光参数
 			var wa: CameraAttributes = G.world_env.camera_attributes if G.world_env != null else null
 			var ma: CameraAttributes = G.camera.attributes if G.camera != null else null
@@ -589,14 +734,14 @@ func _ready() -> void:
 				G.world_env.environment.tonemap_exposure if G.world_env != null and G.world_env.environment != null else -1.0,
 				ae.call(wa), em.call(wa), ae.call(ma), em.call(ma)])
 			if DisplayServer.get_name() != "headless":
-				var cap_path := "user://ads_%s.png" % opt_arg
+				var cap_path := "E:/工作目录2/models_probe/ads_%s.png" % opt_arg
 				G.vm_viewport.get_texture().get_image().save_png(cap_path)
 				print("[ADS-CAP] saved ", cap_path)
 				if G.scope != null and G.scope.active:
-					var scope_cap := "user://ads_%s_scopeview.png" % opt_arg
+					var scope_cap := "E:/工作目录2/models_probe/ads_%s_scopeview.png" % opt_arg
 					G.scope.vp.get_texture().get_image().save_png(scope_cap)
 					print("[ADS-CAP] saved ", scope_cap)
-				var cap_full := "user://ads_%s_full.png" % opt_arg
+				var cap_full := "E:/工作目录2/models_probe/ads_%s_full.png" % opt_arg
 				# 强制刷新 HUD 准星后截图(红点/全息镜内准星状态最新)
 				if G.hud != null:
 					G.hud._crosshair.queue_redraw()
@@ -625,17 +770,346 @@ func _ready() -> void:
 		var rs_img := get_viewport().get_texture().get_image()
 		rs_img.save_png(rs_path)
 		print("[SHOT] 换弹 t=%.2f 已保存: %s" % [G.player.gun().reload_t, rs_path])
-	# 换弹动画测试:--test-reload <帧号触发>
+	# 换弹动画测试:--test-reload(--reload-empty 强制空仓;--reload-ammo N 指定膛内弹数,默认弹匣-2)
 	if ua.has("--test-reload"):
 		await get_tree().create_timer(2.0).timeout
-		G.player.gun().ammo = 5
+		var test_ammo: int = maxi(0, G.player.gun().mag_cap - 2)
+		if ua.has("--reload-empty"):
+			test_ammo = 0
+		elif ua.has("--reload-ammo"):
+			var aidx := ua.find("--reload-ammo")
+			if ua.size() > aidx + 1:
+				test_ammo = clampi(int(ua[aidx + 1]), 0, G.player.gun().mag_cap)
+		G.player.gun().ammo = test_ammo
 		G.player.gun().reload()
-		for k in 10:
+		for k in 30:
 			await get_tree().create_timer(0.22).timeout
 			var g3 = G.player.gun()
-			print("[RELOAD] t=%.2f mag_visible=%s mag_y=%.3f" % [g3.reload_t,
+			var cover_x := 0.0
+			if g3.reload_ctl != null and g3.reload_ctl.cover != null:
+				cover_x = g3.reload_ctl.cover.rotation.x
+			print("[RELOAD] t=%.2f flow=%s stage=%s ammo=%d/%d reserve=%d pump_t=%.2f state=%s mag_visible=%s mag_y=%.3f cover_x=%.2f" % [g3.reload_t,
+				String(g3.reload_ctl.cfg.get("reload_flow", "mag")) if g3.reload_ctl != null else "?",
+				g3.reload_ctl.stage_name() if g3.reload_ctl != null else "?",
+				g3.ammo, g3.mag_cap, g3.reserve, g3.pump_t, g3.state_name(),
 				g3._mag.visible if g3._mag != null else false,
-				g3._mag.position.y if g3._mag != null else -999.0])
+				g3._mag.position.y if g3._mag != null else -999.0,
+				cover_x])
+	# 全武器换弹验证:--test-reload-all
+	# 对 55 把枪逐把跑战术(膛内剩 2 发)与空仓两套换弹,断言:
+	#   1) 弹药总量守恒(旧弹保留/丢匣在数学上都不得多出或消失);
+	#   2) 战术换弹必须进入 stow(旧供弹具收入携行具),空仓不进入 stow;
+	#   3) 换弹能自然结束且最终弹匣填满。
+	if ua.has("--test-reload-all"):
+		await get_tree().create_timer(1.0).timeout
+		var rl_wids: Array = WeaponsData.W().keys()
+		var rl_fails: Array = []
+		var rl_passes: Array = []
+		G.player.spawn_protect = 999999.0
+		for wid in rl_wids:
+			var old_gun = G.player.gun()
+			var ng = Gun.new(String(wid), G.player)
+			ng.draw_t = 1.0
+			if old_gun != null and old_gun.group != null and is_instance_valid(old_gun.group):
+				G.vm_camera.remove_child(old_gun.group)
+				old_gun.group.queue_free()
+			G.player.guns[G.player.gun_index] = ng
+			G.vm_camera.add_child(ng.group)
+			ng.equip()
+			for rl_mode in ["tac", "empty"]:
+				var rl_empty: bool = rl_mode == "empty"
+				ng.ammo = 0 if rl_empty else maxi(0, ng.mag_cap - 2)
+				ng.reserve = ng.mag_cap + 3
+				var a0: int = ng.ammo
+				var r0: int = ng.reserve
+				var total: int = a0 + r0
+				ng.reload()
+				var saw_stow := false
+				var rl_guard := 0
+				while ng.reloading and rl_guard < 3000:
+					rl_guard += 1
+					if ng.reload_ctl != null and ng.reload_ctl.phase_name() == "stow":
+						saw_stow = true
+					await get_tree().process_frame
+				await get_tree().create_timer(0.3).timeout
+				var expect_full: int = mini(ng.mag_cap, total)
+				var rl_errs: Array = []
+				if ng.ammo != expect_full:
+					rl_errs.append("ammo")
+				if ng.reserve != total - ng.ammo:
+					rl_errs.append("reserve")
+				if not rl_empty and saw_stow:
+					pass
+				elif not rl_empty and ng.reload_ctl != null and String(ng.reload_ctl.cfg.get("reload_flow", "mag")) == "mag" \
+						and not ng.def.projectile and String(ng.reload_ctl.cfg.get("mag", "down")) != "none":
+					rl_errs.append("no_stow")
+				if rl_errs.is_empty():
+					rl_passes.append(String(wid) + ":" + rl_mode)
+				else:
+					rl_fails.append("%s:%s:%s" % [wid, rl_mode, str(rl_errs)])
+		print("[RELOAD-ALL] done passes=%d fails=%d %s" % [rl_passes.size(), rl_fails.size(), str(rl_fails)])
+		get_tree().quit()
+		return
+	# 换弹签名唯一性检查:--test-reload-sig(打印每把枪的换弹动作参数,人工/日志核对)
+	if ua.has("--test-reload-sig"):
+		var sig_keys: Dictionary = {}
+		var sig_dupes: Array = []
+		for wid in WeaponsData.W().keys():
+			var sd = WeaponsData.W()[wid]
+			var sp: Dictionary = ReloadProfiles.profile_for(String(wid), sd)
+			var key := "%s|%s|%s|%.3f|%.3f" % [
+				str(sp.get("pouch", Vector3.ZERO)), str(sp.get("remove_bias", Vector3.ZERO)),
+				str(sp.get("insert_bias", Vector3.ZERO)), float(sp.get("fetch_arc", 0.0)), float(sp.get("drop_dist", 0.0))]
+			if sig_keys.has(key):
+				sig_dupes.append("%s==%s" % [wid, sig_keys[key]])
+			else:
+				sig_keys[key] = wid
+			print("[RELOAD-SIG] %-8s chamber=%-12s pouch=%s remove=%s insert=%s arc=%.3f drop=%.3f rot=%.3f speed=%.3f" % [
+				wid, str(sp.get("chamber_style", "?")), str(sp.get("pouch", Vector3.ZERO)),
+				str(sp.get("remove_bias", Vector3.ZERO)), str(sp.get("insert_bias", Vector3.ZERO)),
+				float(sp.get("fetch_arc", 0.0)), float(sp.get("drop_dist", 0.0)), float(sp.get("mag_rot", 0.0)), float(sp.get("anim_speed", 1.0))])
+		print("[RELOAD-SIG] done weapons=%d unique=%d dupes=%s" % [sig_keys.size(), sig_keys.size(), str(sig_dupes)])
+		get_tree().quit()
+		return
+	# [9/10] 泵动霰弹枪 / 左轮 QA:射击、泵动、逐发/快速换弹、部分装填、中断保留、检视、切换
+	if ua.has("--test-shotgun-revolver"):
+		await get_tree().create_timer(1.5).timeout
+		var nw_fails: Array = []
+		var nw_pass: Array = []
+		var sim_step := 0.016
+		var shotgun_ids: Array = ["rem870", "m590", "win1897"]
+		var revolver_ids: Array = ["python", "sw686", "sw500"]
+		for sid in shotgun_ids:
+			var ok := true
+			G.player.give_class("assault", { "primary": "m4", "secondary": "m1911", "shotgun": sid })
+			G.player.switch_weapon(1)
+			var sg: Gun = G.player.gun()
+			sg.draw_t = 1.0
+			sg.fire_timer = 0.0
+			G.player.sprint_amount = 0.0
+			var before_fire: int = sg.ammo
+			sg.try_fire()
+			if sg.ammo != before_fire - 1:
+				ok = false
+				nw_fails.append(sid + ":fire_ammo")
+			var pumped := false
+			for i in 40:
+				sg.update(sim_step)
+				if sg.pump_t > 0.0:
+					pumped = true
+			if not pumped:
+				ok = false
+				nw_fails.append(sid + ":pump_cycle")
+			# 逐发装填:3 → 4 → 立即中断,保留 4 发
+			sg.ammo = 3
+			sg.reserve = sg.def.reserve
+			sg.reload()
+			var got_one := false
+			var partial_ammo := 3
+			for i in 400:
+				sg.update(sim_step)
+				if sg.ammo > 3:
+					got_one = true
+					partial_ammo = sg.ammo
+					sg.reload_ctl.cancel("fire")
+					break
+			for i in 30:
+				sg.update(sim_step)
+			if not got_one or sg.ammo != partial_ammo or sg.reloading:
+				ok = false
+				nw_fails.append(sid + ":partial_reload_keep")
+			# 继续装到满,确认不跳变、最终满弹
+			sg.reload()
+			var guard := 0
+			while sg.reloading and guard < 900:
+				sg.update(sim_step)
+				guard += 1
+			if sg.ammo != sg.mag_cap:
+				ok = false
+				nw_fails.append(sid + ":full_reload")
+			# 空仓逐发:第一发入膛必须触发一次真实泵动,随后继续装填
+			sg.ammo = 0
+			sg.reserve = sg.def.reserve
+			sg.reload()
+			var first_guard := 0
+			while sg.ammo < 1 and first_guard < 500:
+				sg.update(sim_step)
+				first_guard += 1
+			if sg.ammo < 1 or sg.reload_ctl == null or not sg.reload_ctl.tube_first_chambered:
+				ok = false
+				nw_fails.append(sid + ":empty_first_pump")
+			var empty_guard := 0
+			while sg.reloading and empty_guard < 1200:
+				sg.update(sim_step)
+				empty_guard += 1
+			if sg.ammo != sg.mag_cap:
+				ok = false
+				nw_fails.append(sid + ":empty_full_reload")
+			# 开镜与移动姿态不崩溃、不残留泵动
+			sg.ads_held = true
+			for i in 20:
+				sg.update(sim_step)
+			if sg.ads_amount < 0.4:
+				ok = false
+				nw_fails.append(sid + ":ads")
+			sg.ads_held = false
+			# 检视:武器从战斗位置自然移出并回到战斗状态
+			var sg_settle0 := 0
+			while (sg.pump_t > 0.0 or (sg.reload_ctl != null and sg.reload_ctl.is_animating())) and sg_settle0 < 120:
+				sg.update(sim_step)
+				sg_settle0 += 1
+			sg.try_inspect()
+			for i in 20:
+				sg.update(sim_step)
+			if not sg.inspect_active:
+				ok = false
+				nw_fails.append(sid + ":inspect")
+			sg._stop_inspect()
+			# 等待泵动/收尾动画完全归零后测试运动姿态,避免动画重叠
+			var sg_settle := 0
+			while (sg.pump_t > 0.0 or (sg.reload_ctl != null and sg.reload_ctl.is_animating())) and sg_settle < 200:
+				sg.update(sim_step)
+				sg_settle += 1
+			# 冲刺/蹲伏/跳跃姿态与切枪切换
+			G.player.sprint_amount = 1.0
+			for i in 12:
+				sg.update(sim_step)
+			if sg.state_name() != "sprint":
+				ok = false
+				nw_fails.append(sid + ":sprint_state")
+			G.player.sprint_amount = 0.0
+			G.player.crouched = true
+			for i in 12:
+				sg.update(sim_step)
+			if sg.state_name() != "crouch":
+				ok = false
+				nw_fails.append(sid + ":crouch_state")
+			G.player.crouched = false
+			G.player.on_ground = false
+			for i in 12:
+				sg.update(sim_step)
+			if sg.state_name() != "jump":
+				ok = false
+				nw_fails.append(sid + ":jump_state")
+			G.player.on_ground = true
+			G.player.switch_weapon(0)
+			G.player.switch_weapon(1)
+			if G.player.gun().id != sid:
+				ok = false
+				nw_fails.append(sid + ":weapon_switch")
+			if ok:
+				nw_pass.append(sid)
+			print("[NEWWEAPON] shotgun %s %s" % [sid, "PASS" if ok else "FAIL"])
+		for rid in revolver_ids:
+			var ok := true
+			G.player.give_class("assault", { "primary": "m4", "secondary": rid, "shotgun": "m1014" })
+			G.player.switch_weapon(2)
+			var rg: Gun = G.player.gun()
+			rg.draw_t = 1.0
+			rg.fire_timer = 0.0
+			G.player.sprint_amount = 0.0
+			var cap: int = rg.mag_cap
+			var before_r: int = rg.ammo
+			rg.try_fire()
+			if rg.ammo != before_r - 1 or rg._chamber_loaded[0] == true:
+				ok = false
+				nw_fails.append(rid + ":fire_cylinder")
+			var spin_ok := false
+			for i in 20:
+				rg.update(sim_step)
+				if rg.cylinder_t > 0.0 or rg.hammer_t > 0.0:
+					spin_ok = true
+			if not spin_ok:
+				ok = false
+				nw_fails.append(rid + ":cylinder_anim")
+			# 逐发:缺 2 发时开始,装到 +1 后中断,保留已装弹
+			rg.ammo = cap - 2
+			rg._normalize_revolver_chambers()
+			rg.reserve = rg.def.reserve
+			rg.reload()
+			var r_got := false
+			var r_partial := cap - 2
+			for i in 800:
+				rg.update(sim_step)
+				if rg.ammo > cap - 2:
+					r_got = true
+					r_partial = rg.ammo
+					rg.reload_ctl.cancel("fire")
+					break
+			for i in 30:
+				rg.update(sim_step)
+			if not r_got or rg.ammo != r_partial or rg.reloading:
+				ok = false
+				nw_fails.append(rid + ":single_reload_keep")
+			# 快速换弹:空膛 → 甩出全清 → 装弹器压满
+			rg.ammo = 0
+			rg._normalize_revolver_chambers()
+			rg.reserve = rg.def.reserve
+			rg.reload()
+			# 弹巢打开早期允许 B 键在快速/逐发之间切换;QA 切过去再切回来
+			if not rg.reload_ctl.toggle_revolver_mode() or not rg.reload_ctl.toggle_revolver_mode():
+				ok = false
+				nw_fails.append(rid + ":reload_mode_toggle")
+			var r_guard := 0
+			while rg.reloading and r_guard < 900:
+				rg.update(sim_step)
+				r_guard += 1
+			var loaded := 0
+			for v in rg._chamber_loaded:
+				if v == true:
+					loaded += 1
+			if rg.ammo != cap or loaded != cap:
+				ok = false
+				nw_fails.append(rid + ":quick_reload_sync")
+			# 检视(等待快速换弹收尾动画/击锤动画完全归零后再进入,不能动画重叠)
+			var r_settle := 0
+			while (rg.reload_ctl != null and rg.reload_ctl.is_animating()) and r_settle < 120:
+				rg.update(sim_step)
+				r_settle += 1
+			for i in 20:
+				rg.update(sim_step)
+			rg.try_inspect()
+			for i in 20:
+				rg.update(sim_step)
+			if not rg.inspect_active:
+				ok = false
+				nw_fails.append(rid + ":inspect")
+			rg._stop_inspect()
+			# 冲刺/蹲伏/跳跃姿态与切枪切换
+			G.player.sprint_amount = 1.0
+			for i in 12:
+				rg.update(sim_step)
+			if rg.state_name() != "sprint":
+				ok = false
+				nw_fails.append(rid + ":sprint_state")
+			G.player.sprint_amount = 0.0
+			G.player.crouched = true
+			for i in 12:
+				rg.update(sim_step)
+			if rg.state_name() != "crouch":
+				ok = false
+				nw_fails.append(rid + ":crouch_state")
+			G.player.crouched = false
+			G.player.on_ground = false
+			for i in 12:
+				rg.update(sim_step)
+			if rg.state_name() != "jump":
+				ok = false
+				nw_fails.append(rid + ":jump_state")
+			G.player.on_ground = true
+			G.player.switch_weapon(0)
+			G.player.switch_weapon(2)
+			if G.player.gun().id != rid:
+				ok = false
+				nw_fails.append(rid + ":weapon_switch")
+			if ok:
+				nw_pass.append(rid)
+			print("[NEWWEAPON] revolver %s %s" % [rid, "PASS" if ok else "FAIL"])
+		# 恢复默认配装,让测试期 queue_free 的旧枪帧末真正释放,避免退出时资源残留
+		G.player.give_class("assault", { "primary": "m4", "secondary": "m1911", "shotgun": "m1014" })
+		for i in 30:
+			await get_tree().process_frame
+		print("[NEWWEAPON] pass=%s fail=%s details=%s" % [str(nw_pass), str(nw_fails), "OK" if nw_fails.is_empty() else "FAIL"])
 	# 弹药包测试:--test-ammo
 	if ua.has("--test-ammo"):
 		await get_tree().create_timer(2.0).timeout
@@ -685,7 +1159,7 @@ func _ready() -> void:
 				v.pos = Vector3(400, 0, 430)
 			for a in G.aircraft:
 				a.pos = Vector3(400, 80, 400)
-			var eye: Vector3 = G.player.pos + Vector3(0, 1.62, 0)
+			var eye: Vector3 = G.player.pos + Vector3(0, 1.70, 0)   # 同 player.eye_height 站立值
 			var pchest: Vector3 = G.player.pos + Vector3(0, 1.05, 0)
 			var placed := false
 			for k in 16:
@@ -779,6 +1253,727 @@ func _ready() -> void:
 		# 传回建筑内供截图
 		G.player.pos = Vector3(11, 0, -rd * 0.5 + 0.5)
 		G.player.yaw = 2.6
+	# ==================== 秋津市接入 QA:--test-akitsu ====================
+	# 断言:8 旗 / 双方出生点 / 载具 / 碰撞体 / 可行走面 / 垂直层次 / floor_h / 玩家可站上层面
+	# 截图(窗口模式):高空俯瞰 + 高空斜视 + 站前/神社/拱廊/港区/屋顶 共 7 张
+	if ua.has("--test-akitsu"):
+		await get_tree().create_timer(2.4).timeout
+		var fails: Array = []
+		# ---- 1) 8 个征服点 ----
+		var want_flags := ["A", "B", "C", "D", "E", "F", "G", "H"]
+		var got_flags: Array = []
+		for f in G.flags:
+			got_flags.append(str(f.id))
+		var f_ok: bool = got_flags.size() == 8
+		for w in want_flags:
+			if not got_flags.has(w):
+				f_ok = false
+		if not f_ok:
+			fails.append("旗点缺失/重复")
+		print("[AKITSU] 征服点 %d 个 %s -> %s" % [got_flags.size(), str(got_flags), "PASS" if f_ok else "FAIL"])
+		# ---- 2) 双方出生点 + 不卡墙 ----
+		var us_n: int = G.spawns["us"].size()
+		var ru_n: int = G.spawns["ru"].size()
+		var sp_ok: bool = us_n >= 6 and ru_n >= 6
+		if not sp_ok:
+			fails.append("出生点不足")
+		print("[AKITSU] 出生点 us=%d ru=%d -> %s" % [us_n, ru_n, "PASS" if sp_ok else "FAIL"])
+		var stuck := 0
+		for team in ["us", "ru"]:
+			for p in G.spawns[team]:
+				var pp: Vector3 = p
+				for bb in G.colliders:
+					var b3: AABB = bb
+					if pp.y + 0.25 >= b3.position.y and pp.y + 1.7 <= b3.end.y \
+							and absf(pp.x - b3.get_center().x) < b3.size.x * 0.5 \
+							and absf(pp.z - b3.get_center().z) < b3.size.z * 0.5:
+						stuck += 1
+						break
+		print("[AKITSU] 出生点卡墙 受限=%d -> %s" % [stuck, "PASS" if stuck == 0 else "WARN"])
+		# ---- 3) 载具出生 ----
+		var v_ok: bool = G.vehicle_spawns.size() >= 10 and G.vehicles.size() >= 10
+		if not v_ok:
+			fails.append("载具出生不足")
+		print("[AKITSU] 载具出生=%d 场上实车=%d -> %s" % [G.vehicle_spawns.size(), G.vehicles.size(),
+			"PASS" if v_ok else "FAIL"])
+		# ---- 4) 碰撞体 / 可行走面 / 部署图 ----
+		var c_ok: bool = G.colliders.size() > 800 and G.floor_boxes.size() > 100
+		if not c_ok:
+			fails.append("碰撞体或可行走面缺失")
+		print("[AKITSU] 碰撞盒=%d 可行走面=%d 部署图矩形=%d -> %s" % [G.colliders.size(),
+			G.floor_boxes.size(), G.minimap_rects.size(), "PASS" if c_ok else "FAIL"])
+		# ---- 5) 垂直层次(屋顶 / 中层天桥 / 地下) ----
+		var hi_y := -999.0
+		var lo_y := 999.0
+		var n_hi := 0
+		var n_mid := 0
+		var n_under := 0
+		var hi_box := AABB()
+		for bb2 in G.floor_boxes:
+			var b4: AABB = bb2
+			var top: float = b4.position.y + b4.size.y
+			if top > hi_y:
+				hi_y = top
+				hi_box = b4
+			lo_y = minf(lo_y, top)
+			if top >= 10.0:
+				n_hi += 1
+			if top >= 4.0 and top <= 6.5:
+				n_mid += 1
+			if top <= -2.0:
+				n_under += 1
+		var v_ok2: bool = n_hi > 0 and n_mid > 0 and n_under > 0
+		if not v_ok2:
+			fails.append("垂直层次不完整")
+		print("[AKITSU] 可行走面高度 最高=%.2f 最低=%.2f | 屋顶层(≥10m)=%d 中层(4~6.5m)=%d 地下(≤-2m)=%d -> %s" % [
+			hi_y, lo_y, n_hi, n_mid, n_under, "PASS" if v_ok2 else "FAIL"])
+		# ---- 6) floor_h 实函数抽查 ----
+		var hc: Vector3 = hi_box.get_center()
+		var fh_val: float = G.floor_h(hi_y, hc.x, hc.z)
+		var fh_ok: bool = fh_val >= hi_y - 0.05
+		if not fh_ok:
+			fails.append("floor_h 未命中最高面")
+		print("[AKITSU] floor_h(ref=%.2f, %.1f, %.1f)=%.2f (期望 ≥%.2f) -> %s" % [
+			hi_y, hc.x, hc.z, fh_val, hi_y - 0.05, "PASS" if fh_ok else "FAIL"])
+		# 地面处应回退地形(不误判为高层面)
+		var fh_g: float = G.floor_h(0.3, 0.0, 0.0)
+		print("[AKITSU] floor_h(ref=0.3, 0, 0)=%.2f (地面处应 ≤0.62)" % fh_g)
+		# ---- 7) 玩家站上最高层面(垂直玩法可达性) ----
+		G.player.pos = Vector3(hc.x, hi_y + 0.35, hc.z)
+		await get_tree().create_timer(0.6).timeout
+		var stand_ok: bool = absf(G.player.pos.y - hi_y) < 0.8
+		if not stand_ok:
+			fails.append("玩家无法站上高层面")
+		print("[AKITSU] 玩家站上最高面 y=%.2f (期望 %.2f) -> %s" % [G.player.pos.y, hi_y,
+			"PASS" if stand_ok else "FAIL"])
+		# ---- 7b) floor_h 不得把地面上的玩家吸到下方地下通道面(旧 bug:掉进地下室) ----
+		G.player.pos = Vector3(-140.0, 0.2, -10.0)   # Z2 地下街厅正上方地面
+		await get_tree().create_timer(0.6).timeout
+		var stay_ok: bool = absf(G.player.pos.y) < 0.4
+		if not stay_ok:
+			fails.append("地面被吸到地下")
+		print("[AKITSU] 地下街正上方站定 y=%.2f (期望 ≈0.00) -> %s" % [G.player.pos.y,
+			"PASS" if stay_ok else "FAIL"])
+		print("[AKITSU] ===== 结论: %s %s =====" % [
+			"全部通过" if fails.is_empty() else "存在问题", str(fails)])
+		# ---- 诊断:各分区网格表面实际绑定的材质(反照率色)— 定位发黑成因 ----
+		if ua.has("--akitsu-diag"):
+			for nd5 in G.world_group.find_children("*", "MeshInstance3D", true, false) as Array:
+				var m5: Mesh = nd5.mesh
+				if not (m5 is ArrayMesh):
+					continue
+				var am5 := m5 as ArrayMesh
+				var acc := ""
+				for si2 in am5.get_surface_count():
+					var sm5 := am5.surface_get_material(si2)
+					var col5 := "null"
+					var t5 := "-"
+					if sm5 is StandardMaterial3D:
+						var st5 := sm5 as StandardMaterial3D
+						col5 = "(%.2f,%.2f,%.2f)" % [st5.albedo_color.r, st5.albedo_color.g, st5.albedo_color.b]
+						t5 = "T" if st5.albedo_texture != null else "-"
+						t5 += "N" if st5.normal_texture != null else ""
+						t5 += "X" if st5.uv1_triplanar else ""
+					acc += " s%d=%s/%s;" % [si2, col5, t5]
+				print("[MAT] %-22s%s" % [nd5.name, acc])
+		# ---- 8) 机位截图(窗口模式;临时相机接管 + 隐藏第一人称视图模型/HUD) ----
+		if DisplayServer.get_name() != "headless":
+			var out_dir := "E:/工作目录2/zero/steel_frontline_godot/shots/akitsu/"
+			if G.hud != null:
+				G.hud.visible = false
+			# 第一人称枪械是独立 CanvasLayer 视图,必须整容器隐藏(否则盖住机位)
+			var vm_cont: Node = G.vm_viewport.get_parent() if G.vm_viewport != null else null
+			if vm_cont != null:
+				vm_cont.visible = false
+			var env3: Environment = null
+			if G.world_env != null:
+				env3 = G.world_env.environment
+			var fog_bak: bool = env3.fog_enabled if env3 != null else false
+			var tmp := Camera3D.new()
+			tmp.fov = 62.0
+			tmp.far = 6000.0
+			tmp.near = 0.2
+			G.main.add_child(tmp)
+			tmp.current = true
+			# 诊断开关:--akitsu-diag 追加"关阴影 / 全白材质"对照,定位发黑成因
+			var diag: bool = ua.has("--akitsu-diag")
+			var shots := [
+				{ "n": "qa_aerial", "p": Vector3(0.0, 880.0, 300.0), "t": Vector3(0.0, 0.0, 0.0), "nofog": true },
+				{ "n": "qa_top", "p": Vector3(0.0, 1050.0, 1.0), "t": Vector3(0.0, 0.0, 0.0), "nofog": true },
+				{ "n": "qa_dusk", "p": Vector3(640.0, 430.0, 640.0), "t": Vector3(-40.0, 0.0, -40.0), "nofog": true },
+				{ "n": "qa_roof", "p": Vector3(hi_box.get_center().x, hi_y + 0.9, hi_box.get_center().z),
+					"t": Vector3(0.0, 16.0, 40.0), "nofog": true },
+				{ "n": "qa_station", "p": Vector3(30.0, 3.0, 46.0), "t": Vector3(30.0, 5.0, 120.0), "nofog": false },
+				{ "n": "qa_shrine", "p": Vector3(-160.0, 2.8, 60.0), "t": Vector3(-400.0, 6.0, 60.0), "nofog": false },
+				{ "n": "qa_arcade", "p": Vector3(-140.0, 1.8, -100.0), "t": Vector3(-140.0, 2.4, -40.0), "nofog": false },
+				{ "n": "qa_harbor", "p": Vector3(358.0, 9.0, -268.0), "t": Vector3(330.0, 2.0, -170.0), "nofog": false },
+				# 2026-09-10 新增内容机位:招牌 / 弹坑废墟 / 室内家具 / 报废车堆
+				# 地标广告牌正面(探针实测:面板法线 = Godot +Z 经 yaw 旋转 → yaw=0 的牌从 +Z 侧看,
+				# yaw=π 的牌从 -Z 侧看)——顺带展示双方出生点 G / D 的地标
+				{ "n": "qa_sign", "p": Vector3(-60.0, 4.2, -306.0), "t": Vector3(-60.0, 5.2, -322.0), "nofog": false },
+				{ "n": "qa_sign2", "p": Vector3(250.0, 4.2, 252.0), "t": Vector3(250.0, 5.2, 268.0), "nofog": false },
+				# 弹坑 + 半毁建筑:30m 高位俯仰(樱树/楼体都不再遮挡)
+				{ "n": "qa_ruin", "p": Vector3(4.0, 30.0, 62.0), "t": Vector3(-16.0, 0.0, 34.0), "nofog": false },
+				# 室内家具:EXTRA_BLD[2]=(100,84) 可进商铺,站在店内看纵深
+				{ "n": "qa_shopin", "p": Vector3(100.0, 1.65, 88.0), "t": Vector3(100.0, 1.05, 79.0), "nofog": false },
+				{ "n": "qa_wreck", "p": Vector3(280.0, 2.6, -26.0), "t": Vector3(370.0, 3.0, -26.0), "nofog": false },
+				# 行道树:沿干道两侧视角(2026-09-10 新增 294 棵)
+				{ "n": "qa_street", "p": Vector3(60.0, 3.2, -40.0), "t": Vector3(-140.0, 3.8, -40.0), "nofog": false },
+				{ "n": "qa_street2", "p": Vector3(-200.0, 3.4, -40.0), "t": Vector3(200.0, 3.8, -40.0), "nofog": false },
+				# 其他分区室内是否有实体光源(只有自发光板=暗)
+				{ "n": "qa_stin", "p": Vector3(0.0, 1.8, 137.0), "t": Vector3(105.0, 1.7, 135.0), "nofog": false },
+				{ "n": "qa_lobby", "p": Vector3(166.0, 1.9, 0.0), "t": Vector3(204.0, 1.6, 0.0), "nofog": false },
+				# 坡屋顶形态:z9_fb19 在大坡顶(实测半径), 3/4 俯视角看两坡是否"由檐向脊升起"(∧)
+				{ "n": "qa_gable", "p": Vector3(72.0, 9.5, 264.0), "t": Vector3(102.0, 4.0, 300.0), "nofog": false },
+				{ "n": "qa_gable2", "p": Vector3(128.0, 8.0, 320.0), "t": Vector3(100.0, 4.0, 288.0), "nofog": false },
+				# 新路网(2026-09-10):中央東西 x 東1 十字路口 / 県道跨线桥(载具可上) /
+				# Z4 住宅街道网格 / 西1号次干道
+				{ "n": "qa_xing", "p": Vector3(196.0, 13.0, 74.0), "t": Vector3(190.0, 0.0, 112.0), "nofog": false },
+				{ "n": "qa_ovp", "p": Vector3(-104.0, 9.0, 206.0), "t": Vector3(-60.0, 2.5, 168.0), "nofog": false },
+				{ "n": "qa_grid", "p": Vector3(146.0, 34.0, 246.0), "t": Vector3(304.0, 2.0, 352.0), "nofog": false },
+				{ "n": "qa_west1", "p": Vector3(-360.0, 26.0, -300.0), "t": Vector3(-360.0, 0.0, -120.0), "nofog": false },
+			]
+			if diag:
+				shots.append({ "n": "dbg_noshadow", "p": Vector3(0.0, 880.0, 300.0),
+					"t": Vector3(0.0, 0.0, 0.0), "nofog": true, "noshadow": true })
+				shots.append({ "n": "dbg_shrine_ns", "p": Vector3(-160.0, 2.8, 60.0),
+					"t": Vector3(-400.0, 6.0, 60.0), "nofog": false, "noshadow": true })
+				# 隐藏引擎兜底地面:定位"近景暗横带"
+				var gp := G.world_group.get_node_or_null("akitsu_ground")
+				if gp != null:
+					gp.visible = false
+				shots.append({ "n": "dbg_noground", "p": Vector3(30.0, 3.0, 46.0),
+					"t": Vector3(30.0, 5.0, 120.0), "nofog": false })
+				shots.append({ "n": "dbg_noground2", "p": Vector3(0.0, 880.0, 300.0),
+					"t": Vector3(0.0, 0.0, 0.0), "nofog": true })
+				if gp != null:
+					gp.visible = true
+				# 决定性对照:关 z9(含全图基底铺装) / 关海面, 看近景暗带到底是哪个
+				var z9n := G.world_group.get_node_or_null("akitsu_z9")
+				var sea_n := G.world_group.get_node_or_null("akitsu_sea")
+				if z9n != null:
+					z9n.visible = false
+				shots.append({ "n": "dbg_noz9", "p": Vector3(30.0, 3.0, 8.0),
+					"t": Vector3(30.0, 5.0, 96.0), "nofog": false })
+				if z9n != null:
+					z9n.visible = true
+				if sea_n != null:
+					sea_n.visible = false
+				shots.append({ "n": "dbg_nosea", "p": Vector3(30.0, 3.0, 8.0),
+					"t": Vector3(30.0, 5.0, 96.0), "nofog": false })
+				if sea_n != null:
+					sea_n.visible = true
+				# 分区着色对照:一眼看出近景暗带属于哪个分区
+				var zone_cols := {
+					1: Color(1, 0, 0), 2: Color(0, 1, 0), 3: Color(0, 0, 1), 4: Color(1, 1, 0),
+					5: Color(1, 0, 1), 6: Color(0, 1, 1), 7: Color(1, 0.5, 0), 8: Color(0.5, 0, 1),
+					9: Color(1, 1, 1), 10: Color(0.2, 0.2, 0.2),
+				}
+				for zid in zone_cols.keys():
+					var zn2 := G.world_group.get_node_or_null("akitsu_z%d" % zid)
+					if zn2 == null:
+						continue
+					var cm2 := StandardMaterial3D.new()
+					cm2.albedo_color = zone_cols[zid]
+					cm2.roughness = 0.9
+					for mi2 in zn2.find_children("*", "MeshInstance3D", true, false):
+						mi2.material_override = cm2
+				tmp.global_position = Vector3(30.0, 3.0, 8.0)
+				tmp.look_at(Vector3(30.0, 5.0, 96.0), Vector3.UP)
+				await get_tree().process_frame
+				await get_tree().process_frame
+				await get_tree().process_frame
+				get_viewport().get_texture().get_image().save_png(out_dir + "dbg_zones.png")
+				print("[AKITSU] 截图 %s (分区着色:1红 2绿 3蓝 4黄 5品红 6青 7橙 8紫 9白 10深灰)" % (out_dir + "dbg_zones.png"))
+				for zid2 in zone_cols.keys():
+					var zn3 := G.world_group.get_node_or_null("akitsu_z%d" % zid2)
+					if zn3 == null:
+						continue
+					for mi3 in zn3.find_children("*", "MeshInstance3D", true, false):
+						mi3.material_override = null
+			var sun_bak: bool = G.sun.shadow_enabled if G.sun != null else false
+			var white_mat := StandardMaterial3D.new()
+			white_mat.albedo_color = Color(0.84, 0.84, 0.84)
+			white_mat.roughness = 0.9
+			for s in shots:
+				if env3 != null:
+					env3.fog_enabled = fog_bak and not bool(s["nofog"])
+				if G.sun != null:
+					G.sun.shadow_enabled = sun_bak and not bool(s.get("noshadow", false))
+				tmp.global_position = s["p"]
+				tmp.look_at(s["t"], Vector3.UP)
+				await get_tree().process_frame
+				await get_tree().process_frame
+				await get_tree().process_frame
+				var img := get_viewport().get_texture().get_image()
+				var sp2: String = out_dir + str(s["n"]) + ".png"
+				img.save_png(sp2)
+				print("[AKITSU] 截图 %s (fog=%s shadow=%s)" % [sp2,
+					str(env3.fog_enabled) if env3 != null else "-",
+					str(G.sun.shadow_enabled) if G.sun != null else "-"])
+			# 全白材质对照(同俯瞰机位):黑块若消失 → 材质/光照;仍在 → 几何
+			if diag:
+				var overrode: Array = []
+				for nd3 in G.world_group.find_children("*", "MeshInstance3D", true, false):
+					overrode.append(nd3)
+					nd3.material_override = white_mat
+				tmp.global_position = Vector3(0.0, 880.0, 300.0)
+				tmp.look_at(Vector3(0.0, 0.0, 0.0), Vector3.UP)
+				await get_tree().process_frame
+				await get_tree().process_frame
+				await get_tree().process_frame
+				get_viewport().get_texture().get_image().save_png(out_dir + "dbg_white.png")
+				print("[AKITSU] 截图 %s (全白材质, 覆盖 %d 件)" % [out_dir + "dbg_white.png", overrode.size()])
+				for nd4 in overrode:
+					nd4.material_override = null
+			if G.sun != null:
+				G.sun.shadow_enabled = sun_bak
+			if env3 != null:
+				env3.fog_enabled = fog_bak
+			tmp.queue_free()
+		get_tree().quit()
+		return
+	# ==================== 秋津市碰撞体检:--test-akitsu-collide ====================
+	# 目的:抓"卡住/穿模"。Utils.move_collide 是线性遍历 9071 个碰撞体, 网格扫描太慢 →
+	# 这里自建 8m 空间哈希, 用与引擎同构的胶囊(AABB 近似 0.38r / 1.75h)做重叠判定。
+	# 三项:A 干道横断面通行(车道被碰撞箱掐断=车/人过不去) B 异常卡点(开阔处的孤立碰撞箱)
+	#       C 连通性(BFS 看旗点/基地/出生/载具是否可达)
+	if ua.has("--test-akitsu-collide"):
+		await get_tree().create_timer(2.4).timeout
+		var tA := Time.get_ticks_msec()
+		var BUCKET := 8.0
+		var buckets := {}
+		for bb in G.colliders:
+			var b: AABB = bb
+			var gx0 := int(floor(b.position.x / BUCKET))
+			var gx1 := int(floor(b.end.x / BUCKET))
+			var gz0 := int(floor(b.position.z / BUCKET))
+			var gz1 := int(floor(b.end.z / BUCKET))
+			for gx in range(gx0, gx1 + 1):
+				for gz in range(gz0, gz1 + 1):
+					var kk := Vector2i(gx, gz)
+					if not buckets.has(kk):
+						buckets[kk] = []
+					(buckets[kk] as Array).append(b)
+		print("[AUDIT] 碰撞体=%d 桶=%d 建索引=%dms" % [G.colliders.size(), buckets.size(),
+			Time.get_ticks_msec() - tA])
+
+		var blocked := func(px: float, py: float, pz: float) -> bool:
+			var x0 := px - 0.38; var x1 := px + 0.38
+			var z0 := pz - 0.38; var z1 := pz + 0.38
+			var y0 := py + 0.15; var y1 := py + 1.75
+			for gx in range(int(floor(x0 / BUCKET)), int(floor(x1 / BUCKET)) + 1):
+				for gz in range(int(floor(z0 / BUCKET)), int(floor(z1 / BUCKET)) + 1):
+					var lst: Array = buckets.get(Vector2i(gx, gz), [])
+					for bc in lst:
+						var b: AABB = bc
+						# ★ 必须与 Utils.move_collide 同一条规则: pos.y + 0.55 >= b.end.y
+						# 时跳过(允许跨上 0.55m 矮台阶/台阶沿)。漏了这条会把每一级
+						# 台阶都判成"撞墙", 楼梯检测全是假警报(实测踩过)。
+						if py + 0.55 >= b.end.y or py + 1.75 <= b.position.y:
+							continue
+						if x1 > b.position.x and x0 < b.end.x \
+								and y1 > b.position.y and y0 < b.end.y \
+								and z1 > b.position.z and z0 < b.end.z:
+							return true
+			return false
+
+		# 精确归因: 列出**真正触发 blocked 规则**的碰撞箱(应用与 blocked 完全相同的
+		# 跳过条件), 这样"梯顶被谁挡"不用猜。
+		var blame := func(px: float, py: float, pz: float) -> String:
+			var out := ""
+			var x0 := px - 0.38; var x1 := px + 0.38
+			var z0 := pz - 0.38; var z1 := pz + 0.38
+			var y0 := py + 0.15; var y1 := py + 1.75
+			for gx in range(int(floor(x0 / BUCKET)), int(floor(x1 / BUCKET)) + 1):
+				for gz in range(int(floor(z0 / BUCKET)), int(floor(z1 / BUCKET)) + 1):
+					for bc in buckets.get(Vector2i(gx, gz), []):
+						var b: AABB = bc
+						if py + 0.55 >= b.end.y or py + 1.75 <= b.position.y:
+							continue
+						if x1 > b.position.x and x0 < b.end.x \
+								and y1 > b.position.y and y0 < b.end.y \
+								and z1 > b.position.z and z0 < b.end.z:
+							var ct := b.get_center()
+							out += "%s(%.0f,%.0f,%.0f/s%.1f,%.1f,%.1f) " % [
+								str(G.collider_tags.get(b, "?")),
+								ct.x, ct.y, ct.z, b.size.x, b.size.y, b.size.z]
+			return out
+		# 探针: 列出该点附近(±1.2m)的碰撞箱, 用于定位"是谁挡的"
+		var probe := func(px: float, pz: float) -> String:
+			var out := ""
+			var nn := 0
+			for gx in range(int(floor((px - 2.0) / BUCKET)), int(floor((px + 2.0) / BUCKET)) + 1):
+				for gz in range(int(floor((pz - 2.0) / BUCKET)), int(floor((pz + 2.0) / BUCKET)) + 1):
+					for bc in buckets.get(Vector2i(gx, gz), []):
+						var b: AABB = bc
+						var ct := b.get_center()
+						if absf(ct.x - px) < b.size.x * 0.5 + 1.2 \
+								and absf(ct.z - pz) < b.size.z * 0.5 + 1.2 and nn < 4:
+							out += "%s(%.0f,%.0f,%.0f/s%.1f,%.1f,%.1f) " % [
+								str(G.collider_tags.get(b, "?")),
+								ct.x, ct.y, ct.z, b.size.x, b.size.y, b.size.z]
+							nn += 1
+			return out
+
+		# ---- A) 干道横断面通行(半宽内 1m 采样, 可用宽度不足 = 被掐断) ----
+		# 路段范围 = 各分区实际建成的路面段(见 build_jp_city 各区 slab("z*_..."));
+		# 早期版本按"整条路贯穿全图"扫描, 会把根本没有路面的区段误报成"路被掐断"。
+		var roads := [
+			{ "n": "国道", "z": true, "p": -40.0, "hw": 11.0, "t0": -470.0, "t1": 450.0 },
+			{ "n": "県道", "z": false, "p": -60.0, "hw": 9.0, "t0": -470.0, "t1": 462.0 },
+			# 站前大道:Z9(x73..87) + Z3(local23..37 + 原点50 = 全局73..87, 到车站南墙 z126 为止)
+			{ "n": "站前大道", "z": false, "p": 80.0, "hw": 7.0, "t0": -470.0, "t1": 120.0 },
+			{ "n": "海岸大道", "z": false, "p": 420.0, "hw": 8.0, "t0": -470.0, "t1": 462.0 },
+			{ "n": "浜通り", "z": true, "p": -260.0, "hw": 7.0, "t0": -450.0, "t1": 450.0 },
+			{ "n": "旧街道北", "z": false, "p": -240.0, "hw": 4.0, "t0": 108.0, "t1": 462.0 },
+			{ "n": "旧街道南", "z": false, "p": -240.0, "hw": 4.0, "t0": -255.0, "t1": -55.0 },
+		]
+		for rd in roads:
+			var p0: float = rd["p"]
+			var hw: float = rd["hw"]
+			var tt: float = rd["t0"]
+			var worst := 999
+			var worst_at := 0.0
+			var cuts := 0
+			var total := 0
+			while tt <= float(rd["t1"]):
+				var free := 0
+				var s := -hw + 1.0
+				while s <= hw - 1.0:
+					var px := tt if bool(rd["z"]) else p0 + s
+					var pz := p0 + s if bool(rd["z"]) else tt
+					var gy: float = G.stand_h(0.4, px, pz)
+					if gy > -INF and not blocked.call(px, gy + 0.05, pz):
+						free += 1
+					s += 1.0
+				total += 1
+				if free < worst:
+					worst = free
+					worst_at = tt
+				if free < 4:
+					cuts += 1
+				tt += 6.0
+			print("[AUDIT-路] %-5s 断面=%d 最窄可通行=%dm @%.0f 掐断断面=%d -> %s" % [
+				rd["n"], total, worst, worst_at, cuts, "PASS" if cuts == 0 else "WARN"])
+			if cuts > 0:
+				var qx := worst_at if bool(rd["z"]) else p0
+				var qz := p0 if bool(rd["z"]) else worst_at
+				print("[AUDIT-路]   %s @(%.0f,%.0f) 阻挡: %s" % [rd["n"], qx, qz, probe.call(qx, qz)])
+
+		# ---- B) 异常卡点(4m 网格: 被碰撞占据但四邻至少 2 向开阔 = 孤立碰撞箱) ----
+		var step := 4.0
+		var open_cells := {}          # Vector2i -> 站立高度(干净可站点)
+		var bad_cells := {}           # Vector2i -> Vector2(世界坐标)
+		var xx := -472.0
+		while xx <= 472.0:
+			var zz := -472.0
+			while zz <= 472.0:
+				var gy2: float = G.stand_h(0.4, xx, zz)
+				if gy2 > -INF:
+					if not blocked.call(xx, gy2 + 0.05, zz):
+						open_cells[Vector2i(int(round(xx / step)), int(round(zz / step)))] = gy2
+					else:
+						var op := 0
+						for d in [Vector2(step, 0.0), Vector2(-step, 0.0),
+								Vector2(0.0, step), Vector2(0.0, -step)]:
+							var dv: Vector2 = d
+							var gy3: float = G.stand_h(0.4, xx + dv.x, zz + dv.y)
+							if gy3 > -INF and not blocked.call(xx + dv.x, gy3 + 0.05, zz + dv.y):
+								op += 1
+						if op >= 3:      # ≥3 向开阔 = 孤立碰撞箱; 2 向多是建筑拐角(误报)
+							bad_cells[Vector2i(int(round(xx / step)), int(round(zz / step)))] = Vector2(xx, zz)
+				zz += step
+			xx += step
+		# 聚类(8 邻接)取代表点
+		var seen := {}
+		var clusters: Array = []
+		for kb in bad_cells.keys():
+			if seen.has(kb):
+				continue
+			var stack: Array = [kb]
+			seen[kb] = true
+			var members: Array = []
+			while not stack.is_empty():
+				var cur: Vector2i = stack.pop_back()
+				members.append(cur)
+				for dx in range(-1, 2):
+					for dz in range(-1, 2):
+						var nb := Vector2i(cur.x + dx, cur.y + dz)
+						if bad_cells.has(nb) and not seen.has(nb):
+							seen[nb] = true
+							stack.append(nb)
+			clusters.append(members)
+		var cluster_sum: Array = []
+		for cm in clusters:
+			cluster_sum.append({ "n": (cm as Array).size(), "p": bad_cells[(cm as Array)[0]] })
+		cluster_sum.sort_custom(func(a, b): return int(a["n"]) > int(b["n"]))
+		var small: Array = []          # ≤6 格 = 可疑孤立碰撞箱(大簇是楼, 属正常)
+		for cm2 in cluster_sum:
+			if int((cm2 as Dictionary)["n"]) <= 6:
+				small.append(cm2)
+		print("[AUDIT-卡点] 网格=%d 可站=%d 被占=%d 簇=%d 其中小簇(≤6格)=%d" % [
+			open_cells.size(), open_cells.size(), bad_cells.size(), clusters.size(), small.size()])
+		for ci in range(mini(10, small.size())):
+			var c0: Dictionary = small[ci]
+			var pv: Vector2 = c0["p"]
+			print("[AUDIT-卡点]   小簇#%d 格数=%d 代表点 (%.0f, %.0f)" % [ci + 1, c0["n"], pv.x, pv.y])
+
+		# ---- C) 连通性(从 us 基地出生点 BFS) ----
+		var start_key := Vector2i(int(round(G.spawns["us"][0].x / step)),
+			int(round(G.spawns["us"][0].z / step)))
+		# 起点可能不落在干净格上 → 就近取
+		if not open_cells.has(start_key):
+			var us0: Vector3 = G.spawns["us"][0]
+			var best_d := 1e9
+			for kc in open_cells.keys():
+				var kk2: Vector2i = kc
+				var wx := float(kk2.x) * step
+				var wz := float(kk2.y) * step
+				var dd: float = (wx - us0.x) * (wx - us0.x) + (wz - us0.z) * (wz - us0.z)
+				if dd < best_d:
+					best_d = dd
+					start_key = kk2
+		var comp := {}
+		var q: Array = [start_key]
+		comp[start_key] = true
+		var head := 0
+		while head < q.size():
+			var cur2: Vector2i = q[head]
+			head += 1
+			var hy: float = open_cells[cur2]
+			for d2 in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var nb2 := Vector2i(cur2.x + d2.x, cur2.y + d2.y)
+				if comp.has(nb2) or not open_cells.has(nb2):
+					continue
+				if absf(float(open_cells[nb2]) - hy) > 0.7:
+					continue          # 高差过大 = 不是同一层(墙/台)
+				comp[nb2] = true
+				q.append(nb2)
+		print("[AUDIT-连通] 主分量=%d 格 / 总可站=%d (%.0f%%)" % [
+			comp.size(), open_cells.size(), 100.0 * comp.size() / maxf(1.0, float(open_cells.size()))])
+		var miss_f: Array = []
+		for f in G.flags:
+			var fp: Vector3 = f.pos
+			if not comp.has(Vector2i(int(round(fp.x / step)), int(round(fp.z / step)))):
+				miss_f.append("旗" + str(f.id))
+				print("[AUDIT-连通]   旗%s(%.0f,%.0f) 处阻挡: %s" % [str(f.id), fp.x, fp.z,
+					probe.call(fp.x, fp.z)])
+		for tm in ["us", "ru"]:
+			for pv2 in G.spawns[tm]:
+				var v2: Vector3 = pv2
+				var k2 := Vector2i(int(round(v2.x / step)), int(round(v2.z / step)))
+				if not open_cells.has(k2) or not comp.has(k2):
+					miss_f.append("出生%s(%.0f,%.0f)" % [tm, v2.x, v2.z])
+					print("[AUDIT-连通]   出生%s(%.0f,%.0f) 处阻挡: %s" % [tm, v2.x, v2.z,
+						probe.call(v2.x, v2.z)])
+		for vs in G.vehicle_spawns:
+			var k3 := Vector2i(int(round(float(vs["x"]) / step)), int(round(float(vs["z"]) / step)))
+			if not open_cells.has(k3) or not comp.has(k3):
+				miss_f.append("载具(%.0f,%.0f)" % [float(vs["x"]), float(vs["z"])])
+				print("[AUDIT-连通]   载具(%.0f,%.0f) 处阻挡: %s" % [float(vs["x"]), float(vs["z"]),
+					probe.call(float(vs["x"]), float(vs["z"]))])
+		print("[AUDIT-连通] 主分量外关键点=%d %s -> %s" % [miss_f.size(),
+			str(miss_f.slice(0, 10)), "PASS" if miss_f.is_empty() else "WARN"])
+		# ---- D) 门口可达(沿中线从门外 2.5m 到门内 2.5m 逐点查净空)----
+		# 家具堵门这种问题只有"真走一遍"才查得出, 所以建模侧给可进建筑都打了 door_ 标记。
+		var door_bad: Array = []
+		for dm in G.door_marks:
+			var dd0: Dictionary = dm
+			var dx: float = dd0["x"]
+			var dz: float = dd0["z"]
+			var hit := 0
+			var zz2 := dz - 2.5
+			while zz2 <= dz + 2.5:
+				var gy4: float = G.stand_h(0.4, dx, zz2)
+				if gy4 > -INF and blocked.call(dx, gy4 + 0.05, zz2):
+					hit += 1
+				zz2 += 0.25
+			if hit > 0:
+				door_bad.append("(%.0f,%.0f)挡%d点" % [dx, dz, hit])
+				print("[AUDIT-门]   (%.0f,%.0f) 挡=%d 阻挡: %s" % [dx, dz, hit, probe.call(dx, dz)])
+		print("[AUDIT-门] 可进建筑门位=%d 走不通=%d %s -> %s" % [G.door_marks.size(),
+			door_bad.size(), str(door_bad), "PASS" if door_bad.is_empty() else "WARN"])
+
+		# ---- E) 楼梯是否通到落脚面(上到顶撞墙/悬空 → 玩家"过不去")----
+		#   台阶在 walk 面里是"窄条"(一层 0.2~0.4m 深); 某窄条上方 0.25~1m 有邻阶、
+		#   下方没有 = 它是该梯段的最高一级。此时它旁边(2.6m 内)必须有面积够大的同高
+		#   落脚面, 否则就是"楼梯通向不存在的墙"。
+		var sb: Array = []
+		for wb in G.floor_boxes:
+			var b: AABB = wb
+			sb.append({ "c": b.get_center(), "top": b.position.y + b.size.y,
+				"area": b.size.x * b.size.z, "narrow": minf(b.size.x, b.size.z) <= 1.2 })
+		var tops: Array = []
+		for a in sb:
+			if not bool(a["narrow"]):
+				continue
+			var ca: Vector3 = a["c"]
+			var ta: float = a["top"]
+			var up := false
+			var dn := false
+			for b2 in sb:
+				if b2 == a:
+					continue
+				var cb: Vector3 = b2["c"]
+				if Vector2(ca.x - cb.x, ca.z - cb.z).length() > 1.8:
+					continue
+				var dh: float = float(b2["top"]) - ta
+				if dh > 0.25 and dh < 1.0:
+					up = true
+				elif dh < -0.25 and dh > -1.0:
+					dn = true
+			# 梯顶 = 下方有邻阶、上方没有(反了会检成梯段最下面一级)
+			if dn and not up:
+				tops.append(a)
+		var hitwall: Array = []
+		var noland: Array = []
+		for a3 in tops:
+			var ca3: Vector3 = a3["c"]
+			var ta3: float = a3["top"]
+			# ① 梯顶正上方有碰撞体 = 上去就撞墙/撞楼板(用户: 楼梯通向不存在的墙)
+			if blocked.call(ca3.x, ta3 + 0.05, ca3.z):
+				hitwall.append({ "t": "(%.0f,%.0f,y%.1f)" % [ca3.x, ca3.z, ta3],
+					"x": ca3.x, "y": ta3 + 0.05, "z": ca3.z })
+			# ② 梯顶旁边没有够大的同高落脚面 = 上去没地方站
+			var land := false
+			for b3 in sb:
+				if b3 == a3:
+					continue
+				var cb3: Vector3 = b3["c"]
+				if Vector2(ca3.x - cb3.x, ca3.z - cb3.z).length() > 2.6:
+					continue
+				if absf(float(b3["top"]) - ta3) <= 0.35 and float(b3["area"]) >= 1.5:
+					land = true
+					break
+			if not land:
+				noland.append("(%.0f,%.0f,y%.1f)" % [ca3.x, ca3.z, ta3])
+		var hw_txt: Array = []
+		for hw in hitwall:
+			hw_txt.append((hw as Dictionary)["t"])
+		print("[AUDIT-梯] 梯顶=%d 顶上有碰撞体=%d %s" % [tops.size(), hitwall.size(),
+			str(hw_txt)])
+		for hi in range(mini(12, hitwall.size())):
+			var h0: Dictionary = hitwall[hi]
+			print("[AUDIT-梯]   %s 真凶: %s" % [h0["t"],
+				blame.call(float(h0["x"]), float(h0["y"]), float(h0["z"]))])
+		print("[AUDIT-梯] 顶旁无落脚面=%d %s -> %s" % [noland.size(),
+			str(noland.slice(0, 10)), "PASS" if hitwall.is_empty() else "WARN"])
+
+		# ---- G) 载具上桥(可行驶面 drive_ 是否连续; 模拟一辆车沿坡道爬上去)----
+		#   载具旧版只读地形高度 → 任何桥都上不去。这里沿 県道跨线桥(x=-60)纵剖推进:
+		#   从地面 z=118 一直推到 z=195(桥面北端), 看高度能否连续升到 4.5。
+		if G.drive_active:
+			var vy := 0.0
+			var vmaxstep := 0.0
+			var vstuck := 0
+			var vpeak := 0.0
+			var vz := 118.0
+			while vz <= 196.0:
+				var hv: float = G.veh_h.call(-60.0, vz, vy)
+				var dh2 := hv - vy
+				if dh2 > vmaxstep:
+					vmaxstep = dh2
+				if hv > vpeak:
+					vpeak = hv
+				# 桥面段(z 158..182)应已在 y≈4.5
+				if vz > 160.0 and vz < 180.0 and hv < 4.3:
+					vstuck += 1
+				vy = hv
+				vz += 0.5
+			# 判据看**峰值高度**(循环终点 z=196 在下坡中段,不是桥面) + 级差是否可吸收
+			print("[AUDIT-桥] 跨线桥纵剖 峰值高=%.2f 桥面未达高采样=%d 最大级差=%.2f -> %s" % [
+				vpeak, vstuck, vmaxstep,
+				"PASS" if (vstuck == 0 and vpeak > 4.3 and vmaxstep <= 0.55) else "FAIL"])
+		else:
+			print("[AUDIT-桥] 无可行驶面(drive_=0)")
+
+		# ---- H) 铁路走廊断面(铁轨上不许有建筑/构件)----
+		var rcuts := 0
+		var rzz := -440.0
+		while rzz <= 460.0:
+			var rw := 0
+			var rx4 := -440.0
+			while rx4 <= 460.0:
+				if not blocked.call(rx4, 0.55, rzz):
+					rw += 1
+				rx4 += 2.0
+			if rw * 2 < 8:
+				rcuts += 1
+			rzz += 10.0
+		print("[AUDIT-铁路] 路盘纵向断面=%d 掐断=%d -> %s" % [int((460.0 - -440.0) / 10.0) + 1,
+			rcuts, "PASS" if rcuts == 0 else "WARN"])
+
+		# 未被主分量覆盖的可站点 = 孤立区(无门房间/被封死的空地: 进去出不来)
+		var rest := {}
+		for kc2 in open_cells.keys():
+			if not comp.has(kc2):
+				rest[kc2] = true
+		var seen2 := {}
+		var pockets: Array = []
+		for kr in rest.keys():
+			if seen2.has(kr):
+				continue
+			var st2: Array = [kr]
+			seen2[kr] = true
+			var mem: Array = []
+			while not st2.is_empty():
+				var cu: Vector2i = st2.pop_back()
+				mem.append(cu)
+				for d3 in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+					var nb3 := Vector2i(cu.x + d3.x, cu.y + d3.y)
+					if rest.has(nb3) and not seen2.has(nb3):
+						seen2[nb3] = true
+						st2.append(nb3)
+			pockets.append(mem)
+		pockets.sort_custom(func(a, b): return (a as Array).size() > (b as Array).size())
+		print("[AUDIT-孤立区] %d 处 (合计 %d 格)" % [pockets.size(), rest.size()])
+		for pi in range(mini(10, pockets.size())):
+			var mem2: Array = pockets[pi]
+			var kv: Vector2i = mem2[0]
+			print("[AUDIT-孤立区]   #%d 格数=%d 代表点 (%.0f, %.0f)" % [
+				pi + 1, mem2.size(), float(kv.x) * step, float(kv.y) * step])
+		print("[AUDIT] 合计耗时 %d ms" % (Time.get_ticks_msec() - tA))
+		get_tree().quit()
+		return
+	# ============ 死后重部署是否残留死亡压暗:--test-respawn-fade ============
+	# 死亡会把 effects 的全屏黑幕 lerp 到 0.35(压暗);若重新部署时没复位, 界面就一直偏暗。
+	# 这里直接读压暗层的 alpha, 比看截图可靠。
+	if ua.has("--test-respawn-fade"):
+		await get_tree().create_timer(2.0).timeout
+		var fr: ColorRect = G.effects.get("_fade_rect")
+		# 枚举所有"几乎铺满屏幕且可见"的遮罩层 —— 直接把变暗源点名, 不靠猜
+		var dump := func(tag: String) -> void:
+			var vp := get_viewport().get_visible_rect().size
+			var found: Array = []
+			for root in [G.effects, G.hud, G.menus]:
+				if root == null:
+					continue
+				for n in (root as Node).find_children("*", "Control", true, false):
+					var c := n as Control
+					if c == null or not c.visible:
+						continue
+					var sz := c.get_global_rect().size
+					if sz.x < vp.x * 0.9 or sz.y < vp.y * 0.9:
+						continue
+					var a: float = c.modulate.a
+					if c is ColorRect:
+						a *= (c as ColorRect).color.a
+					if a > 0.02:
+						found.append("%s/%s a=%.2f" % [(root as Node).name, c.name, a])
+			print("[RESPAWN] %-8s state=%-8s fade=%.3f 全屏遮罩=%s" % [tag, G.state,
+				fr.modulate.a if fr != null else -1.0, str(found)])
+		dump.call("开战")
+		G.game.on_player_death(null)
+		await get_tree().create_timer(1.6).timeout
+		dump.call("阵亡后")
+		G.game.redeploy()
+		await get_tree().create_timer(1.6).timeout
+		dump.call("重部署")
+		print("[RESPAWN] 结论: 重部署后 fade=%.3f -> %s" % [fr.modulate.a if fr != null else -1.0,
+			"PASS" if (fr == null or fr.modulate.a < 0.01) else "FAIL(残留压暗)"])
+		get_tree().quit()
+		return
 	# 地图连切压测:--test-mapcycle <次数>(反复重建世界,抓销毁/重建崩溃)
 	if ua.has("--test-mapcycle"):
 		var midx2 := ua.find("--test-mapcycle")
@@ -846,6 +2041,323 @@ func _ready() -> void:
 			sm.rotation.y = G.player.yaw + PI  # 面向玩家
 			G.world_root.add_child(sm)
 		print("[CLASSES] 已生成四兵种模型合影")
+	# 菜单导航回归:--test-menu-nav(主菜单 → 战役/门户 → 返回主菜单,断言返回后始终有可见 UI)
+	# 复现历史 bug:_hide_screen 加的 UI 锁挡住随后的 _show_screen,导致所有页面消失、无法退出
+	if ua.has("--test-menu-nav"):
+		await get_tree().create_timer(0.6).timeout
+		var mn = _menus
+		# 深路径:若当前在对局里(配合 --test-play),先走暂停菜单「返回主菜单」再验菜单可用
+		if G.state != "menu" and mn.on_quit.is_valid():
+			mn.on_quit.call()
+			await get_tree().create_timer(0.5).timeout
+			var vq: String = mn.qa_visible_screens()
+			print("[NAV] 对局中退回主菜单 → %s %s" % [
+				("OK" if vq.find("menu") >= 0 else "X 失败(空白/无主菜单)"), mn.qa_nav_state()])
+		print("[NAV] 起始 ", mn.qa_nav_state())
+		for step in [["战争故事", "campaign"], ["门户", "portal"]]:
+			var entry: String = step[0]
+			var screen: String = step[1]
+			var ok_in: bool = mn.qa_press_button("menu", entry)
+			await get_tree().create_timer(0.45).timeout
+			print("[NAV] 进入 %s(命中=%s) %s" % [entry, str(ok_in), mn.qa_nav_state()])
+			var ok_back: bool = mn.qa_press_button(screen, "返回主菜单")
+			await get_tree().create_timer(0.45).timeout
+			print("[NAV] 返回(命中=%s) %s" % [str(ok_back), mn.qa_nav_state()])
+			var vis: String = mn.qa_visible_screens()
+			if vis == "":
+				print("[NAV] X 失败:返回后没有任何可见页面(玩家卡在空白界面)")
+			elif vis.find("menu") < 0:
+				print("[NAV] X 失败:返回后主菜单不可见,可见页=", vis)
+			else:
+				print("[NAV] OK:主菜单已回到可见")
+		print("[NAV] 菜单导航回归结束")
+		# 全页面「返回/取消」按钮清扫:任何一条返回路径都不许留下空白界面
+		print("[NAV] ---- 返回按钮全量清扫 ----")
+		for line in String(mn.qa_back_button_sweep()).split("\n"):
+			print("[NAV] ", line)
+		await get_tree().create_timer(0.3).timeout
+		print("[NAV] 清扫后 ", mn.qa_nav_state())
+		# 兜底看门狗:人为制造"菜单态全页面隐藏"的空白态,0.5s 后应自动恢复主菜单
+		mn.hide_all()
+		await get_tree().create_timer(0.15).timeout
+		print("[NAV] 人为空白 ", mn.qa_nav_state())
+		await get_tree().create_timer(0.8).timeout
+		var vw: String = mn.qa_visible_screens()
+		print("[NAV] 看门狗 %s %s" % [("OK:已自动恢复主菜单" if vw.find("menu") >= 0 else "X 失败:仍空白"), mn.qa_nav_state()])
+	# 兵种第二技能冒烟测试:--test-gadgets(配合 --test-play)
+	# 逐兵种切换到第二技能并真实调用 use_gadget,断言:武器槽/部署物/碰撞体/无人机接管全部生效
+	if ua.has("--test-gadgets"):
+		await get_tree().create_timer(1.5).timeout
+		var p2 = G.player
+		for pair in [["assault", "gl"], ["engineer", "rpg"], ["engineer", "coverkit"],
+				["support", "medpack"], ["support", "ammopack"], ["recon", "drone"]]:
+			var cid2: String = pair[0]
+			var gid2: String = pair[1]
+			var lo2: Dictionary = { "gadget": gid2 }
+			p2.give_class(cid2, lo2)
+			await get_tree().process_frame
+			var guns_txt := ""
+			for gg in p2.guns:
+				guns_txt += gg.id + "/"
+			print("[GADGET] %s → %s(×%d) guns=[%s]" % [cid2, p2.gadget_cn, p2.gadget_count, guns_txt])
+			var dep_before: int = G.deployables.size()
+			var coll_before: int = G.colliders.size()
+			p2.use_gadget()
+			await get_tree().create_timer(0.35).timeout
+			print("[GADGET]   use → count=%d deployables %d→%d colliders %d→%d drone_piloting=%s" % [
+				p2.gadget_count, dep_before, G.deployables.size(), coll_before, G.colliders.size(),
+				str(G.drone.piloting if G.drone != null else false)])
+			if gid2 == "drone" and G.drone != null and G.drone.piloting:
+				# 惯性验证:按住前进 → 速度应逐步爬升(不是瞬间满速),松开后滑停
+				var p0: Vector3 = G.drone.pos
+				Input.action_press("move_forward")
+				await get_tree().create_timer(0.15).timeout
+				var v_early: float = G.drone.speed_ms()
+				await get_tree().create_timer(1.0).timeout
+				var v_late: float = G.drone.speed_ms()
+				Input.action_release("move_forward")
+				await get_tree().create_timer(0.5).timeout
+				print("[GADGET]   drone 速度爬升 0.15s=%.1f → 1.15s=%.1f(上限 %.0f) 松开后=%.1f 位移=%.1fm" % [
+					v_early, v_late, G.drone.SPEED, G.drone.speed_ms(), p0.distance_to(G.drone.pos)])
+				var dh = G.hud._drone_hud if G.hud != null else null
+				print("[GADGET]   drone UAV-HUD visible=%s 类=%s 武器面板=%s" % [
+					str(dh != null and dh.visible), str(dh.get_class() if dh != null else "nil"),
+					str(G.hud._wpn_panel.visible if G.hud != null else true)])
+				# 云台相机检查:必须越过前旋翼叶尖(z≈-0.45),且 HUD 世界标记改用无人机相机投影
+				var cam_local: Vector3 = (G.drone.cam.global_position - G.drone.pos).rotated(Vector3.UP, -G.drone.yaw)
+				print("[GADGET]   drone view_cam_is_drone=%s cam_fwd=%.2f(叶尖0.45) cam_dy=%.2f alt=%.1f" % [
+					str(G.view_camera() == G.drone.cam), -cam_local.z, cam_local.y, G.drone.alt_agl()])
+				# 越界失联流程:飞出 100m → 灰白雪花 + 3s 倒计时 → 黑屏 → 自动交还本体视角
+				G.drone.pos += Vector3(400.0, 0.0, 0.0)
+				await get_tree().create_timer(0.4).timeout
+				print("[GADGET]   drone 越界 dist=%.0f/%.0f 信号丢失=%.2f 倒计时=%.1fs piloting=%s" % [
+					G.drone.dist_to_origin, G.drone.RADIUS, G.drone.signal_lost01(),
+					G.drone.lost_countdown(), str(G.drone.piloting)])
+				await get_tree().create_timer(2.0).timeout
+				print("[GADGET]   drone 失联中 信号丢失=%.2f 倒计时=%.1fs piloting=%s 黑屏=%.2f" % [
+					G.drone.signal_lost01(), G.drone.lost_countdown(), str(G.drone.piloting), G.drone.blackout_t])
+				await get_tree().create_timer(0.75).timeout
+				print("[GADGET]   drone 黑屏阶段 信号丢失=%.2f 黑屏剩余=%.2fs piloting=%s" % [
+					G.drone.signal_lost01(), G.drone.blackout_t, str(G.drone.piloting)])
+				await get_tree().create_timer(1.5).timeout
+				print("[GADGET]   drone 断链后 piloting=%s 主相机=%s UAV-HUD=%s 武器面板=%s" % [
+					str(G.drone.piloting), str(G.camera.current),
+					str(G.hud._drone_hud.visible if G.hud != null else false),
+					str(G.hud._wpn_panel.visible if G.hud != null else true)])
+			if gid2 == "gl" or gid2 == "rpg":
+				# 占武器槽的技能:切到技能槽 → 开火 → 换弹全流程(榴弹含中折开膛动画)
+				p2.switch_weapon(p2.guns.size() - 1)
+				await get_tree().process_frame
+				var glg = p2.gun()
+				print("[GADGET]   gl gun=%s ammo=%d/%d proj=%s grav=%.1f breech=%s" % [
+					glg.id, glg.ammo, glg.reserve, str(glg.def.projectile), glg.def.proj_grav,
+					str(glg.group.has_meta("breech"))])
+				glg.trigger_held = true
+				# 先等拔枪动画播完(draw_t≥0.6 才允许击发),再按真实输入路径开火
+				await get_tree().create_timer(0.45).timeout
+				Input.action_press("fire")
+				await get_tree().create_timer(0.3).timeout
+				Input.action_release("fire")
+				await get_tree().create_timer(0.2).timeout
+				print("[GADGET]   gl 开火后 ammo=%d/%d 火箭弹在飞=%s" % [
+					glg.ammo, glg.reserve, str(G.effects.rocket_count() > 0)])
+				glg.reload()
+				for si in 7:
+					await get_tree().create_timer(0.42).timeout
+					var bo: float = glg.reload_ctl.breech_open if glg.reload_ctl != null else -1.0
+					var bn: Node3D = glg.group.get_meta("breech") if glg.group.has_meta("breech") else null
+					# 中折方向验证:枪口点(膛体空间 0,0.052,-0.29)在枪身空间的 y 必须随开膛「下降」
+					var tip_y := 0.0
+					if bn != null:
+						tip_y = (bn.transform * Vector3(0, 0.052, -0.29)).y
+					# 榴弹必须始终"握在左手里"被带到装填口(不是在装填口凭空出现):
+					# 取弹后手与弹的世界距离应恒定在握持偏移(≈9cm)左右
+					var rc = glg.reload_ctl
+					var hand_gap := -1.0
+					if rc != null and rc.new_rocket != null and rc.new_rocket.visible and rc.left_hand != null:
+						hand_gap = rc.left_hand.global_position.distance_to(rc.new_rocket.global_position)
+					print("[GADGET]   gl reload t=%.2f 阶段=%s 开膛=%.2f 膛体rot.x=%.3f 枪口y=%.3f 手弹距=%.3f ammo=%d/%d" % [
+						glg.reload_t, glg.reload_ctl.phase_name() if glg.reload_ctl != null else "?",
+						bo, (bn.rotation.x if bn != null else -9.0), tip_y, hand_gap,
+						glg.ammo, glg.reserve])
+		print("[GADGET] 第二技能冒烟测试完成")
+	# AI 第二技能验证:--test-ai-gadgets(配合 --test-play)
+	# 检查双方 AI 的技能分配覆盖两种选项,并逐项强制触发 GL/掩体/医疗包/弹药包/无人机。
+	if ua.has("--test-ai-gadgets"):
+		await get_tree().create_timer(2.5).timeout
+		var dist: Dictionary = {}
+		for b in G.bots:
+			var key := String(b.class_id) + ":" + String(b.gadget)
+			dist[key] = int(dist.get(key, 0)) + 1
+		print("[AI-GADGET] 分布=", dist)
+		var dep0: int = G.deployables.size()
+		var fired_gl := 0
+		var cover_used := 0
+		var pack_used := 0
+		var drone_used := false
+		for b in G.bots:
+			if not b.alive:
+				continue
+			match String(b.gadget):
+				"coverkit":
+					b.suppress_t = 2.0
+					b.gadget_cd = 0.0
+					b._duty_engineer(0.1)
+					if b.gadget_cd > 0.0:
+						cover_used += 1
+				"medpack", "ammopack":
+					var ally = null
+					for o in G.bots:
+						if o != b and o.alive and o.team == b.team and o.pos.distance_to(b.pos) < 20:
+							ally = o
+							break
+					if ally == null:
+						ally = b
+					if String(b.gadget) == "medpack":
+						ally.health = 30.0
+					else:
+						ally.ammo = 1
+					b.ability_cd = 0.0
+					b._duty_support()
+					if b.ability_cd > 0.0:
+						pack_used += 1
+				"drone":
+					if G.drone != null and not G.drone.piloting and not G.drone.ai_flying and G.drone.launch_ai(b):
+						drone_used = true
+				"gl":
+					var enemy = null
+					for o in G.bots:
+						if o.alive and o.team != b.team:
+							enemy = o
+							break
+					if enemy != null:
+						enemy.pos = b.pos + Vector3(30.0, 0, 0)
+						b.target = enemy
+						b.target_visible = true
+						b.gl_cd = 0.0
+						var d_gl: float = b.pos.distance_to(enemy.pos)
+						b._duty_assault()
+						print("[AI-GADGET] GL尝试 bot=%d team=%s dist=%.1f vis=%s cd=%.2f" % [
+							b.id, b.team, d_gl, str(b.target_visible), b.gl_cd])
+						if b.gl_cd > 0.0:
+							fired_gl += 1
+		await get_tree().create_timer(0.6).timeout
+		print("[AI-GADGET] 结果 GL开火=%d 掩体=%d 补给=%d 无人机=%s 部署物=%d→%d" % [
+			fired_gl, cover_used, pack_used, str(drone_used), dep0, G.deployables.size()])
+		if G.drone != null and G.drone.ai_mode:
+			G.drone.recall("测试完成")
+		get_tree().quit()
+		return
+	# BR 拾取/掉落/空投验证:--test-br-loot(配合 --test-play br br_valley)
+	if ua.has("--test-br-loot"):
+		await get_tree().create_timer(2.0).timeout
+		var brl = G.br
+		if brl == null:
+			print("[BR-LOOT] 失败:BR 模式未启动")
+			get_tree().quit()
+			return
+		var ok_drop := false
+		var ok_airdrop := false
+		var bot = null
+		for b in G.bots:
+			if b != null and b.alive:
+				bot = b
+				break
+		if bot != null:
+			# NPC 死亡掉落:强制丢一把 AK,把玩家放到掉落点按 E 拾取(不跨帧,避免跳伞状态重置玩家位置)
+			bot.weapon_id = "ak"
+			bot.br_weapon_q = 1
+			brl._drop_victim_loot(bot)
+			G.player.pos = bot.pos + Vector3(0.6, 0, 0)
+			ok_drop = brl.try_player_pickup(G.player)
+			print("[BR-LOOT] NPC掉落拾取=%s 玩家主武器=%s 品质加成=%s" % [
+				str(ok_drop), G.player.gun().id, str(G.player.gun().def.damage)])
+		# 空投箱:生成在玩家脚下,验证 E 能捡起(史诗武器+护甲+医疗包)
+		var air_pos: Vector3 = G.player.pos + Vector3(1.0, 0, 0)
+		brl._place_loot(air_pos, "airdrop", "scar", 2)
+		G.player.pos = air_pos + Vector3(0.4, 0, 0)
+		ok_airdrop = brl.try_player_pickup(G.player)
+		print("[BR-LOOT] 空投拾取=%s 主武器=%s 护甲=%.0f 医疗包=%d" % [
+			str(ok_airdrop), G.player.gun().id, G.player.br_armor, G.player.br_medkits])
+		print("[BR-LOOT] 完成 drop=%s airdrop=%s" % [str(ok_drop), str(ok_airdrop)])
+		get_tree().quit()
+		return
+	# BR 小队/永久淘汰验证:--test-br-squads(配合 --test-play br br_valley)
+	if ua.has("--test-br-squads"):
+		await get_tree().create_timer(2.0).timeout
+		var sqc: Dictionary = {}
+		for b in G.bots:
+			sqc[b.squad_id] = int(sqc.get(b.squad_id, 0)) + 1
+		print("[BR-SQ] 小队人数分布=", sqc)
+		# 1) 玩家子弹必须能命中“同 team 但不同小队”的 NPC(禁区冲突按小队,不按阵营)
+		var same_team_enemy = null
+		for b in G.bots:
+			if b.alive and b.team == G.player.team and b.squad_id != GameMode_BR.BR_PLAYER_SQUAD:
+				same_team_enemy = b
+				break
+		var probe_ok := false
+		if same_team_enemy != null:
+			var eye: Vector3 = G.camera.global_position
+			var fdir: Vector3 = -G.camera.global_transform.basis.z
+			same_team_enemy.pos = eye + fdir * 20.0 - Vector3(0, 1.05, 0)
+			var pr: Dictionary = Utils.probe_actor(same_team_enemy, G.player, G.player.team, eye, fdir, 30.0)
+			probe_ok = not pr.is_empty()
+		print("[BR-SQ] 同阵营不同小队可命中=%s" % str(probe_ok))
+		# 2) NPC 阵亡必须永久淘汰,不再进入复活队列
+		var victim2 = null
+		for b in G.bots:
+			if b.alive and b.squad_id != GameMode_BR.BR_PLAYER_SQUAD:
+				victim2 = b
+				break
+		var perm_ok := false
+		if victim2 != null:
+			var before_alive: int = G.br.br_alive
+			G.br.on_player_killed(G.player, victim2)
+			perm_ok = G.br._eliminated.has(victim2) and not G.br._br_redeploy_queue.has(victim2) \
+				and G.br.br_alive == before_alive - 1
+		print("[BR-SQ] NPC永久淘汰=%s(br_alive 已减,复活队列无此NPC)" % str(perm_ok))
+		print("[BR-SQ] 完成 probe=%s permanent=%s" % [str(probe_ok), str(perm_ok)])
+		get_tree().quit()
+		return
+	# BR 开局兵种道具验证:--test-br-gadget-start(配合 --test-play br br_valley)
+	if ua.has("--test-br-gadget-start"):
+		await get_tree().create_timer(2.0).timeout
+		var fails2: Array = []
+		for pair in [["assault", "gl"], ["engineer", "rpg"], ["engineer", "coverkit"],
+				["support", "medpack"], ["support", "ammopack"], ["recon", "drone"]]:
+			var cid3: String = pair[0]
+			var gid3: String = pair[1]
+			G.player.give_class(cid3, { "gadget": gid3 })
+			G.player.br_strip_inventory()
+			var has_weapon: bool = false
+			var ids: Array = []
+			for g in G.player.guns:
+				ids.append(g.id)
+				if g.id == gid3:
+					has_weapon = true
+			var ok: bool = false
+			if gid3 == "gl" or gid3 == "rpg":
+				ok = has_weapon
+			else:
+				ok = G.player.gadget_count > 0 and G.player.gadget_count == G.player.gadget_max
+			print("[BR-GADGET-START] %s:%s guns=%s count=%d/%d ok=%s" % [
+				cid3, gid3, str(ids), G.player.gadget_count, G.player.gadget_max, str(ok)])
+			if not ok:
+				fails2.append(cid3 + ":" + gid3)
+		print("[BR-GADGET-START] done fails=%s" % str(fails2))
+		get_tree().quit()
+		return
+	# BR 中途离场结算验证:--test-br-abort(配合 --test-play br br_valley)
+	if ua.has("--test-br-abort"):
+		await get_tree().create_timer(2.0).timeout
+		G.portal.end_match({ "aborted": true })
+		await get_tree().create_timer(0.5).timeout
+		var r2: Dictionary = G.menus._portal_last_result if G.menus != null else {}
+		print("[BR-ABORT] state=%s active=%s title_result=%s rank=%s team_rank=%s winner=%s" % [
+			G.state, str(G.portal.active), str(r2.get("aborted", false)),
+			str(r2.get("rank", 0)), str(r2.get("team_rank", 0)), str(r2.get("winner", ""))])
+		get_tree().quit()
+		return
 	# Sky3D 调试:--test-sky
 	if ua.has("--test-sky"):
 		await get_tree().create_timer(2.0).timeout
@@ -1060,6 +2572,11 @@ func _ready() -> void:
 		print("[BENCH] --bench 开启:目标 %d 帧 标签=%s(垂直同步已关)" % [_bench_target, _bench_label])
 	_bench_veh_on = ua.has("--bench-veh")
 	_bsys_on = ua.has("--bench-sys")
+	# [PERF] 实验:物理服务器空转验证(--physoff;项目全自研物理,无 _physics_process,
+	# Godot Physics 60Hz 空转白收税;ray query 按需执行不依赖 tick 频率)
+	if ua.has("--physoff"):
+		Engine.physics_ticks_per_second = 5
+		print("[PERF] 实验: physics_ticks 60→5(--physoff)")
 	_perf_mon = ua.has("--perf-monitor")
 	if _perf_mon:
 		_build_perf_monitor()
@@ -1490,8 +3007,9 @@ func apply_graphics() -> void:
 	if G.scope != null and G.scope.has_method("apply_graphics"):
 		G.scope.apply_graphics()
 	# 垂直同步(0=关 1=开 2=自适应;headless/Web 无操作窗口时跳过)
+	# 默认关(竞技 FPS 惯例):vsync 开=帧率锁屏参,120+ 帧目标无从谈起;存档值优先
 	if not OS.has_feature("web") and DisplayServer.get_name() != "headless":
-		var vsync: int = int(s.get("vsync", 1))
+		var vsync: int = int(G.settings.get("vsync", 0))
 		DisplayServer.window_set_vsync_mode(
 			DisplayServer.VSYNC_ADAPTIVE if vsync == 2 else (DisplayServer.VSYNC_ENABLED if vsync == 1 else DisplayServer.VSYNC_DISABLED))
 	# 粒子
@@ -1599,8 +3117,13 @@ func _process(dt_raw: float) -> void:
 					G.player.slide_t = 0.85
 					G.player.slide_dir = Vector2(0, -1)
 			# 战役过场:相机由 campaign 接管(不跑玩家相机/输入),结束交还
+			var _pt0 := 0
+			if _bsys_on:
+				_pt0 = Time.get_ticks_usec()
 			if not (G.campaign != null and G.campaign.is_cutscene()):
 				G.player.update_player(dt)
+			if _bsys_on:
+				_bsys_tick("player", _pt0)
 		var _bt := 0
 		if _bsys_on or _perf_mon:
 			_bt = Time.get_ticks_usec()
@@ -1635,7 +3158,8 @@ func _process(dt_raw: float) -> void:
 		var _pv_pos: Vector3 = G.player.pos if (G.player != null and G.player.alive) else Vector3.ZERO
 		var _pv_ok: bool = G.player != null and G.player.alive
 		var _frm := Engine.get_process_frames()
-		var _veh_lod_off: bool = OS.get_cmdline_user_args().has("--veh-lod-off")
+		# [PERF 9/6] 开关静态缓存,免每帧新建字符串数组(审计 P1-7)
+		var _veh_lod_off: bool = Utils.FLAG_VEH_LOD_OFF
 		for v in G.vehicles:
 			if not _veh_lod_off and _pv_ok and v.pos.distance_to(_pv_pos) > 70.0 and (_frm + v.get_instance_id()) % 2 == 1:
 				v.pos.x += -sin(v.yaw) * v.speed * dt
@@ -1680,8 +3204,9 @@ func _process(dt_raw: float) -> void:
 		else:
 			_camera.global_position.y = maxf(0.32, _camera.global_position.y - dt * 1.4)
 			_camera.rotation.z = minf(0.55, _camera.rotation.z + dt * 0.5)
-	# 玩家身体模型:第一人称显示双腿 + 躯干/双肩(upper 顶面 1.35m 低于站立眼高
-	# 1.62m,平视不穿模;低头/蹲姿可见胸口属正常);阵亡倒地与载具驾驶隐藏;
+	# 玩家身体模型:第一人称显示双腿 + 躯干/双肩 + 胸口(GLB 真胸腔顶面 1.595m,冲刺前倾
+	# 最高 ~1.62m,低于站立眼高 1.70m 约 8cm ⇒ 平视不穿模、低头可见胸口;眼高若回落到
+	# 1.62 会重现"胸口被 near=0.08 裁掉/看进内壁");阵亡倒地与载具驾驶隐藏;
 	# 战役过场由 campaign 控制可见性,跳过覆盖。
 	# --test-pose 姿势外视调试除外(相机移到侧后方观察全身)。
 	if G.player != null and G.player.body != null \
@@ -1843,13 +3368,20 @@ func _process(dt_raw: float) -> void:
 				_perf_min, _perf_max, mem, G.state])
 
 	# [8/10] 完整性能基准采样:--bench(逐帧采集,到帧写报告退出)
+	# [PERF 9/6] RenderingServer.get_rendering_info 每次调用强制 CPU/GPU 同步 flush,
+	# 每帧 3 次会把被测帧率本身压低(测量探针干扰被测系统);降为每 30 帧刷新一次缓存值,
+	# 帧时间/process/physics/mem 仍逐帧采集,报告统计口径不变
 	if _bench_on and G.state == "playing":
 		_bench_fts.append(dt_raw * 1000.0)
 		_bench_proc.append(Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0)
 		_bench_phys.append(Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0)
-		_bench_dc.append(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME))
-		_bench_prims.append(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME))
-		_bench_objs.append(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_OBJECTS_IN_FRAME))
+		if Engine.get_process_frames() % 30 == 0:
+			_bench_dc_last = RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+			_bench_prims_last = RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME)
+			_bench_objs_last = RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_OBJECTS_IN_FRAME)
+		_bench_dc.append(_bench_dc_last)
+		_bench_prims.append(_bench_prims_last)
+		_bench_objs.append(_bench_objs_last)
 		_bench_nodes.append(int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT)))
 		_bench_mem.append(OS.get_static_memory_usage() / 1048576.0)
 		_bench_n += 1
@@ -2036,3 +3568,2120 @@ func _dump_stress() -> void:
 	print("[STRESS] ===== 汇总 ===== frames=%d avg=%.1ffps avg_ft=%.2fms p95=%.2fms p99=%.2fms max=%.2fms >250ms=%d >100ms=%d" % [
 		n, n / total, total / n * 1000.0, p95_ms, p99_ms, sorted[n - 1] * 1000.0, _ps_gt250, _ps_gt100])
 
+
+
+## 载具视角 QA:截一帧存 PNG
+func _qa_shot(tag: String) -> void:
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var img := get_viewport().get_texture().get_image()
+	if img != null:
+		img.save_png("E:/工作目录2/models_probe/qa_%s.png" % tag)
+		print("[TEST-SHOT] ", tag)
+
+
+## 第一人称腰射(hip)枪位截图:--test-hip-shot(配合 --test-play,可前置 --test-gun <id>)
+## 部署后静止站立不 ADS,待切枪动画与 sway 稳定后正前视角截一帧 —— 用于
+## 对比参考游戏的持枪画面横向位置(枪中轴应在画面中心偏右一点点)
+func _run_hip_shot() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[TEST] 玩家未部署,hip 截图跳过")
+		get_tree().quit()
+		return
+	# ★等抽枪动画真正走完再截: 旧版固定等 2.2s, 而开局(127 个 AI 同场)帧率低,
+	#   draw_t 还在 0.2 附近 = 枪仍在"下落姿态"(实测 pos.y 被压低 0.29m),
+	#   截到的是过渡帧、手臂因此整条落在画面外 —— 与真实持枪姿态完全不符。
+	var waited2 := 0.0
+	while waited2 < 12.0:
+		var g_now = G.player.gun()
+		if g_now != null and float(g_now.draw_t) >= 0.99:
+			break
+		await get_tree().create_timer(0.2).timeout
+		waited2 += 0.2
+	await get_tree().create_timer(0.5).timeout
+	var gid: String = G.player.gun().id if G.player.gun() != null else "default"
+	await _qa_shot("hip_" + gid)
+	print("[TEST] hip 截图完成:", gid, " 等抽枪 %.1fs" % waited2)
+	get_tree().quit()
+
+
+## NPC 第一人称参考图:--test-npc-fp
+## 把相机搬到一名 NPC 的 Head 骨位置, 把 Head/Neck 缩到 1cm(去掉头部、**手臂保留**),
+## 分别用「正前视」「俯视持枪区」「侧前方 45°」三个角度截图 —— 用来判断 NPC 的骨骼手臂
+## 到底怎么弯、手腕离枪多远、肘往哪边鼓(作为玩家 FP 手臂摆位的基准)。
+func _run_npc_fp_shot() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.bots.is_empty()) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	await get_tree().create_timer(2.0).timeout
+	var b = null
+	for x in G.bots:
+		if x.alive and x.mesh != null and is_instance_valid(x.mesh):
+			b = x
+			break
+	if b == null:
+		print("[TEST] 没有可用 NPC, npc-fp 跳过")
+		get_tree().quit()
+		return
+	var skel: Skeleton3D = b.mesh.get_meta("skel") if b.mesh.has_meta("skel") else null
+	if skel == null:
+		print("[TEST] NPC 无骨架, npc-fp 跳过")
+		get_tree().quit()
+		return
+	for bn in ["Head", "Neck"]:                       # 只缩头颈, 手臂保留
+		var bi := skel.find_bone(bn)
+		if bi >= 0:
+			skel.set_bone_pose_scale(bi, Vector3.ONE * 0.01)
+	var hi := skel.find_bone("Head")
+	if hi < 0:
+		print("[TEST] 无 Head 骨")
+		get_tree().quit()
+		return
+	var head_pos: Vector3 = skel.global_transform * skel.get_bone_global_pose(hi).origin
+	var fwd := Vector3(-sin(b.yaw), 0, -cos(b.yaw))
+	var hand_pos := head_pos
+	var hand_i := skel.find_bone("HandR")
+	if hand_i >= 0:
+		hand_pos = skel.global_transform * skel.get_bone_global_pose(hand_i).origin
+	print("[TEST] NPC-FP 头位=%s 手位=%s yaw=%.2f" % [head_pos, hand_pos, b.yaw])
+	var cam := Camera3D.new()
+	cam.fov = 75.0
+	cam.near = 0.02
+	G.main.add_child(cam)
+	cam.make_current()
+	cam.global_position = head_pos
+	cam.look_at(head_pos + fwd * 4.0, Vector3.UP)
+	await get_tree().create_timer(0.4).timeout
+	await _qa_shot("npc_fp_front")
+	cam.look_at(hand_pos * 0.75 + head_pos * 0.25, Vector3.UP)
+	await get_tree().create_timer(0.3).timeout
+	await _qa_shot("npc_fp_hand")
+	var side := head_pos + Vector3(-sin(b.yaw + 0.9), 0, -cos(b.yaw + 0.9)) * 1.1
+	cam.global_position = side + Vector3(0, 0.12, 0)
+	cam.look_at(hand_pos + Vector3(0, 0.06, 0), Vector3.UP)
+	await get_tree().create_timer(0.3).timeout
+	await _qa_shot("npc_fp_side")
+	print("[TEST] npc-fp 截图完成")
+	get_tree().quit()
+
+
+## 主菜单整屏截图:--test-menu-shot(不部署;等菜单背景城市构建完成再截)
+func _run_menu_shot() -> void:
+	# 菜单背景城市在主菜单显示后异步构建([PERF] 菜单背景城市构建完成),给足 6s
+	await get_tree().create_timer(6.0).timeout
+	await _qa_shot("menu_main")
+	print("[TEST] 主菜单截图完成")
+	get_tree().quit()
+
+
+## ADS 三点一线批量验证:--test-ads-line <all|id>
+## 每把枪满镜后 muzzle 世界坐标 unproject 到屏幕,输出与屏幕中心的偏差
+## (px 与半屏高百分比);偏差 >6% 半屏高判 FAIL(doom 视角)
+func _run_ads_line(which: String) -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[ADS-LINE] 玩家未部署,跳过")
+		get_tree().quit()
+		return
+	var ids: Array = []
+	if which == "all":
+		for wd_id in WeaponsData.W().keys():
+			ids.append(wd_id)
+	else:
+		ids.append(which)
+	var vp_size := get_viewport().get_visible_rect().size
+	var center := vp_size * 0.5
+	var fail := 0
+	var tested := 0
+	for gid in ids:
+		if not WeaponsData.W().has(gid):
+			continue
+		var def = WeaponsData.W()[gid]
+		if def.scope:
+			continue   # 狙击满镜走镜内遮罩,枪模不可见,无三点一线概念
+		# 装配并切枪
+		for g in G.player.guns:
+			G.vm_camera.remove_child(g.group)
+			g.group.queue_free()
+		G.player.guns = [Gun.new(gid, G.player)]
+		G.vm_camera.add_child(G.player.guns[0].group)
+		G.player.gun_index = 0
+		G.player.gun().equip()
+		Input.action_press("ads")
+		await get_tree().create_timer(1.2).timeout
+		var gun = G.player.gun()
+		var mzl: Node3D = gun.group.get_meta("muzzle", null)
+		if mzl == null:
+			print("[ADS-LINE] %-8s 无 muzzle meta,跳过" % gid)
+			continue
+		var wpos: Vector3 = mzl.global_position
+		var sp: Vector2 = get_viewport().get_camera_3d().unproject_position(wpos)
+		var dy_pct: float = (sp.y - center.y) / (vp_size.y * 0.5) * 100.0
+		var dx_pct: float = (sp.x - center.x) / (vp_size.x * 0.5) * 100.0
+		tested += 1
+		var ok := absf(dy_pct) <= 6.0 and absf(dx_pct) <= 6.0
+		if not ok:
+			fail += 1
+		print("[ADS-LINE] %-8s 枪口屏幕偏差 dx=%+.1f%% dy=%+.1f%% (%s)" % [
+			gid, dx_pct, dy_pct, "OK" if ok else "FAIL"])
+		Input.action_release("ads")
+	print("[ADS-LINE] 完成:测试 %d 枪,FAIL %d 枪" % [tested, fail])
+	get_tree().quit()
+
+
+## 载具战地式座位/视角序列验证:上车(炮手位=驾驶+开炮) → 第三人称开炮 →
+## 右键 ADS(第一人称目镜,藏炮管) → 观察位(第三人称旁观,AA 机枪开火)
+func _run_vehicle_qa(vtype: String) -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[TEST] 玩家未部署,载具 QA 跳过")
+		return
+	var v := Vehicle.new(G.player.pos.x + 6.0, G.player.pos.z, 0.0, vtype)
+	G.vehicles.append(v)
+	G.main.add_child(v)
+	await get_tree().create_timer(0.8).timeout
+	G.player.enter_vehicle(v)
+	print("[TEST] 已上车:", vtype)
+	# [FIX 船桨轮] 断言:轮自转节点名单不得混入轮拱/装饰件(WheelArch 等)
+	if v.mesh.has_meta("wheels"):
+		var wn := PackedStringArray()
+		for w in v.mesh.get_meta("wheels"):
+			wn.append(String(w.name))
+		var arch_bad := 0
+		for n in wn:
+			if n.contains("Arch"):
+				arch_bad += 1
+		print("[TEST] wheels(%d): %s" % [wn.size(), ", ".join(wn)])
+		print("[TEST] 轮名单断言: %s" % ["OK 无 Arch 误配" if arch_bad == 0 else "FAIL %d 个 Arch 误配" % arch_bad])
+	await get_tree().create_timer(1.6).timeout
+	await _qa_shot("veh_" + vtype + "_tp")
+	# TP 炮塔跟随实测:轨道相机左转 0.8rad → 炮塔应收敛到同向
+	var yaw_before_tp: float = v.turret_yaw
+	v.camera_ctl.apply_tp_orbit(-400.0, 0.0)   # 像素:≈0.88rad
+	await get_tree().create_timer(1.5).timeout
+	print("[TEST] TP 炮塔跟随: yaw %.3f → %.3f (%s)" % [yaw_before_tp, v.turret_yaw,
+		"OK" if absf(v.turret_yaw - yaw_before_tp) > 0.3 else "FAIL 不跟随"])
+	Input.action_press("fire")
+	await get_tree().create_timer(0.35).timeout
+	Input.action_release("fire")
+	await get_tree().create_timer(0.8).timeout
+	await _qa_shot("veh_" + vtype + "_tp_fire")
+	Input.action_press("ads")
+	await get_tree().create_timer(1.1).timeout
+	# ADS 炮塔跟随实测:目镜内鼠标右转 → 炮塔 yaw 应显著变化(旧版死循环恒 0)
+	var yaw_before_ads: float = v.turret_yaw
+	v.camera_ctl.apply_look(300.0, 0.0)
+	await get_tree().create_timer(1.6).timeout
+	print("[TEST] ADS 炮塔跟随: yaw %.3f → %.3f (%s)" % [yaw_before_ads, v.turret_yaw,
+		"OK" if absf(v.turret_yaw - yaw_before_ads) > 0.1 else "FAIL 不跟随"])
+	await _qa_shot("veh_" + vtype + "_ads")
+	Input.action_release("ads")
+	await get_tree().create_timer(0.7).timeout
+	G.player._cycle_vehicle_station(v)
+	print("[TEST] 已切观察位")
+	await get_tree().create_timer(1.2).timeout
+	await _qa_shot("veh_" + vtype + "_observer")
+	if vtype == "aa":
+		Input.action_press("fire")
+		await get_tree().create_timer(0.5).timeout
+		await _qa_shot("veh_" + vtype + "_observer_fire")
+		Input.action_release("fire")
+	G.player._cycle_vehicle_station(v)
+	await get_tree().create_timer(0.6).timeout
+	print("[TEST] 载具视角 QA 序列完成:", vtype)
+	get_tree().quit()
+
+
+## 吉普乘客位 QA:--test-jeep-passenger(配合 --test-play conquest)
+## 编排:NPC 司机登车起步 → 玩家上车(应坐乘客位不顶司机/强制第一人称) →
+## FP 开火 → F 换岗守卫(司机在位不可抢驾驶位) → 玩家下车恢复
+func _run_jeep_passenger_qa() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[JEEPSAFE] 玩家未部署,QA 跳过")
+		return
+	var p = G.player
+	# 选址:远离最近载具,避免误抓战场吉普
+	var vx: float = p.pos.x + 9.0
+	var vz: float = p.pos.z
+	for ov in G.vehicles:
+		if not ov.dead and Vector2(ov.pos.x - vx, ov.pos.z - vz).length() < 30.0:
+			vx = p.pos.x - 12.0
+			break
+	var v := Vehicle.new(vx, vz, 0.0, "jeep")
+	G.vehicles.append(v)
+	G.main.add_child(v)
+	await get_tree().create_timer(0.8).timeout
+	# 召同队空闲 bot 当司机(步行登车)
+	var driver = null
+	for b in G.bots:
+		if b.alive and b.team == p.team and b.vehicle == null:
+			driver = b
+			break
+	if driver == null:
+		print("[JEEPSAFE] FAIL 无可用 bot 当司机")
+		get_tree().quit()
+		return
+	driver.board_vehicle_as_driver(v)
+	print("[JEEPSAFE] 已指派 bot=%d 登车当司机,等待登车…" % driver.id)
+	waited = 0.0
+	while (v.driver == null) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if v.driver == null:
+		print("[JEEPSAFE] FAIL bot 登车超时(25s)")
+		get_tree().quit()
+		return
+	await get_tree().create_timer(1.2).timeout
+	var drv_pos0: Vector3 = v.pos
+	print("[JEEPSAFE] 司机就位 bot=%d vehicle=%s 车速=%.2f" % [driver.id, "司机本车" if driver.vehicle == v else "未挂车", absf(v.speed)])
+	await get_tree().create_timer(1.5).timeout
+	print("[JEEPSAFE] NPC 驾驶确认: ai_input=%s 车位移=%.2fm" % ["有" if v.ai_input != null else "无", Vector2(v.pos.x - drv_pos0.x, v.pos.z - drv_pos0.z).length()])
+	# 玩家上车(核心断言:不顶司机 + 乘客位 + 第三人称)
+	var drv_before = v.driver
+	p.enter_vehicle(v)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var ok_driver: bool = v.driver == drv_before and v.driver != p
+	var ok_gunner: bool = v.gunner == p
+	var ok_fp: bool = p._veh_crew == 1        # [2026-09-11] 乘客位不再强制第一人称
+	var ok_view: bool = v.camera_ctl != null and v.camera_ctl.view == FirstPersonVehicleController.VehView.THIRD_PERSON
+	print("[JEEPSAFE] 断言①不顶司机: %s (driver==原NPC:%s)" % ["OK" if ok_driver else "FAIL", str(ok_driver)])
+	print("[JEEPSAFE] 断言②玩家乘客位: %s (gunner==player:%s)" % ["OK" if ok_gunner else "FAIL", str(ok_gunner)])
+	print("[JEEPSAFE] 断言③乘客位: %s (crew=%d)" % ["OK" if ok_fp else "FAIL", p._veh_crew])
+	print("[JEEPSAFE] 断言④第三人称视图: %s (view=%d)" % ["OK" if ok_view else "FAIL", v.camera_ctl.view if v.camera_ctl != null else -1])
+	await get_tree().create_timer(1.2).timeout
+	await _qa_shot("jeepsafe_enter")
+	# 乘客位开火(个人武器完整管线)
+	Input.action_press("fire")
+	await get_tree().create_timer(0.4).timeout
+	await _qa_shot("jeepsafe_fire")
+	Input.action_release("fire")
+	await get_tree().create_timer(0.6).timeout
+	# NPC 继续驾驶确认(玩家在车上不应弃车/停车)
+	var pos_mid: Vector3 = v.pos
+	await get_tree().create_timer(1.5).timeout
+	var moved: float = Vector2(v.pos.x - pos_mid.x, v.pos.z - pos_mid.z).length()
+	print("[JEEPSAFE] 断言⑤NPC继续驾驶: %s (1.5s 位移 %.2fm 速度 %.2f)" % ["OK" if v.driver == drv_before else "FAIL", moved, absf(v.speed)])
+	# F 换岗守卫:司机在位时不可抢驾驶位
+	p._cycle_vehicle_station(v)
+	await get_tree().create_timer(0.5).timeout
+	var ok_guard: bool = v.driver == drv_before and p._veh_crew == 1
+	print("[JEEPSAFE] 断言⑥F守卫拒抢驾驶位: %s (crew=%d)" % ["OK" if ok_guard else "FAIL", p._veh_crew])
+	# 玩家下车恢复
+	p.exit_vehicle()
+	await get_tree().create_timer(0.5).timeout
+	print("[JEEPSAFE] 断言⑦下车恢复: %s (vehicle=%s gunner清理=%s fp=%s)" % [
+		"OK" if p.vehicle == null and v.gunner == null and not p._veh_fp_passenger else "FAIL",
+		"无" if p.vehicle == null else "仍在车", str(v.gunner == null), str(p._veh_fp_passenger)])
+	await _qa_shot("jeepsafe_exit")
+	print("[JEEPSAFE] QA 序列完成")
+	get_tree().quit()
+
+
+## 空中载具建模 QA:GLB 悬浮在玩家上空,四角度截图 + 契约节点检查
+func _run_aircraft_qa(kind: String) -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[TEST] 玩家未部署,空中 QA 跳过")
+		return
+	var m: Node3D
+	match kind:
+		"heli":
+			m = AircraftModels.build_heli("us")
+		"jet":
+			m = AircraftModels.build_jet("us")
+		_:
+			m = VehicleModels.build_tank()
+	var base: Vector3 = G.player.pos + Vector3(0, 8.0, 0)
+	m.position = base
+	G.main.add_child(m)
+	await get_tree().create_timer(0.5).timeout
+	print("[TEST-AIR] kind=", kind, " rotor=", m.has_meta("rotor"), " tail=", m.has_meta("tail_rotor"),
+		" burner=", m.has_meta("burner"))
+	# 独立 QA 相机(make_current 顶掉玩家第一人称相机 —— 玩家每帧覆写 G.camera)
+	var cam := Camera3D.new()
+	cam.fov = 55.0
+	G.main.add_child(cam)
+	cam.make_current()
+	for a in [[0.0, 15.0, 3.5, "front"], [16.0, 0.0, 2.5, "side"], [9.0, 6.0, 9.0, "top"], [-14.0, 10.0, 6.0, "rear"]]:
+		cam.global_position = base + Vector3(a[0], a[2], a[1])
+		cam.look_at(base)
+		await get_tree().process_frame
+		await get_tree().process_frame
+		await _qa_shot("air_" + kind + "_" + a[3])
+	print("[TEST-AIR] 完成:", kind)
+	get_tree().quit()
+
+
+## 车底专项 QA:全部载具悬空 10m,仰拍车底 + 数值扫描穿透节点
+## 每台 6 张:正下方 under / 斜下 45° ×4 / 远景 far;报告写 belly_report.txt
+## 骑乘/驾驶姿态 QA:--test-ride [motorcycle|jeep|all](配合 --test-play conquest <图>)
+## 目的: 验证"摩托骑手踩踏板/前倾/双手抓把(随转向)"与"吉普第一人称双手握方向盘 +
+## 可见下半身"。第三人称用独立相机多角度拍;第一人称必须切回玩家眼位相机(G.camera),
+## 否则拍到的只是自由相机。
+func _run_floor_qa() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[FLOOR-QA] 玩家未部署,跳过")
+		get_tree().quit()
+		return
+	var n_all: int = G.floor_boxes.size()
+	var n_high := 0
+	var n_hit := 0
+	var worst: float = 0.0
+	var samples: Array = []
+	for b in G.floor_boxes:
+		var top: float = b.position.y + b.size.y
+		if top < 0.45:
+			continue
+		n_high += 1
+		var cx: float = b.position.x + b.size.x * 0.5
+		var cz: float = b.position.z + b.size.z * 0.5
+		# 参考高度取"站在台阶下方半步" —— 这正是玩家从下往上走时的真实状态
+		var got: float = G.stand_h(top - 0.5, cx, cz)
+		var err: float = absf(got - top)
+		if err < 0.05:
+			n_hit += 1
+		elif err > worst:
+			worst = err
+		if n_high <= 8:
+			samples.append("  top=%.2f @(%.1f,%.1f) -> stand_h=%.2f %s" % [
+				top, cx, cz, got, "OK" if err < 0.05 else "MISS"])
+	print("[FLOOR-QA] 可行走面 %d 个(其中台阶/平台面 %d 个)" % [n_all, n_high])
+	for t in samples:
+		print("[FLOOR-QA] ", t)
+	print("[FLOOR-QA] 从下方半步测台面: 命中 %d/%d  %s (最大偏差 %.2f)" % [
+		n_hit, n_high, "OK" if n_hit == n_high else "FAIL", worst])
+	# 玩家实际接地入口(self 应该能用 stand_h 站上台面)
+	var h0: float = G.stand_h(G.player.pos.y, G.player.pos.x, G.player.pos.z)
+	print("[FLOOR-QA] 玩家当前落地高度 stand_h=%.2f" % h0)
+	get_tree().quit()
+
+
+func _run_ride_qa(kind: String) -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[RIDE-QA] 玩家未部署,跳过")
+		get_tree().quit()
+		return
+	var kinds: Array = ["motorcycle", "jeep", "tank", "apc", "aa"] if kind == "all" else [kind]
+	var cam := Camera3D.new()
+	cam.fov = 55.0
+	G.main.add_child(cam)
+	cam.make_current()
+	for k in kinds:
+		var v := Vehicle.new(G.player.pos.x + 5.0, G.player.pos.z, 0.0, str(k))
+		G.vehicles.append(v)
+		G.main.add_child(v)
+		await get_tree().create_timer(0.6).timeout
+		G.player.enter_vehicle(v)
+		await get_tree().create_timer(1.6).timeout
+		var base: Vector3 = v.pos
+		# [RIDE-DIAG] 乘员模型骨架世界位(相对 Hips 的偏移 → 看头/胸是否错位)
+		var vb = G.player.veh_body
+		if vb != null and vb.has_meta("skel"):
+			var skr: Skeleton3D = vb.get_meta("skel")
+			if skr != null:
+				var hips := Vector3.ZERO
+				var hi: int = skr.find_bone("Hips")
+				if hi >= 0:
+					hips = skr.global_transform * skr.get_bone_global_pose(hi).origin
+				var line := "[RIDE-DIAG] %s org=%s hips=(%.2f,%.2f,%.2f)" % [
+					k, str(vb.global_position), hips.x, hips.y, hips.z]
+				for bn in ["Spine", "Chest", "Neck", "Head", "UpperArmL", "ThighL"]:
+					var bi: int = skr.find_bone(bn)
+					if bi >= 0:
+						var w: Vector3 = skr.global_transform * skr.get_bone_global_pose(bi).origin
+						line += " | %s d=(%.2f,%.2f,%.2f)" % [bn,
+							w.x - hips.x, w.y - hips.y, w.z - hips.z]
+				print(line)
+		var shots := [
+			[3.3, 1.3, 0.1, "side"],
+			[2.5, 1.4, -2.5, "front45"],
+			[0.0, 1.5, -3.2, "front"],
+			[2.3, 1.3, 2.5, "rear45"],
+			[3.3, 0.9, 0.1, "side_low"],
+		]
+		for s in shots:
+			cam.global_position = base + Vector3(s[0], s[1], s[2])
+			cam.look_at(base + Vector3(0, 1.0, 0), Vector3.UP)
+			await get_tree().process_frame
+			await get_tree().process_frame
+			await _qa_shot("ride_%s_tp_%s" % [k, s[3]])
+		# 转向跟随:按 D 打方向(不踩油门 ⇒ 车不动) —— 看手臂是否跟着车把/方向盘转
+		Input.action_press("move_right")
+		await get_tree().create_timer(1.0).timeout
+		cam.global_position = base + Vector3(3.3, 1.3, 0.1)
+		cam.look_at(base + Vector3(0, 1.0, 0), Vector3.UP)
+		await get_tree().process_frame
+		await _qa_shot("ride_%s_tp_steer" % k)
+		Input.action_release("move_right")
+		await get_tree().create_timer(0.6).timeout
+		# ---- 载具固定第三人称(2026-09-11 用户定): 第一人称段落已移除 ----
+		# 继续检查"唯一的第一人称" = 炮手 ADS 目镜: 相机眼位随**炮塔节点**旋转,
+		# 若锚点算错, 转头/俯仰时相机就会穿出车体(用户报"ADS 有穿帮")。
+		if v.has_turret():
+			G.camera.make_current()
+			Input.action_press("ads")
+			await get_tree().create_timer(1.1).timeout
+			await _qa_shot("ads_%s_front" % k)
+			v.camera_ctl.apply_look(320.0, 0.0)      # 炮塔右转 ~0.70rad
+			await get_tree().create_timer(1.1).timeout
+			await _qa_shot("ads_%s_turn" % k)
+			v.camera_ctl.apply_look(0.0, 300.0)      # 抬头
+			await get_tree().create_timer(1.0).timeout
+			await _qa_shot("ads_%s_up" % k)
+			v.camera_ctl.apply_look(0.0, -760.0)     # 低头(~77°)
+			await get_tree().create_timer(1.0).timeout
+			await _qa_shot("ads_%s_down" % k)
+			v.camera_ctl.apply_look(-320.0, 460.0)   # 左转 + 回平
+			await get_tree().create_timer(1.0).timeout
+			await _qa_shot("ads_%s_left" % k)
+			Input.action_release("ads")
+			await get_tree().create_timer(0.5).timeout
+			print("[ADS-DIAG] %s optic=%s driver=%s turret=%s" % [k,
+				str(v.camera_ctl._optic.global_position),
+				str(v.camera_ctl._driver_seat.global_position),
+				str(v.camera_ctl._gunner_seat.global_position)])
+			print("[ADS-DIAG] %s 车体原点=%s" % [k, str(v.pos)])
+		cam.make_current()
+		G.player._veh_fp_free = false
+		G.player.exit_vehicle(true)
+		G.vehicles.erase(v)   # 先摘引用再释放(AI/HUD 会遍历 G.vehicles, 否则撞已释放对象)
+		await get_tree().create_timer(0.5).timeout
+		v.queue_free()
+		await get_tree().process_frame
+	print("[RIDE-QA] 完成")
+	get_tree().quit()
+
+
+func _run_belly_qa() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[TEST] 玩家未部署,车底 QA 跳过")
+		return
+	var kinds := ["jeep", "tank", "apc", "aa", "motorcycle", "heli", "jet"]
+	var cam := Camera3D.new()
+	cam.fov = 60.0
+	G.main.add_child(cam)
+	cam.make_current()
+	var report := PackedStringArray()
+	for kind in kinds:
+		var m: Node3D
+		match kind:
+			"jeep":
+				m = VehicleModels.build_jeep()
+			"tank":
+				m = VehicleModels.build_tank()
+			"apc":
+				m = VehicleModels.build_apc()
+			"aa":
+				m = VehicleModels.build_aa()
+			"motorcycle":
+				m = VehicleModels.build_motorcycle()
+			"heli":
+				m = AircraftModels.build_heli("us")
+			"jet":
+				m = AircraftModels.build_jet("us")
+		var base: Vector3 = G.player.pos + Vector3(0, 10.0, 0)
+		m.position = base
+		G.main.add_child(m)
+		await get_tree().process_frame
+		await get_tree().process_frame
+		# 数值诊断:整车全局 AABB + 穿透车体底面(局部 y<-0.05)的节点
+		var aabb := _qa_merged_aabb(m)
+		report.append("[%s] 全车AABB: min_y=%.3f max_y=%.3f 高=%.3f" % [
+			kind, aabb.position.y - base.y, aabb.position.y + aabb.size.y - base.y, aabb.size.y])
+		for mi in m.find_children("*", "MeshInstance3D", true, false):
+			var wa: AABB = mi.global_transform * mi.get_aabb()
+			if wa.position.y < base.y - 0.05:
+				report.append("  [穿透车底] %s: 低于原点 %.3f m" % [String(mi.name), base.y - wa.position.y])
+		var shots := [[1.2, -7.0, 1.2, "under"], [0.0, -5.5, 8.0, "belly_front"],
+			[0.0, -5.5, -8.0, "belly_rear"], [8.0, -5.5, 0.0, "belly_left"],
+			[-8.0, -5.5, 0.0, "belly_right"], [13.0, 3.0, 13.0, "far_overview"]]
+		for s in shots:
+			cam.global_position = base + Vector3(s[0], s[1], s[2])
+			cam.look_at(base + Vector3(0, -0.6, 0), Vector3(0, 0, 1))
+			await get_tree().process_frame
+			await get_tree().process_frame
+			await _qa_shot("belly_" + kind + "_" + s[3])
+		report.append("")
+		m.queue_free()
+		await get_tree().process_frame
+	FileAccess.open("E:/工作目录2/models_probe/belly_report.txt", FileAccess.WRITE).store_string("\n".join(report))
+	print("[TEST-BELLY] 6 台完成,报告: E:/工作目录2/models_probe/belly_report.txt")
+	get_tree().quit()
+
+
+## 递归合并节点树所有 MeshInstance3D 的全局 AABB
+func _qa_merged_aabb(root: Node3D) -> AABB:
+	var out := AABB()
+	var first := true
+	for mi in root.find_children("*", "MeshInstance3D", true, false):
+		var wa: AABB = mi.global_transform * mi.get_aabb()
+		if first:
+			out = wa
+			first = false
+		else:
+			out = out.merge(wa)
+	return out
+
+
+## GLB 解剖:打印异常节点(低于 y=0 或炮塔链)的节点变换/局部/世界 AABB
+func _run_veh_xray(id: String) -> void:
+	var path := "res://models/vehicles/%s.glb" % id
+	if not ResourceLoader.exists(path):
+		print("[XRAY] 缺失: ", path)
+		get_tree().quit()
+		return
+	var ps: PackedScene = load(path)
+	var g: Node3D = ps.instantiate()
+	G.main.add_child(g)
+	await get_tree().process_frame
+	print("[XRAY] === ", id, " ===")
+	for c in g.find_children("*", "MeshInstance3D", true, false):
+		var t := (c as MeshInstance3D).global_transform
+		var wa: AABB = t * (c as MeshInstance3D).get_aabb()
+		var low := wa.position.y < -0.01
+		var key := String(c.name).contains("Turret") or String(c.name).contains("Cannon") \
+			or String(c.name).contains("Muzzle") or String(c.name).contains("Barrel")
+		if low or key:
+			print("[XRAY] %-14s 局pos=%s 网格min=%s 世界y=[%.3f, %.3f]" % [
+				String(c.name), t.origin, (c as MeshInstance3D).get_aabb().position,
+				wa.position.y, wa.position.y + wa.size.y])
+	print("[XRAY] 完成")
+	get_tree().quit()
+
+
+## 全导轨枪械认证:逐把检视照 + ADS 照(导轨方向/穿模逐一目检)
+func _run_rail_certify() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[RAIL] 玩家未部署,跳过")
+		return
+	var rail_guns := ["m1014", "m4", "scar", "aug", "g36c", "ump", "p90", "vector",
+		"mpx", "mp7", "pp2000", "negev", "m110", "g28", "mk14", "ar10"]
+	G.player.spawn_protect = 60
+	Input.action_release("ads")
+	# 选址:随机出生点可能贴着帐篷/集装箱(相机被内壁+立柱遮挡,整屏报废)。
+	# 从出生点探测四向 9m 净距,朝最开阔方向平移 6m,直到四向 ≥8m 全净或步数用尽。
+	var body := G.player as CharacterBody3D
+	if body != null:
+		var space: PhysicsDirectSpaceState3D = body.get_world_3d().direct_space_state
+		for step in 6:
+			var base: Vector3 = body.global_position + Vector3(0, 1.5, 0)
+			var best_dir := Vector3.ZERO
+			var best_len := -1.0
+			var blocked := false
+			for d: Vector3 in [Vector3.RIGHT, Vector3.LEFT, Vector3.BACK, Vector3.FORWARD]:
+				var q := PhysicsRayQueryParameters3D.create(base, base + d * 9.0)
+				q.exclude = [body.get_rid()]
+				var hit := space.intersect_ray(q)
+				var l: float = 9.0 if hit.is_empty() else float(base.distance_to(hit.position))
+				if l < 8.0:
+					blocked = true
+				if l > best_len:
+					best_len = l
+					best_dir = d
+			if not blocked or best_dir == Vector3.ZERO:
+				break
+			body.global_position += best_dir * 6.0
+			body.velocity = Vector3.ZERO
+		print("[RAIL] 选址: ", body.global_position)
+	var done := PackedStringArray()
+	for gid in rail_guns:
+		# 卸下当前主武器(含玩家出生自带的枪 —— 不卸会残留在 vm_camera 挡住画面)
+		# 注意:Gun 是 RefCounted 包装,不能用 Node 类型注解
+		var old = G.player.guns[0] if G.player.guns.size() > 0 else null
+		if old != null and old.get("group") != null:
+			G.vm_camera.remove_child(old.group)
+			old.group.queue_free()
+		var ng := Gun.new(gid, G.player)
+		G.player.guns[0] = ng
+		G.player.gun_index = 0  # 必须指向当前槽:非当前枪不跑 update,draw_t 永远 0,检视/ADS 姿态全失效
+		G.vm_camera.add_child(ng.group)
+		ng.equip()
+		await get_tree().create_timer(1.3).timeout  # 等出枪(draw_t>0.9 才能 inspect)
+		ng = G.player.guns[0]
+		# 检视动画中段:枪转到屏幕中央,顶轨/侧轨方向一目了然
+		print("[RAIL] %s pre: eq=%s draw=%.2f sprint=%.2f ground=%s pump=%.2f bolt=%.2f semi=%.2f" % [
+			gid, ng.equipped, ng.draw_t, G.player.sprint_amount, G.player.on_ground,
+			ng.pump_t, ng.bolt_t, ng.semi_t])
+		ng.try_inspect()
+		print("[RAIL] %s inspecting=%s t=%.2f" % [gid, ng.is_inspecting(), ng.inspect_t])
+		await get_tree().create_timer(1.7).timeout
+		await _qa_shot("rail_" + gid + "_inspect")
+		ng._stop_inspect()
+		# 满 ADS 实战视野
+		Input.action_press("ads")
+		ng.ads_amount = 1.0
+		await get_tree().create_timer(0.7).timeout
+		await _qa_shot("rail_" + gid + "_ads")
+		Input.action_release("ads")
+		done.append(gid)
+		print("[RAIL] 已认证: ", gid, " (", done.size(), "/", rail_guns.size(), ")")
+		await get_tree().process_frame
+	print("[RAIL] 完成 ", done.size(), " 把: ", " ".join(done))
+	get_tree().quit()
+
+
+## 枪械 X 光:枪模单独悬空 + 独立相机 5 机位环绕(导轨方向/穿模几何认证)。
+## --test-gun-xray scar 单把(额外拍无改装对照 + 打印超宽件) / --test-gun-xray all 全部导轨枪
+func _run_gun_xray(gxid: String) -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[GXRAY] 玩家未部署,跳过")
+		return
+	var gids: Array = []
+	if gxid == "all":
+		gids = ["m1014", "m4", "scar", "aug", "g36c", "ump", "p90", "vector",
+			"mpx", "mp7", "pp2000", "negev", "m110", "g28", "mk14", "ar10"]
+	else:
+		gids = [gxid]
+	G.player.spawn_protect = 60
+	Input.action_release("ads")
+	if G.hud != null:
+		G.hud.visible = false   # 画面只留被测枪
+	# 卸下玩家当前主武器渲染组(不 free:player 每帧仍会 update 该 Gun,free 会炸)
+	if G.player.guns.size() > 0:
+		var old0 = G.player.guns[0]
+		if old0 != null and old0.get("group") != null:
+			G.vm_camera.remove_child(old0.group)
+	# 悬空锚点:出生点上空 30m,阳光直射无遮挡
+	var anchor := Node3D.new()
+	G.main.add_child(anchor)
+	var p0: Vector3 = G.player.pos
+	anchor.global_position = Vector3(p0.x, p0.y + 30.0, p0.z)
+	var cam := Camera3D.new()
+	cam.fov = 30.0
+	G.main.add_child(cam)
+	for gid in gids:
+		var variants: Array = [["mod", WeaponModsData.load_cfg(gid)]]
+		if gxid != "all":
+			variants.append(["plain", {}])   # 单把模式:无改装对照(隔离配件与本体)
+		for vv in variants:
+			var model: Node3D = WeaponModels.build(gid, false, vv[1])
+			anchor.add_child(model)
+			await get_tree().process_frame
+			var ab := _qa_merged_aabb(model)
+			var ctr: Vector3 = ab.get_center()
+			model.position -= ctr - anchor.global_position   # 模型包围盒中心对齐锚点
+			var span: float = maxf(ab.size.x, maxf(ab.size.y, ab.size.z))
+			var D: float = span * 1.2 + 0.3
+			if vv[0] == "plain":
+				# 数值解剖:打印超出机匣半宽的网格件(横向穿模元凶直接点名)
+				var half_w: float = ab.size.x * 0.5
+				for mi in model.find_children("*", "MeshInstance3D", true, false):
+					var mm := mi as MeshInstance3D
+					var wa: AABB = mm.global_transform * mm.get_aabb()
+					var lx: float = maxf(absf(wa.position.x), absf(wa.position.x + wa.size.x))
+					if lx > half_w + 0.004:
+						print("[GXRAY] %s 超宽件 %s x_max=%.3f y=[%.3f,%.3f] z=[%.3f,%.3f]" % [
+							gid, mm.name, lx, wa.position.y, wa.position.y + wa.size.y,
+							wa.position.z, wa.position.z + wa.size.z])
+			var views := {
+				"top": [Vector3(0, D, 0.0001), Vector3(0, 0, -1)],
+				"left34": [Vector3(-D * 0.8, D * 0.5, -D * 0.62), Vector3(0, 1, 0)],
+				"right34": [Vector3(D * 0.8, D * 0.5, -D * 0.62), Vector3(0, 1, 0)],
+				"left": [Vector3(-D, 0.02, 0), Vector3(0, 1, 0)],
+				"right": [Vector3(D, 0.02, 0), Vector3(0, 1, 0)],
+			}
+			for vname in views:
+				var off: Vector3 = views[vname][0]
+				var upv: Vector3 = views[vname][1]
+				cam.global_position = anchor.global_position + off
+				cam.look_at(anchor.global_position, upv)
+				cam.make_current()
+				await get_tree().process_frame
+				await get_tree().process_frame
+				var img := get_viewport().get_texture().get_image()
+				var tag: String = "xray_%s_%s%s" % [gid, vname, "" if vv[0] == "mod" else "_plain"]
+				if img != null:
+					img.save_png("E:/工作目录2/models_probe/%s.png" % tag)
+					print("[GXRAY-SHOT] ", tag)
+			anchor.remove_child(model)
+			model.free()
+		print("[GXRAY] 完成: ", gid)
+	print("[GXRAY] 全部完成 ", gids.size(), " 把")
+	get_tree().quit()
+
+
+## 性能剖析:等部署完成后采样 8s —— FPS/帧耗时/draw calls/图元/对象数/显存
+## 征服平衡性实测:每 12s 打印双方票/旗/存活/任务分布,持续 dur 秒后退出。
+## 输出 [BAL] 行即为"敌我是否公平"的硬数据。
+func _run_balance_probe(dur: float) -> void:
+	await get_tree().create_timer(8.0).timeout
+	var t := 0.0
+	var prev := {}
+	var mv12 := {}          # id -> 本 12s 净位移(诊断"原地跑")
+	for b0 in G.bots:
+		prev[b0.get_instance_id()] = b0.pos
+		mv12[b0.get_instance_id()] = 0.0
+	while t < dur:
+		var us_alive := 0
+		var ru_alive := 0
+		for b in G.bots:
+			if not b.alive:
+				continue
+			if b.team == "us":
+				us_alive += 1
+			else:
+				ru_alive += 1
+		var us_f := 0
+		var ru_f := 0
+		var neu := 0
+		for f in G.flags:
+			if f.owner_team == "us":
+				us_f += 1
+			elif f.owner_team == "ru":
+				ru_f += 1
+			else:
+				neu += 1
+		var task_us := {}
+		var task_ru := {}
+		for s in G.squads:
+			var td: Dictionary = G.ai_tasks.get(s["id"], {})
+			var tk: String = str(td.get("kind", "-"))
+			if s["team"] == "us":
+				task_us[tk] = int(task_us.get(tk, 0)) + 1
+			else:
+				task_ru[tk] = int(task_ru.get(tk, 0)) + 1
+		# ---- NPC 机动性硬数据(诊断"所有 NPC 在一个地方打转")----
+		# 每队:平均位移(12s 内)、几乎没动的个数、位置离散度(离质心的平均距离)
+		var mv := {"us": 0.0, "ru": 0.0}
+		var still := {"us": 0, "ru": 0}
+		var cnt := {"us": 0, "ru": 0}
+		var sum := {"us": Vector2.ZERO, "ru": Vector2.ZERO}
+		var pts := {"us": [], "ru": []}
+		for b in G.bots:
+			if not b.alive:
+				continue
+			var tm: String = b.team
+			cnt[tm] += 1
+			sum[tm] += Vector2(b.pos.x, b.pos.z)
+			pts[tm].append(Vector2(b.pos.x, b.pos.z))
+			var pv: Variant = prev.get(b.get_instance_id())
+			if pv != null:
+				var d: float = (b.pos - (pv as Vector3)).length()
+				mv[tm] += d
+				mv12[b.get_instance_id()] = d
+				if d < 1.0:
+					still[tm] += 1
+			prev[b.get_instance_id()] = b.pos
+		var spread := {"us": 0.0, "ru": 0.0}
+		var cen := {"us": Vector2.ZERO, "ru": Vector2.ZERO}
+		for tm2 in ["us", "ru"]:
+			if cnt[tm2] > 0:
+				cen[tm2] = sum[tm2] / float(cnt[tm2])
+				for q in pts[tm2]:
+					spread[tm2] += (q - cen[tm2]).length()
+				spread[tm2] /= float(pts[tm2].size())
+		# 每面旗圈内敌我人数(直接验证"bot 是否真的够到旗点")
+		var fpres := ""
+		for f in G.flags:
+			var cu := 0
+			var cr := 0
+			for b in G.bots:
+				if not b.alive:
+					continue
+				if Utils.dist_2d(b.pos.x, b.pos.z, f.pos.x, f.pos.z) < f.radius:
+					if b.team == "us":
+						cu += 1
+					else:
+						cr += 1
+			fpres += "%s[%d/%d%s]" % [f.id, cu, cr, ("*" if f.contested else "")]
+		print("[BAL] t=%3.0fs fps=%d 票 us=%4.0f ru=%4.0f | 旗 us=%d ru=%d 中立=%d | 存活 us=%d ru=%d | 任务 us=%s ru=%s" % [
+			t, Engine.get_frames_per_second(), G.tickets["us"], G.tickets["ru"], us_f, ru_f, neu, us_alive, ru_alive,
+			str(task_us), str(task_ru)])
+		print("[BAL]   旗圈(us/ru): %s" % fpres)
+		# 逐 bot 采样: 状态/任务/目标旗/距目标/当前速度 —— 定位"拿着夺旗任务却走不到"
+		var bd := ""
+		for tm3 in ["us", "ru"]:
+			var n3 := 0
+			for b in G.bots:
+				if not b.alive or b.team != tm3 or n3 >= 4:
+					continue
+				var td: Dictionary = b.ai_task
+				var fl = b.objective
+				var d_obj := -1.0
+				var fid := "-"
+				if fl != null and is_instance_valid(fl):
+					d_obj = b.pos.distance_to(fl.pos)
+					fid = str(fl.id)
+				var wpd := -1.0
+				if b.nav.size() > 0 and b.nav_i < b.nav.size():
+					wpd = Vector2(b.nav[b.nav_i].x - b.pos.x, b.nav[b.nav_i].y - b.pos.z).length()
+				bd += "%s st=%s tk=%s obj=%s d=%.0f v=%.1f nav=%d/%d wpd=%.0f 移%.0f blk=%d/v%d 蹲%.2f/%.2f | " % [tm3, b.state,
+					str(td.get("kind", "-")), fid, d_obj, Vector2(b.vel.x, b.vel.z).length(),
+					b.nav_i, b.nav.size(), wpd, float(mv12.get(b.get_instance_id(), 0.0)),
+					b.blk_frames, b.veh_blk_frames, b.crouch_amt, b.prone_amt]
+				n3 += 1
+		print("[BAL]   采样: %s" % bd)
+		# 抽一条 RU 夺旗小队的 A* 路线打印(验证航点序列本身是否合理)
+		if t < 1.0:
+			var dumped := false
+			for s in G.squads:
+				if dumped or s["team"] != "ru":
+					continue
+				for m in s["members"]:
+					if m.alive and m.nav.size() > 0:
+						var ss := PackedStringArray()
+						for k in range(mini(8, m.nav.size())):
+							ss.append("(%.0f,%.0f)" % [m.nav[k].x, m.nav[k].y])
+						print("[NAV] RU 小队路线 %d 点(自 %.0f,%.0f): %s" % [m.nav.size(),
+							m.pos.x, m.pos.z, ", ".join(ss)])
+						dumped = true
+						break
+		print("[BAL]   机动 us: 均位移=%5.1fm 没动=%d/%d 离散度=%5.1fm 质心=(%.0f,%.0f) | ru: 均位移=%5.1fm 没动=%d/%d 离散度=%5.1fm 质心=(%.0f,%.0f)" % [
+			mv["us"] / maxf(1.0, float(cnt["us"])), still["us"], cnt["us"], spread["us"],
+			cen["us"].x, cen["us"].y,
+			mv["ru"] / maxf(1.0, float(cnt["ru"])), still["ru"], cnt["ru"], spread["ru"],
+			cen["ru"].x, cen["ru"].y])
+		await get_tree().create_timer(12.0).timeout
+		t += 12.0
+	var ef_us := 0
+	var ef_ru := 0
+	for f2 in G.flags:
+		if f2.owner_team == "us":
+			ef_us += 1
+		elif f2.owner_team == "ru":
+			ef_ru += 1
+	print("[BAL] 结束 state=%s 票 us=%.0f ru=%.0f 旗 us=%d ru=%d" % [
+		G.state, G.tickets["us"], G.tickets["ru"], ef_us, ef_ru])
+	get_tree().quit()
+
+
+func _run_perf_probe() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 40.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[PERF] 玩家未部署,跳过")
+		return
+	print("[PERF] === 部署完成于 %.2fs,开始采样 ===" % (Time.get_ticks_msec() / 1000.0))
+	# 三阶段对比定位瓶颈:A 正常 4s → B 关太阳阴影 3s → C 关 MSAA 3s
+	for stage in 5:
+		if stage == 1 and G.sun != null:
+			G.sun.shadow_enabled = false
+			_perf_log("--- 阶段B: 太阳阴影关闭 ---")
+		elif stage == 2:
+			if G.sun != null:
+				G.sun.shadow_enabled = true
+			get_viewport().msaa_3d = Viewport.MSAA_DISABLED
+			_perf_log("--- 阶段C: MSAA 关闭 ---")
+		elif stage == 3:
+			get_viewport().msaa_3d = Viewport.MSAA_2X
+			for b in G.bots:
+				if b.mesh != null:
+					b.mesh.visible = false
+			_perf_log("--- 阶段D: 隐藏全部士兵 ---")
+		elif stage == 4:
+			for b in G.bots:
+				if b.mesh != null:
+					b.mesh.visible = true
+			for v in G.vehicles:
+				if v.mesh != null:
+					v.mesh.visible = false
+			_perf_log("--- 阶段E: 士兵恢复+隐藏载具 ---")
+		else:
+			_perf_log("--- 阶段A: 正常 ---")
+		var fps_sum := 0.0
+		var fps_min := 9999.0
+		var dc_max := 0
+		var prim_max := 0.0
+		var n := 6
+		for i in n:
+			await get_tree().create_timer(0.5).timeout
+			var fps: float = Performance.get_monitor(Performance.TIME_FPS)
+			var dc: int = Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
+			var prim: float = Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)
+			fps_min = minf(fps_min, fps)
+			fps_sum += fps
+			dc_max = maxi(dc_max, dc)
+			prim_max = maxf(prim_max, prim)
+			_perf_log("%d-%d: fps=%.0f dc=%d prims=%.1fM obj=%d pipe=%d" % [
+				stage, i, fps, dc, prim / 1_000_000.0,
+				Performance.get_monitor(Performance.OBJECT_COUNT),
+				Performance.get_monitor(Performance.PIPELINE_COMPILATIONS_DRAW)])
+		_perf_log("=== 阶段%d 汇总: avg=%.0f min=%.0f dc_max=%d prims_max=%.1fM ===" % [
+			stage, fps_sum / n, fps_min, dc_max, prim_max / 1_000_000.0])
+	get_tree().quit()
+
+
+var _perf_lines: PackedStringArray = []
+
+
+func _perf_log(line: String) -> void:
+	_perf_lines.append(line)
+	FileAccess.open("E:/工作目录2/models_probe/perf_out.txt", FileAccess.WRITE).store_string("\n".join(_perf_lines))
+
+
+## NPC 士兵 GLB 管线认证:--test-npc
+## ① 结构打印(动画列表/骨骼数/材质覆盖) ② 悬空 6 姿态截图(Idle/Walk/Run/Crouch/Prone/Death)
+## ③ 战场实况一张(活 bot 交战中的新模型效果)
+func _run_npc_check() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[NPC] 玩家未部署,跳过")
+		return
+	G.player.spawn_protect = 60
+	if G.hud != null:
+		G.hud.visible = false
+	if G.player.guns.size() > 0:
+		var old0 = G.player.guns[0]
+		if old0 != null and old0.get("group") != null:
+			G.vm_camera.remove_child(old0.group)
+	# ---- ① 结构验证 ----
+	var probe: Node3D = SoldierModel.build_soldier_glb("us", "m4", "assault", "standard")
+	var pskel: Skeleton3D = probe.get_meta("skel")
+	var panim: AnimationPlayer = probe.get_meta("anim")
+	print("[NPC] skel=%s anim=%s" % [pskel != null, panim != null])
+	if pskel != null:
+		print("[NPC] 骨骼数=", pskel.get_bone_count(), " 关键骨: LegsRoot=", pskel.find_bone("LegsRoot"),
+			" AimPitch=", pskel.find_bone("AimPitch"), " HandR=", pskel.find_bone("HandR"))
+	if panim != null:
+		print("[NPC] 动画列表: ", panim.get_animation_list())
+	probe.free()
+	# ---- ② 悬空 4 姿态截图 ----
+	var anchor := Node3D.new()
+	G.main.add_child(anchor)
+	var p0: Vector3 = G.player.pos
+	anchor.global_position = Vector3(p0.x, p0.y + 12.0, p0.z)
+	var cam := Camera3D.new()
+	cam.fov = 40.0
+	G.main.add_child(cam)
+	var poses := {
+		"idle": ["Idle", 1.0],
+		"walk": ["Walk", 0.3],
+		"run": ["Run", 0.2],
+		"crouch": ["Crouch", 1.0],
+		"crouchwalk": ["CrouchWalk", 0.3],
+		"prone": ["Prone", 1.0],
+		"pronecrawl": ["ProneCrawl", 0.3],
+		"death": ["Death", 1.15],
+	}
+	for pose in poses:
+		var sm: Node3D = SoldierModel.build_soldier_glb("us", "m4", "assault", "standard")
+		anchor.add_child(sm)
+		# [修v5] 旧死亡动画悬空 0.82 需压镜头掩盖;location 轴修复后贴地,不再补偿
+		var ap: AnimationPlayer = sm.get_meta("anim")
+		ap.play(poses[pose][0])
+		ap.advance(poses[pose][1])
+		await get_tree().process_frame
+		await get_tree().process_frame
+		# 模型面朝 -Z:front34 机位放 -Z 侧,side 正右,back 在 +Z 后方
+		var views := {
+			"front34": [Vector3(-2.2, 1.4, -2.2)],
+			"side": [Vector3(3.0, 1.1, 0.0)],
+			"back": [Vector3(1.8, 1.5, 2.4)],
+		}
+		for vname in views:
+			cam.global_position = anchor.global_position + views[vname][0]
+			cam.look_at(anchor.global_position + Vector3(0, 0.9, 0), Vector3.UP)
+			cam.make_current()
+			await get_tree().process_frame
+			await get_tree().process_frame
+			var img := get_viewport().get_texture().get_image()
+			var tag := "npc_%s_%s" % [pose, vname]
+			if img != null:
+				img.save_png("E:/工作目录2/models_probe/%s.png" % tag)
+				print("[NPC-SHOT] ", tag)
+		anchor.remove_child(sm)
+		sm.free()
+	# ---- ②b 四兵种建模差异巡检:全家福 front34 + 每兵种 side 特写 ----
+	var cls_ids := ["assault", "engineer", "support", "recon"]
+	var cls_wids := ["m4", "m249", "mp5", "awm"]
+	var gp: Vector3 = anchor.global_position
+	var fam_models: Array = []
+	for i in 4:
+		var cm: Node3D = SoldierModel.build_soldier_glb("us", cls_wids[i], cls_ids[i], "standard")
+		cm.position = Vector3((i - 1.5) * 1.05, 0, 0)
+		anchor.add_child(cm)
+		var cap: AnimationPlayer = cm.get_meta("anim")
+		cap.play("Idle")
+		cap.advance(1.0)
+		fam_models.append(cm)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	# 模型面朝 -Z:全家福机位放 -Z 侧
+	cam.global_position = gp + Vector3(-2.6, 1.6, -3.4)
+	cam.look_at(gp + Vector3(0, 0.9, 0), Vector3.UP)
+	cam.make_current()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var fam := get_viewport().get_texture().get_image()
+	if fam != null:
+		fam.save_png("E:/工作目录2/models_probe/npc_classes_family.png")
+		print("[NPC-SHOT] npc_classes_family")
+	for cm in fam_models:
+		anchor.remove_child(cm)
+		cm.free()
+	await get_tree().process_frame
+	# 单兵种 side 特写(逐个独立拍,特征件细节可辨)
+	for i in 4:
+		var so: Node3D = SoldierModel.build_soldier_glb("us", cls_wids[i], cls_ids[i], "standard")
+		anchor.add_child(so)
+		var sap: AnimationPlayer = so.get_meta("anim")
+		sap.play("Idle")
+		sap.advance(1.0)
+		await get_tree().process_frame
+		await get_tree().process_frame
+		cam.global_position = gp + Vector3(2.6, 1.2, 0)
+		cam.look_at(gp + Vector3(0, 0.95, 0), Vector3.UP)
+		cam.make_current()
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var cimg := get_viewport().get_texture().get_image()
+		if cimg != null:
+			cimg.save_png("E:/工作目录2/models_probe/npc_class_%s.png" % cls_ids[i])
+			print("[NPC-SHOT] npc_class_%s" % cls_ids[i])
+		anchor.remove_child(so)
+		so.free()
+	# ---- ③ 战场实况(对准最近活 bot 的交战现场) ----
+	var nb: Node3D = null
+	var nd := 1e9
+	for b in G.bots:
+		if b == null or not is_instance_valid(b) or not b.alive or b.vehicle != null:
+			continue
+		var d: float = b.pos.distance_to(p0)
+		if d > 8.0 and d < nd:
+			nd = d
+			nb = b
+	var img2: Image = null
+	if nb != null:
+		var bp: Vector3 = nb.pos
+		cam.global_position = bp + Vector3(2.6, 1.7, 2.6)
+		cam.look_at(bp + Vector3(0, 1.0, 0), Vector3.UP)
+		cam.make_current()
+		await get_tree().create_timer(0.5).timeout
+		await get_tree().process_frame
+		img2 = get_viewport().get_texture().get_image()
+		if img2 != null:
+			img2.save_png("E:/工作目录2/models_probe/npc_battle_live.png")
+			print("[NPC-SHOT] npc_battle_live bot_dist=%.0f" % nd)
+	else:
+		print("[NPC] 附近无活 bot,跳过实况")
+	print("[NPC] 认证完成")
+	get_tree().quit()
+
+
+## 剪影体检用:无光照纯品红材质(身体剪影里出现非品红像素 = 被 near 裁掉的洞)
+func _pbody_flat_mat() -> StandardMaterial3D:
+	if _pbody_flat != null:
+		return _pbody_flat
+	_pbody_flat = StandardMaterial3D.new()
+	_pbody_flat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_pbody_flat.albedo_color = Color(1.0, 0.0, 1.0)
+	_pbody_flat.no_depth_test = false
+	return _pbody_flat
+
+
+## 诊断:打印站立眼高 / Chest 骨世界位 / 躯干(含 GLB 蒙皮网格)世界 AABB
+func _pbody_geo_diag(p) -> void:
+	var body = p.body
+	if body == null:
+		print("[PBODY-DIAG] body=null")
+		return
+	var cam: Camera3D = G.camera
+	print("[PBODY-DIAG] eye_h=%.3f pos.y=%.3f body.pos=%s cam=%s" % [
+		p.eye_height, p.pos.y, body.global_position, cam.global_position])
+	var sk: Skeleton3D = body.get_meta("skel") if body.has_meta("skel") else null
+	if sk != null:
+		for bn in ["Chest", "Spine", "Head"]:
+			var bi: int = sk.find_bone(bn)
+			if bi >= 0:
+				var wp: Vector3 = sk.global_transform * sk.get_bone_global_pose(bi).origin
+				print("[PBODY-DIAG] bone %-6s world=%s dist_cam=%.3f" % [bn, wp, wp.distance_to(cam.global_position)])
+	var mn := Vector3(1e9, 1e9, 1e9)
+	var mx := Vector3(-1e9, -1e9, -1e9)
+	var stack: Array = [body]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if n is MeshInstance3D and (n as MeshInstance3D).mesh != null:
+			var mi := n as MeshInstance3D
+			var ab: AABB = mi.get_aabb()
+			for i in 8:
+				var wv: Vector3 = mi.global_transform * ab.get_endpoint(i)
+				mn = mn.min(wv)
+				mx = mx.max(wv)
+		for c in n.get_children():
+			stack.append(c)
+	print("[PBODY-DIAG] mesh_world_aabb(bind/静止) y=[%.3f..%.3f] x=[%.3f..%.3f] z=[%.3f..%.3f]" % [
+		mn.y, mx.y, mn.x, mx.x, mn.z, mx.z])
+	print("[PBODY-DIAG] cam_cull_mask=%d viewport_cam=%s body_visible=%s" % [
+		cam.cull_mask, get_viewport().get_camera_3d(), body.visible])
+	var st2: Array = [body]
+	while not st2.is_empty():
+		var n3: Node = st2.pop_back()
+		if n3 is MeshInstance3D:
+			var m3 := n3 as MeshInstance3D
+			print("[PBODY-DIAG]  mesh %-16s layers=%d vis=%s shadow=%d mat=%s" % [
+				m3.name, m3.layers, m3.visible, m3.cast_shadow,
+				(m3.material_override.get_class() if m3.material_override != null else "-")])
+		for c3 in n3.get_children():
+			st2.append(c3)
+
+
+## 身体所有可见网格的世界 AABB(排除 SHADOWS_ONLY 影子代理)
+func _body_world_aabb(n: Node) -> AABB:
+	var out := AABB()
+	var first := true
+	var stk: Array = [n]
+	while not stk.is_empty():
+		var x: Node = stk.pop_back()
+		if x is MeshInstance3D:
+			var m := x as MeshInstance3D
+			if m.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY:
+				var a: AABB = m.global_transform * m.get_aabb()
+				if first:
+					out = a
+					first = false
+				else:
+					out = out.merge(a)
+		for c in x.get_children():
+			stk.append(c)
+	return out
+
+
+## AABB 8 角投影到屏幕后的包围盒占屏比(%)
+func _screen_cover(a: AABB, cam: Camera3D) -> float:
+	if a.size.length() <= 0.0:
+		return 0.0
+	var inv: Transform3D = cam.global_transform.affine_inverse()
+	var proj: Projection = cam.get_camera_projection()
+	var sz: Vector2 = get_viewport().get_visible_rect().size
+	if sz.x <= 1.0 or sz.y <= 1.0:
+		return 0.0
+	var mn := Vector2(1e9, 1e9)
+	var mx := Vector2(-1e9, -1e9)
+	for i in 8:
+		var corner: Vector3 = a.position + Vector3(
+			a.size.x * float(i & 1), a.size.y * float((i >> 1) & 1), a.size.z * float((i >> 2) & 1))
+		var cp: Vector3 = inv * corner
+		if cp.z > -0.02:
+			cp.z = -0.02
+		var sp: Vector4 = proj * Vector4(cp.x, cp.y, cp.z, 1.0)
+		if absf(sp.w) < 1e-6:
+			continue
+		var ndc := Vector2(sp.x / sp.w, sp.y / sp.w)
+		var px := Vector2((ndc.x * 0.5 + 0.5) * sz.x, (0.5 - ndc.y * 0.5) * sz.y)
+		mn = mn.min(px)
+		mx = mx.max(px)
+	mn = mn.max(Vector2.ZERO)
+	mx = mx.min(sz)
+	var area: float = maxf(mx.x - mn.x, 0.0) * maxf(mx.y - mn.y, 0.0)
+	return 100.0 * area / maxf(sz.x * sz.y, 1.0)
+
+
+## 查找第一个 FpArms 实例
+func _find_fparms(n: Node) -> Node:
+	var stk: Array = [n]
+	while not stk.is_empty():
+		var x: Node = stk.pop_back()
+		if x is FpArms:
+			return x
+		for c in x.get_children():
+			stk.append(c)
+	return null
+
+
+## 第一人称对齐体检:--test-fpdiag(配合 --test-play)
+## 纯数值诊断,不产生截图(省内存):
+##  A) 站→蹲→站 相机眼高 vs 身体顶部 —— 查"相机与身体脱开"
+##  B) 低头各档 相机 y / 前移量 —— 查头部前倾是否按预期工作
+##  C) 第一人称手臂各段世界尺寸 vs 身体 GLB 骨长 —— 查"手臂比例不对"
+func _run_fpdiag_check() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[FPDIAG] 玩家未部署,跳过")
+		get_tree().quit()
+		return
+	var p = G.player
+	p.spawn_protect = 600
+	if G.hud != null:
+		G.hud.visible = false
+	await get_tree().create_timer(0.8).timeout
+	p.pitch = 0.0
+	var skel: Skeleton3D = p.body.get_meta("skel") if p.body.has_meta("skel") else null
+	print("[FPDIAG] pos_y=%.3f eye_h=%.3f cam_y=%.3f near=%.3f" % [
+		p.pos.y, p.eye_height, G.camera.global_position.y, G.camera.near])
+
+	print("[FPDIAG] === A 蹲起同步(相机眼高 vs 身体顶部) ===")
+	for phase in [["stand", false], ["crouch", true], ["stand2", false]]:
+		p.crouched = bool(phase[1])
+		for i in 16:
+			await get_tree().create_timer(0.06).timeout
+			if i % 4 != 3 and i != 15:
+				continue
+			var an: String = "?"
+			if p.body.has_meta("anim"):
+				an = str((p.body.get_meta("anim") as AnimationPlayer).current_animation)
+			var parts: Array = []
+			if skel != null:
+				for bn in ["Hips", "Spine", "Chest", "Neck", "Head", "AimPitch", "FootL", "FootR"]:
+					var bi: int = skel.find_bone(bn)
+					if bi >= 0:
+						var wp: Vector3 = skel.global_transform * skel.get_bone_global_pose(bi).origin
+						parts.append("%s=%.2f" % [bn, wp.y])
+			print("[FPDIAG] %-6s t=%.2f eye_h=%.3f cam_y=%.3f | %s | %s" % [
+				phase[0], float(i) * 0.06, p.eye_height, G.camera.global_position.y,
+				", ".join(parts), an])
+
+	print("[FPDIAG] === B 低头前倾(相机应随俯角前移+下降) ===")
+	p.crouched = false
+	await get_tree().create_timer(0.7).timeout
+	var base_xz := Vector2.ZERO
+	for pv in [0.0, -0.45, -0.90, -1.45]:
+		p.pitch = pv
+		await get_tree().create_timer(0.5).timeout
+		var cp: Vector3 = G.camera.global_position
+		if pv == 0.0:
+			base_xz = Vector2(cp.x, cp.z)
+		var fwd_m: float = (Vector2(cp.x, cp.z) - base_xz).length()
+		print("[FPDIAG] pitch=%+.2f cam_y=%.3f 前移=%.3f 下降=%.3f" % [
+			pv, cp.y, fwd_m, (p.pos.y + p.eye_height) - cp.y])
+
+	print("[FPDIAG] === C 手臂比例 ===")
+	# 存 2 张对照图(平视 / 低头 40°):看手臂粗细与位置是否与身体协调
+	for shot in [[0.0, "level"], [-0.70, "down"]]:
+		p.pitch = shot[0]
+		await get_tree().create_timer(0.4).timeout
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var im := get_viewport().get_texture().get_image()
+		if im != null:
+			im.save_png("E:/工作目录2/models_probe/fparm_%s.png" % shot[1])
+	p.pitch = 0.0
+	await get_tree().create_timer(0.4).timeout
+	var fa: Node = _find_fparms(G.main)
+	if fa == null:
+		print("[FPDIAG] 未找到 FpArms 节点")
+	else:
+		print("[FPDIAG] FpArms scale=%s LEN_UP=%.4f LEN_FORE=%.4f 子节点=%d" % [
+			str(fa.scale), fa.len_up, fa.len_fore, fa.get_child_count()])
+		var par: Node = fa.get_parent()
+		var par_org: Vector3 = (par as Node3D).global_transform.origin if par is Node3D else Vector3.ZERO
+		print("[FPDIAG] FpArms 自身世界位=%s 父=%s 父世界位=%s 父scale=%s" % [
+			str(fa.global_transform.origin), par.name if par != null else "-", str(par_org),
+			str((par as Node3D).scale) if par is Node3D else "-"])
+		for seg in ["_lu", "_lf", "_lh", "_ru", "_rf", "_rh"]:
+			var nd = fa.get(seg)
+			if nd is Node3D:
+				var m: MeshInstance3D = null
+				var stk: Array = [nd]
+				while not stk.is_empty():
+					var x2: Node = stk.pop_back()
+					if x2 is MeshInstance3D:
+						m = x2 as MeshInstance3D
+						break
+					for c2 in x2.get_children():
+						stk.append(c2)
+				if m != null:
+					var ws: Vector3 = m.global_transform.basis.get_scale()
+					var sz: Vector3 = m.get_aabb().size * ws
+					print("[FPDIAG]   %-4s 世界位=(%.3f,%.3f,%.3f) 尺寸=(%.3f,%.3f,%.3f) 自身scale=%.3f" % [
+						seg, m.global_transform.origin.x, m.global_transform.origin.y, m.global_transform.origin.z,
+						sz.x, sz.y, sz.z, m.scale.x])
+	if skel != null:
+		for trio in [["UpperArmL", "ForearmL", "HandL"], ["UpperArmR", "ForearmR", "HandR"]]:
+			var parts2: Array = []
+			for bn2 in trio:
+				var bi2: int = skel.find_bone(bn2)
+				parts2.append("%s=%.4f" % [bn2, (skel.get_bone_rest(bi2).origin.length() if bi2 >= 0 else -1.0)])
+			print("[FPDIAG]   身体 GLB 骨段(rest 长度): " + ", ".join(parts2))
+	var panim3: AnimationPlayer = p.body.get_meta("anim") if p.body.has_meta("anim") else null
+	if panim3 != null:
+		var names: Array = []
+		for a in panim3.get_animation_list():
+			names.append(str(a))
+		print("[FPDIAG] 身体动画列表(%d): %s" % [names.size(), ", ".join(names)])
+	print("[FPDIAG] === D 跳跃腾空(上升收腿 / 下落伸腿) ===")
+	p.pitch = -0.35
+	# ★不用 Input.action_press:协程里模拟按键产生不了 is_action_just_pressed 的边沿,
+	#   跳跃不会触发。直接把玩家抬到空中并给上升初速,等效于"刚起跳"的物理状态。
+	p.pos.y += 4.0
+	p.vel.y = 5.4
+	for i in 24:
+		await get_tree().create_timer(0.07).timeout
+		var fl := 0.0
+		var fr := 0.0
+		if skel != null:
+			var il: int = skel.find_bone("FootL")
+			var ir: int = skel.find_bone("FootR")
+			if il >= 0:
+				fl = (skel.global_transform * skel.get_bone_global_pose(il).origin).y
+			if ir >= 0:
+				fr = (skel.global_transform * skel.get_bone_global_pose(ir).origin).y
+		print("[FPDIAG] jump t=%.2f ground=%s vel_y=%+.2f air=%.2f FootL=%.3f FootR=%.3f anim=%s" % [
+			float(i) * 0.07, str(p.on_ground), p.vel.y, p._air_amt, fl, fr,
+			str((p.body.get_meta("anim") as AnimationPlayer).current_animation)])
+		if i == 3 or i == 10:
+			await get_tree().process_frame
+			var ij := get_viewport().get_texture().get_image()
+			if ij != null:
+				ij.save_png("E:/工作目录2/models_probe/fpair_%d.png" % i)
+	print("[FPDIAG] === E 切枪手臂可见性(旧枪 Tween 回调不得隐藏新枪手臂) ===")
+	p.pitch = 0.0
+	if p.guns.size() >= 2:
+		var fa2: Node = _find_fparms(G.main)
+		if fa2 != null:
+			p.switch_weapon(0)
+			await get_tree().create_timer(0.4).timeout
+			print("[FPDIAG] 切到枪0 arms.visible=%s" % str(fa2.visible))
+			p.switch_weapon(1)
+			await get_tree().create_timer(0.4).timeout
+			print("[FPDIAG] 切到枪1 arms.visible=%s" % str(fa2.visible))
+			# 关键:再等 0.6s, 让旧枪的 0.12s 收枪 Tween 回调彻底跑完
+			await get_tree().create_timer(0.6).timeout
+			print("[FPDIAG] 切枪后 0.6s arms.visible=%s  (必须为 true)" % str(fa2.visible))
+	else:
+		print("[FPDIAG] 玩家武器 <2,跳过切枪测试")
+	print("[FPDIAG] 认证完成")
+	get_tree().quit()
+
+
+## 低头到底遮挡体检:--test-lookdown
+## 玩家把视角完全向下拉(pitch 到下限),逐档记录"身体在画面里占了多少" ——
+## 判断第一人称视角是否被自己的身体挡死。输出全景帧 + 仅身体剪影帧 + 占屏比数字。
+func _run_lookdown_check() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[LOOKDOWN] 玩家未部署,跳过")
+		get_tree().quit()
+		return
+	var p = G.player
+	p.spawn_protect = 60
+	if G.hud != null:
+		G.hud.visible = false
+	await get_tree().create_timer(0.6).timeout
+	var vm_cont: Node = G.vm_viewport.get_parent() if G.vm_viewport != null else null
+	var old_mask: int = G.camera.cull_mask
+	print("[LOOKDOWN] eye_h=%.2f near=%.3f fov=%.1f" % [p.eye_height, G.camera.near, G.camera.fov])
+	var pv_list := [[0.0, "level"], [-0.30, "soft"], [-0.60, "mid"], [-1.00, "deep"], [-1.20, "vdeep"], [-1.45, "max"]]
+	for pv in pv_list:
+		p.pitch = pv[0]
+		p.recoil_pitch = 0.0
+		await get_tree().create_timer(0.4).timeout
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var ifl := get_viewport().get_texture().get_image()
+		if ifl != null:
+			ifl.save_png("E:/工作目录2/models_probe/ld_full_%s.png" % pv[1])
+		# 仅身体剪影:身体换无光照品红,主相机只渲染 layer2 ⇒ 品红像素 = 被身体盖住的屏幕
+		if vm_cont != null:
+			vm_cont.visible = false
+		var saved: Array = []
+		var stk: Array = [p.body]
+		while not stk.is_empty():
+			var n2: Node = stk.pop_back()
+			if n2 is MeshInstance3D:
+				var mi2 := n2 as MeshInstance3D
+				saved.append([mi2, mi2.material_override])
+				mi2.material_override = _pbody_flat_mat()
+			for cc in n2.get_children():
+				stk.append(cc)
+		G.camera.cull_mask = 1 << 1
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var ib := get_viewport().get_texture().get_image()
+		if ib != null:
+			ib.save_png("E:/工作目录2/models_probe/ld_body_%s.png" % pv[1])
+			var hit := 0
+			var tot := 0
+			var w: int = ib.get_width()
+			var h: int = ib.get_height()
+			var yy := 0
+			while yy < h:
+				var xx := 0
+				while xx < w:
+					var c := ib.get_pixel(xx, yy)
+					tot += 1
+					if c.r > 0.5 and c.g < 0.3 and c.b > 0.5:
+						hit += 1
+					xx += 8
+				yy += 8
+			var pct: float = 100.0 * float(hit) / maxf(float(tot), 1.0)
+			var bb: AABB = _body_world_aabb(p.body)
+			var cover: float = _screen_cover(bb, G.camera)
+			print("[LOOKDOWN] pitch=%+.2f (%+.0f deg) silhouette=%.1f%% bbox=%.1f%% eye_h=%.2f cam_y=%.2f body_y=%.2f..%.2f" % [
+				pv[0], rad_to_deg(pv[0]), pct, cover, p.eye_height,
+				G.camera.global_position.y, bb.position.y, bb.position.y + bb.size.y])
+		G.camera.cull_mask = old_mask
+		for sv in saved:
+			if is_instance_valid(sv[0]):
+				sv[0].material_override = sv[1]
+		if vm_cont != null:
+			vm_cont.visible = true
+	p.pitch = 0.0
+	print("[LOOKDOWN] 认证完成")
+	get_tree().quit()
+
+
+## 玩家第一人称身体 + 阴影认证:--test-pbody
+## ①低头俯视腿部(骨骼 GLB 下半身) ②侧上视角人形阴影 ③切枪后阴影武器轮廓变化
+func _run_pbody_check() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[PBODY] 玩家未部署,跳过")
+		return
+	var p = G.player
+	p.spawn_protect = 60
+	if G.hud != null:
+		G.hud.visible = false
+	await get_tree().create_timer(0.5).timeout
+	# ①低头俯视腿部(第一人称主相机)
+	p.pitch = -1.05
+	p.recoil_pitch = 0
+	await get_tree().create_timer(0.4).timeout
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var img := get_viewport().get_texture().get_image()
+	if img != null:
+		img.save_png("E:/工作目录2/models_probe/pbody_legs.png")
+		print("[PBODY-SHOT] pbody_legs")
+	# ①a 低头看胸口(-0.78rad≈-45°,这一段视角才能把胸口框进画面;Pitch -1.05 时胸口在
+	#   画面上沿之外,拍不到)。验收:胸口/背心必须可见,且不得看到胸腔内壁或整片消失。
+	p.pitch = -0.78
+	await get_tree().create_timer(0.4).timeout
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var img_ch := get_viewport().get_texture().get_image()
+	if img_ch != null:
+		img_ch.save_png("E:/工作目录2/models_probe/pbody_chest.png")
+		print("[PBODY-SHOT] pbody_chest pitch=-0.78 eye_h=%.2f" % p.eye_height)
+	# 诊断:眼高/胸口骨位/躯干世界 AABB(确认几何净空,不靠肉眼猜)
+	_pbody_geo_diag(p)
+	# ①a2 仅第一人称身体独立渲染:主相机 cull_mask 收窄到 layer2(身体专用层)+ 关视角模型,
+	#   画面只剩身体剪影 ⇒ 量化"低头时胸口到底在不在画面里、占多少",不受场景载具/道具干扰
+	var vm_cont: Node = G.vm_viewport.get_parent() if G.vm_viewport != null else null
+	if vm_cont != null:
+		vm_cont.visible = false
+	var old_mask: int = G.camera.cull_mask
+	G.camera.cull_mask = 1 << 1   # 仅 layer 2
+	for pv in [[0.0, "level"], [-0.30, "soft"], [-0.60, "mid"], [-1.05, "deep"], [-1.22, "vdeep"], [-1.45, "full"]]:
+		G.camera.cull_mask = old_mask   # 全景帧必须先恢复完整层
+		p.pitch = pv[0]
+		await get_tree().create_timer(0.35).timeout
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var ifl := get_viewport().get_texture().get_image()
+		if ifl != null:
+			ifl.save_png("E:/工作目录2/models_probe/pbody_full_%s.png" % pv[1])
+		G.camera.cull_mask = 1 << 1
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var ib := get_viewport().get_texture().get_image()
+		if ib != null:
+			ib.save_png("E:/工作目录2/models_probe/pbody_bodyonly_%s.png" % pv[1])
+		G.camera.cull_mask = old_mask
+		print("[PBODY-SHOT] bodyonly %s pitch=%.2f" % [pv[1], pv[0]])
+	G.camera.cull_mask = old_mask
+	if vm_cont != null:
+		vm_cont.visible = true
+	p.pitch = -0.78
+	# ①b 跑步+低头:验证 Run 前倾不再穿模进胸口(沿用 ①a 的 -0.78 俯角)
+	Input.action_press("move_forward")
+	Input.action_press("sprint")
+	await get_tree().create_timer(1.3).timeout
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var img_run := get_viewport().get_texture().get_image()
+	if img_run != null:
+		img_run.save_png("E:/工作目录2/models_probe/pbody_run_lookdown.png")
+		print("[PBODY-SHOT] pbody_run_lookdown h_speed=%.1f" % p.vel.length())
+	Input.action_release("move_forward")
+	Input.action_release("sprint")
+	await get_tree().create_timer(0.3).timeout
+	# ①c 穿模体检:5 姿态(站/走/跑/蹲/蹲走)× 2 俯角(-0.50 / -0.78),
+	#   每个机位存全景帧 + 仅身体剪影帧(剪影里出现"洞/切片"= 被 near=0.08 裁掉)
+	var mv_back = p.motion
+	p.motion = null          # ★冻结镜头呼吸/摇摆:剪影差分必须逐帧同机位
+	for st in ["idle", "walk", "run", "sprint", "crouch", "crouchwalk", "prone"]:
+		Input.action_release("move_forward")
+		Input.action_release("sprint")
+		Input.action_release("ads")
+		p.sprint_toggled = false          # 清掉 Shift 疾跑粘滞开关
+		p.crouched = st.begins_with("crouch")
+		p.prone = (st == "prone")
+		if st in ["walk", "run", "sprint", "crouchwalk"]:
+			Input.action_press("move_forward")
+		if st == "walk":
+			Input.action_press("ads")     # ADS 移动限速 2.8 ⇒ Walk 动画
+		elif st == "sprint":
+			p.sprint_toggled = true       # 6.9 m/s ⇒ Sprint
+		await get_tree().create_timer(1.4).timeout
+		for pi in [["half", -0.50], ["deep", -0.78], ["full", -1.45]]:
+			G.camera.cull_mask = old_mask
+			p.pitch = pi[1]
+			await get_tree().create_timer(0.35).timeout
+			await get_tree().process_frame
+			await get_tree().process_frame
+			var iv2 := get_viewport().get_texture().get_image()
+			if iv2 != null:
+				iv2.save_png("E:/工作目录2/models_probe/pbody_st_%s_%s.png" % [st, pi[0]])
+			# 全景(关视角模型)帧:用于在洞检测里排除"枪械覆盖区"(游戏里被枪挡住,不是洞)
+			if vm_cont != null:
+				vm_cont.visible = false
+			await get_tree().process_frame
+			await get_tree().process_frame
+			var inv := get_viewport().get_texture().get_image()
+			if inv != null:
+				inv.save_png("E:/工作目录2/models_probe/pbody_stnv_%s_%s.png" % [st, pi[0]])
+			if vm_cont != null:
+				vm_cont.visible = true
+			# 剪影帧:身体换成无光照纯品红(不受阴影/环境光干扰),只渲染 layer2
+			var saved_mats := {}
+			var stk: Array = [p.body]
+			while not stk.is_empty():
+				var n2: Node = stk.pop_back()
+				if n2 is MeshInstance3D:
+					var mi2 := n2 as MeshInstance3D
+					saved_mats[mi2] = mi2.material_override
+					mi2.material_override = _pbody_flat_mat()
+				for cc in n2.get_children():
+					stk.append(cc)
+			G.camera.cull_mask = 1 << 1
+			await get_tree().process_frame
+			await get_tree().process_frame
+			var ib2 := get_viewport().get_texture().get_image()
+			if ib2 != null:
+				ib2.save_png("E:/工作目录2/models_probe/pbody_stb_%s_%s.png" % [st, pi[0]])
+			G.camera.cull_mask = old_mask
+			for mm in saved_mats.keys():
+				if is_instance_valid(mm):
+					mm.material_override = saved_mats[mm]
+		print("[PBODY-SHOT] pose %s hs=%.1f crouched=%s anim=%s" % [
+			st, Vector2(p.vel.x, p.vel.z).length(), str(p.crouched),
+			(str(p.body.get_meta("anim").current_animation) if p.body.has_meta("anim") else "?")])
+	Input.action_release("move_forward")
+	Input.action_release("sprint")
+	Input.action_release("ads")
+	p.motion = mv_back      # 恢复镜头运动系统
+	p.sprint_toggled = false
+	p.crouched = false
+	p.prone = false
+	# ①d 兵种下半身体检:按兵种重建第一人称身体(GL B 有 4 套体型变体),低头看腿
+	var cls_back: String = p.class_id
+	for cls2 in ["assault", "engineer", "support", "recon"]:
+		p.class_id = cls2
+		p._rebuild_fp_body()
+		p.pitch = -0.90
+		await get_tree().create_timer(0.45).timeout
+		await get_tree().process_frame
+		var ic := get_viewport().get_texture().get_image()
+		if ic != null:
+			ic.save_png("E:/工作目录2/models_probe/pbody_cls_%s.png" % cls2)
+		G.camera.cull_mask = 1 << 1
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var icb := get_viewport().get_texture().get_image()
+		if icb != null:
+			icb.save_png("E:/工作目录2/models_probe/pbody_clsb_%s.png" % cls2)
+		G.camera.cull_mask = old_mask
+		# 第三人称机位:一眼看清四兵种身体体型差异(腿/躯干粗细)
+		p.pitch = 0.0
+		await get_tree().process_frame
+		var camc := Camera3D.new()
+		camc.fov = 42.0
+		G.main.add_child(camc)
+		camc.global_position = p.pos + Vector3(1.75, 1.30, 1.75)
+		camc.look_at(p.pos + Vector3(0.0, 0.92, 0.0), Vector3.UP)
+		camc.make_current()
+		await get_tree().create_timer(0.3).timeout
+		await get_tree().process_frame
+		var ibd := get_viewport().get_texture().get_image()
+		if ibd != null:
+			ibd.save_png("E:/工作目录2/models_probe/pbody_clsbody_%s.png" % cls2)
+		camc.queue_free()
+		G.camera.make_current()
+		p.pitch = -0.90
+		await get_tree().create_timer(0.2).timeout
+		var skc: Skeleton3D = p.body.get_meta("skel") if p.body.has_meta("skel") else null
+		if skc != null:
+			var ti: int = skc.find_bone("ThighL")
+			var ci2: int = skc.find_bone("Chest")
+			var tw: Vector3 = skc.global_transform * skc.get_bone_global_pose(ti).origin
+			var cw: Vector3 = skc.global_transform * skc.get_bone_global_pose(ci2).origin
+			print("[PBODY-CLS] %-9s ThighL.y=%.3f x=%.3f  Chest.y=%.3f(下压后应为 ~1.25)" % [
+				cls2, tw.y, tw.x, cw.y])
+	p.class_id = cls_back
+	p._rebuild_fp_body()
+	p.pitch = 0.0
+	await get_tree().create_timer(0.4).timeout
+	# ①e 与 NPC 士兵身体对照:左=玩家第一人称身体(头隐藏),右=士兵第三人称模型(完整头)
+	var nbody: Node3D = SoldierModel.build_soldier("us", "", p.class_id, SkinCfg.get_skin(p.class_id))
+	nbody.position = p.pos + Vector3(1.35, 0, 0)
+	nbody.rotation.y = PI
+	G.main.add_child(nbody)
+	p._set_fp_body_layers(nbody)
+	# 逐网格打印(含影子代理盒)世界位/世界尺寸
+	for pair in [["玩家FP身体", p.body], ["士兵NPC", nbody]]:
+		var stk2: Array = [pair[1]]
+		while not stk2.is_empty():
+			var n4: Node = stk2.pop_back()
+			if n4 is MeshInstance3D:
+				var m4 := n4 as MeshInstance3D
+				var wm: Transform3D = m4.global_transform
+				var sz: Vector3 = m4.get_aabb().size * wm.basis.get_scale()
+				print("[HEAD-DIAG] %-8s %-18s world=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) shadow=%d vis=%s" % [
+					pair[0], m4.name, wm.origin.x, wm.origin.y, wm.origin.z,
+					sz.x, sz.y, sz.z, m4.cast_shadow, str(m4.visible)])
+			for c4 in n4.get_children():
+				stk2.append(c4)
+	# 同框机位(前方平视)
+	var camn := Camera3D.new()
+	camn.fov = 42.0
+	G.main.add_child(camn)
+	camn.global_position = p.pos + Vector3(0.65, 1.45, 3.0)
+	camn.look_at(p.pos + Vector3(0.65, 0.95, 0.0), Vector3.UP)
+	camn.make_current()
+	await get_tree().create_timer(0.35).timeout
+	await get_tree().process_frame
+	var ivn := get_viewport().get_texture().get_image()
+	if ivn != null:
+		ivn.save_png("E:/工作目录2/models_probe/pbody_vs_npc.png")
+		print("[PBODY-SHOT] pbody_vs_npc")
+	camn.queue_free()
+	G.camera.make_current()
+	nbody.queue_free()
+	await get_tree().create_timer(0.3).timeout
+	# ②侧上视角看人形阴影(临时相机,先回平视让身体站立)
+	p.pitch = 0
+	var cam := Camera3D.new()
+	cam.fov = 55.0
+	G.main.add_child(cam)
+	var bp: Vector3 = p.pos
+	cam.global_position = bp + Vector3(4.2, 5.2, 4.2)
+	cam.look_at(bp + Vector3(0, 0.3, 0), Vector3.UP)
+	cam.make_current()
+	await get_tree().create_timer(0.4).timeout
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var img2 := get_viewport().get_texture().get_image()
+	if img2 != null:
+		img2.save_png("E:/工作目录2/models_probe/pbody_shadow.png")
+		print("[PBODY-SHOT] pbody_shadow")
+	# ③切枪重建影子武器,再拍阴影(轮廓应变化)
+	var g0: int = p.gun_index
+	if p.guns.size() > 1:
+		p.gun_index = (p.gun_index + 1) % p.guns.size()
+		p._update_body_gun()
+		await get_tree().create_timer(0.4).timeout
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var img3 := get_viewport().get_texture().get_image()
+		if img3 != null:
+			img3.save_png("E:/工作目录2/models_probe/pbody_shadow_switch.png")
+			print("[PBODY-SHOT] pbody_shadow_switch weapon=", p.gun().id)
+		p.gun_index = g0
+		p._update_body_gun()
+	# ④蹲姿(屈膝战斗蹲,非"腿缩一截")—— 相机对准身体实际位置(蹲/趴会把身体沿朝向前移)
+	p.crouched = true
+	await get_tree().create_timer(0.8).timeout
+	var bp4: Vector3 = p.body.global_position if "body" in p else bp
+	cam.global_position = bp4 + Vector3(4.6, 5.6, 4.6)
+	cam.look_at(bp4 + Vector3(0, 0.4, 0), Vector3.UP)
+	await get_tree().create_timer(0.15).timeout
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var img4 := get_viewport().get_texture().get_image()
+	if img4 != null:
+		img4.save_png("E:/工作目录2/models_probe/pbody_crouch.png")
+		print("[PBODY-SHOT] pbody_crouch")
+	# ⑤趴姿(贴地趴平+抬头,非"硬抬 45°")
+	p.crouched = false
+	p.prone = true
+	await get_tree().create_timer(0.8).timeout
+	var bp5: Vector3 = p.body.global_position if "body" in p else bp
+	cam.global_position = bp5 + Vector3(4.6, 5.6, 4.6)
+	cam.look_at(bp5 + Vector3(0, 0.2, 0), Vector3.UP)
+	await get_tree().create_timer(0.15).timeout
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var img5 := get_viewport().get_texture().get_image()
+	if img5 != null:
+		img5.save_png("E:/工作目录2/models_probe/pbody_prone.png")
+		print("[PBODY-SHOT] pbody_prone")
+	p.prone = false
+	cam.queue_free()
+	print("[PBODY] 认证完成")
+	get_tree().quit()
+
+
+## 蹲姿游戏内实拍认证:--test-squat
+## 玩家真实蹲下 + 强制最近 NPC 蹲下,近景多机位截真实游戏画面(非悬空摆拍)
+func _run_squat_check() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[SQUAT] 玩家未部署,跳过")
+		return
+	var p = G.player
+	p.spawn_protect = 60
+	if G.hud != null:
+		G.hud.visible = false
+	# 躲 NPC 采样选址:出生点可能人挤人(近距离 bot 挡机位),取 8 方向 10m 采样点中
+	# 离最近 bot/载具最远者传送过去,趁 AI 围拢前拍完(射线测不到自研碰撞,纯距离采样)
+	var best_p: Vector3 = p.pos
+	var best_bd := -1.0
+	for i in 8:
+		var ang := TAU * i / 8.0
+		var cand: Vector3 = p.pos + Vector3(sin(ang), 0, cos(ang)) * 10.0
+		var ndist := 1e9
+		for b in G.bots:
+			if b != null and is_instance_valid(b) and b.alive:
+				ndist = minf(ndist, (b.pos - cand).length())
+		for v in G.vehicles:
+			if v != null and is_instance_valid(v):
+				ndist = minf(ndist, (v.pos - cand).length())
+		if ndist > best_bd:
+			best_bd = ndist
+			best_p = cand
+	p.pos = best_p
+	p.vel = Vector3.ZERO
+	print("[SQUAT] 选址 dist_to_nearest=%.1f" % best_bd)
+	# 摘掉第一人称 viewmodel(独立相机会拍到挂在原点的枪,抢镜)
+	var _sq_vmguns: Array = []
+	for gg in p.guns:
+		if gg != null and gg.get("group") != null and gg.group.get_parent() != null:
+			_sq_vmguns.append([gg.group, gg.group.get_parent()])
+			gg.group.get_parent().remove_child(gg.group)
+	await get_tree().create_timer(0.3).timeout
+	var cam := Camera3D.new()
+	cam.fov = 50.0
+	G.main.add_child(cam)
+	# ---- 玩家蹲姿:真实蹲下,近景 3 机位 ----
+	p.crouched = true
+	await get_tree().create_timer(1.0).timeout
+	var bp: Vector3 = p.body.global_position if "body" in p else p.pos
+	# [实测] 浮空诊断:打印玩家原点/身体/Hips 骨/两脚骨的世界高度与地面高度
+	var sk: Skeleton3D = p.body.get_meta("skel") if p.body.has_meta("skel") else null
+	var gh: float = G.ground_h.call(p.pos.x, p.pos.z) if G.ground_h.is_valid() else 0.0
+	print("[SQUAT] pos.y=%.3f body.y=%.3f ground=%.3f anim=%s" % [
+		p.pos.y, p.body.global_position.y, gh,
+		(p.body.get_meta("anim").current_animation if p.body.has_meta("anim") else "?")])
+	if sk != null:
+		for bn in ["Hips", "FootL", "FootR"]:
+			var bi := sk.find_bone(bn)
+			if bi >= 0:
+				var gp: Vector3 = sk.get_bone_global_pose(bi).origin
+				print("[SQUAT] bone %s world_y=%.3f (x=%.2f z=%.2f)" % [bn, p.body.global_position.y + gp.y, gp.x, gp.z])
+	# 机位视线净空:静态世界(木箱/墙体)在物理空间内,射线挑无遮挡方位。
+	# 每个机位从偏好方位起试 12 个方位角,第一个 LOS 全净的胜出;全堵则退化为高角俯拍。
+	var body3d := p as CharacterBody3D
+	var space: PhysicsDirectSpaceState3D = body3d.get_world_3d().direct_space_state if body3d != null else null
+	var chest: Vector3 = bp + Vector3(0, 0.55, 0)
+	var los_clear := func(campos: Vector3) -> bool:
+		if space == null:
+			return true
+		var q := PhysicsRayQueryParameters3D.create(campos, chest)
+		if body3d != null:
+			q.exclude = [body3d.get_rid()]
+		return space.intersect_ray(q).is_empty()
+	var place_cam := func(hd: float, hh: float, start_ang: float) -> void:
+		var ok := false
+		for k in 12:
+			var ang: float = start_ang + float(k) * TAU / 12.0
+			var campos: Vector3 = bp + Vector3(sin(ang), 0.0, cos(ang)) * hd + Vector3(0, hh, 0)
+			if not los_clear.call(campos):
+				continue
+			cam.global_position = campos
+			cam.look_at(chest, Vector3.UP)
+			ok = true
+			break
+		if not ok:  # 全方位被堵:最高角俯拍最不易挡
+			cam.global_position = bp + Vector3(0.9, 2.8, 0.9)
+			cam.look_at(chest, Vector3.UP)
+		cam.make_current()
+	var shots := {
+		"squat_side":  [1.9, 0.75, 0.0],          # [水平距, 高度, 起始方位角] 纯侧视
+		"squat_34":    [2.3, 1.70, PI * 0.25],    # 3/4 高角俯拍
+		"squat_front": [2.0, 1.20, -PI * 0.5],    # 正面
+		"squat_low":   [1.35, 0.35, PI * 0.75],   # 贴地仰角
+	}
+	for sname in shots:
+		place_cam.call(shots[sname][0], shots[sname][1], shots[sname][2])
+		await get_tree().create_timer(0.2).timeout
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var img: Image = get_viewport().get_texture().get_image()
+		if img != null:
+			img.save_png("E:/工作目录2/models_probe/%s.png" % sname)
+			print("[SQUAT-SHOT] ", sname)
+	p.crouched = false
+	# ---- NPC 蹲姿:强制最近活 bot 蹲下,游戏内实拍 ----
+	var nb: Node = null
+	var nd := 1e9
+	for b in G.bots:
+		if b == null or not is_instance_valid(b) or not b.alive or b.vehicle != null:
+			continue
+		var d: float = b.pos.distance_to(p.pos)
+		if d < nd:
+			nd = d
+			nb = b
+	if nb != null:
+		nb.qa_lock_crouch = true   # AI 每帧 _decide_crouch 会覆盖 crouch,必须走 QA 锁
+		await get_tree().create_timer(1.2).timeout
+		var np: Vector3 = nb.pos
+		var nchest: Vector3 = np + Vector3(0, 0.5, 0)
+		var nok := false
+		for k in 12:
+			var ang := PI * 0.75 + float(k) * TAU / 12.0
+			var ncam: Vector3 = np + Vector3(sin(ang), 0.0, cos(ang)) * 2.3 + Vector3(0, 1.1, 0)
+			if space != null:
+				var q2 := PhysicsRayQueryParameters3D.create(ncam, nchest)
+				if not space.intersect_ray(q2).is_empty():
+					continue
+			cam.global_position = ncam
+			cam.look_at(nchest, Vector3.UP)
+			nok = true
+			break
+		if not nok:
+			cam.global_position = np + Vector3(0.9, 2.8, 0.9)
+			cam.look_at(nchest, Vector3.UP)
+		cam.make_current()
+		await get_tree().create_timer(0.2).timeout
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var img3: Image = get_viewport().get_texture().get_image()
+		if img3 != null:
+			img3.save_png("E:/工作目录2/models_probe/squat_npc_live.png")
+			print("[SQUAT-SHOT] squat_npc_live bot_dist=%.0f" % nd)
+		nb.qa_lock_crouch = false
+		nb.crouch = false
+	else:
+		print("[SQUAT] 附近无活 bot,跳过 NPC 实拍")
+	cam.queue_free()
+	# 还原 viewmodel
+	for rec in _sq_vmguns:
+		(rec[1] as Node).add_child(rec[0])
+	print("[SQUAT] 认证完成")
+	get_tree().quit()
+
+
+## 死亡布娃娃 + 趴姿贴地 + 蹲走/匍匐步态认证:--test-death
+## 4 死法(站/蹲/趴/站)双时刻截图 + 玩家趴姿骨位贴地数值 + 步态 bot 动画选片诊断
+func _run_death_check() -> void:
+	var waited := 0.0
+	while (G.state == "menu" or G.player == null or not G.player.alive) and waited < 25.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+	if G.player == null or not G.player.alive:
+		print("[DEATH] 玩家未部署,跳过")
+		return
+	var p = G.player
+	p.spawn_protect = 60
+	if G.hud != null:
+		G.hud.visible = false
+	# 选址:8 向×10m 离最近 bot/载具最远点(同 --test-squat)
+	var best_p: Vector3 = p.pos
+	var best_bd := -1.0
+	for k in 8:
+		var ang := k * TAU / 8.0
+		var cand: Vector3 = p.pos + Vector3(sin(ang), 0.0, cos(ang)) * 10.0
+		var nd := 1e9
+		for b in G.bots:
+			if b == null or not is_instance_valid(b) or not b.alive:
+				continue
+			nd = minf(nd, (b.pos - cand).length())
+		for v in G.vehicles:
+			nd = minf(nd, (v.pos - cand).length())
+		if nd > best_bd:
+			best_bd = nd
+			best_p = cand
+	p.pos = best_p
+	p.vel = Vector3.ZERO
+	print("[DEATH] 选址 dist_to_nearest=%.1f" % best_bd)
+	# 摘 viewmodel(独立相机拍到挂原点的枪抢镜)
+	var _dt_vmguns: Array = []
+	for gg in p.guns:
+		if gg != null and gg.get("group") != null and gg.group.get_parent() != null:
+			_dt_vmguns.append([gg.group, gg.group.get_parent()])
+			gg.group.get_parent().remove_child(gg.group)
+	await get_tree().create_timer(0.4).timeout
+	var fwd := Vector3(-sin(p.yaw), 0.0, -cos(p.yaw))
+	var right := Vector3(-fwd.z, 0.0, fwd.x)
+	# ---- 玩家趴姿骨位贴地数值(趴姿悬空诊断) ----
+	p.crouched = false
+	p.prone = true
+	await get_tree().create_timer(1.3).timeout
+	var gh: float = G.ground_h.call(p.pos.x, p.pos.z) if G.ground_h.is_valid() else 0.0
+	var psk: Skeleton3D = p.body.get_meta("skel") if p.body.has_meta("skel") else null
+	print("[DEATH] 玩家趴姿 body.y=%.3f 地=%.3f" % [p.body.global_position.y, gh])
+	if psk != null:
+		for bn in ["Hips", "Chest", "Head", "FootL", "FootR"]:
+			var bi := psk.find_bone(bn)
+			if bi >= 0:
+				var gp: Vector3 = psk.get_bone_global_pose(bi).origin
+				print("[DEATH] 玩家趴姿 %s world_y=%.3f (地=%.3f 抬高=%+.3f) 水平偏移=%.2f" % [
+					bn, p.body.global_position.y + gp.y, gh,
+					p.body.global_position.y + gp.y - gh, Vector2(gp.x, gp.z).length()])
+	p.prone = false
+	await get_tree().create_timer(0.6).timeout
+	# ---- 4 种死法:抓 4 个最近活 bot 摆一排(6m 前方,间隔 3m) ----
+	var victims: Array = []
+	for b in G.bots:
+		if b == null or not is_instance_valid(b) or not b.alive or b.vehicle != null:
+			continue
+		victims.append(b)
+		if victims.size() >= 4:
+			break
+	if victims.size() < 4:
+		print("[DEATH] 活 bot 不足 4 个(现有 %d),跳过尸体段" % victims.size())
+	else:
+		for i in victims.size():
+			var b = victims[i]
+			var off: Vector3 = right * ((i - 1.5) * 3.0) + fwd * 6.0
+			b.pos = Vector3(p.pos.x + off.x, p.pos.y, p.pos.z + off.z)
+			if G.ground_h.is_valid():
+				b.pos.y = G.ground_h.call(b.pos.x, b.pos.z)
+			b.vel = Vector3.ZERO
+			b.mesh.visible = true
+			b.respawn_t = 99.0   # 测试期不重生,防尸体截图到一半被拉走
+		victims[1].qa_lock_crouch = true
+		victims[2].qa_lock_prone = true
+		await get_tree().create_timer(1.3).timeout
+		victims[0].die(p)
+		victims[1].die(p)
+		victims[2].die(p)
+		victims[3].die(p)
+		var cam := Camera3D.new()
+		cam.fov = 55.0
+		G.main.add_child(cam)
+		for phase in [["mid", 0.25], ["end", 1.6]]:
+			await get_tree().create_timer(phase[1] as float).timeout
+			await get_tree().process_frame
+			await get_tree().process_frame
+			var row_c: Vector3 = Vector3(p.pos.x, p.pos.y + 0.9, p.pos.z) + fwd * 6.0
+			cam.global_position = row_c - fwd * 4.2 + right * 3.0 + Vector3(0, 0.4, 0)
+			cam.look_at(row_c, Vector3.UP)
+			cam.make_current()
+			var img: Image = get_viewport().get_texture().get_image()
+			if img != null:
+				img.save_png("E:/工作目录2/models_probe/death_%s.png" % phase[0])
+				print("[DEATH-SHOT] ", phase[0])
+		for i in victims.size():
+			var b = victims[i]
+			var sk2: Skeleton3D = b.mesh.get_meta("skel") if b.mesh.has_meta("skel") else null
+			var hy := -1.0
+			if sk2 != null:
+				var hi := sk2.find_bone("Hips")
+				if hi >= 0:
+					hy = b.mesh.global_position.y + sk2.get_bone_global_pose(hi).origin.y
+			print("[DEATH] 尸体%d death_t=%.2f mesh_rx=%.2f flat=%s Hips骨y=%.3f" % [
+				i, b.death_t, b.mesh.rotation.x, str(b._died_flat), hy])
+		cam.queue_free()
+	# ---- 蹲走/匍匐步态:抓 2 个活 bot,锁姿态等 AI 自己走,打印动画选片 ----
+	var moved: Array = []
+	for b in G.bots:
+		if b == null or not is_instance_valid(b) or not b.alive or b.vehicle != null:
+			continue
+		moved.append(b)
+		if moved.size() >= 2:
+			break
+	if moved.size() == 2:
+		# 清场:尸体段残留的尸体(death_t 4.5s 才隐藏)会挡在步态 bot 旁边冒充主角
+		if victims.size() == 4:
+			for vb in victims:
+				vb.mesh.visible = false
+		# 传送到玩家近旁干净点:匍匐 bot 爬向交火线会中弹变尸体(上轮实测)
+		for j in moved.size():
+			var go: Vector3 = p.pos + fwd * (4.0 + 3.0 * j)
+			moved[j].pos = Vector3(go.x, p.pos.y, go.z)
+			if G.ground_h.is_valid():
+				moved[j].pos.y = G.ground_h.call(go.x, go.z)
+			moved[j].vel = Vector3.ZERO
+		moved[0].qa_lock_crouch = true
+		moved[1].qa_lock_prone = true
+		await get_tree().create_timer(1.2).timeout
+		var camt := Camera3D.new()
+		camt.fov = 55.0
+		G.main.add_child(camt)
+		var b3d: Node3D = p as Node3D
+		var dspace: PhysicsDirectSpaceState3D = b3d.get_world_3d().direct_space_state
+		for j in moved.size():
+			var b3 = moved[j]
+			if not b3.alive:
+				print("[DEATH] 步态bot%d 已阵亡,跳过" % j)
+				continue
+			var an: AnimationPlayer = b3.mesh.get_meta("anim") if b3.mesh.has_meta("anim") else null
+			print("[DEATH] 步态bot%d anim=%s speed=%.2f" % [
+				j, (an.current_animation if an != null else "?"), b3._anim_speed])
+			var bp3: Vector3 = Vector3(b3.pos.x, b3.pos.y + 0.6, b3.pos.z)
+			# LOS 选址:12 方位角挑无遮挡机位(匍匐 bot 会爬到载具边,固定机位被挡)
+			for kk in 12:
+				var g_ang := float(kk) * TAU / 12.0
+				var gpos: Vector3 = bp3 + Vector3(sin(g_ang), 0.0, cos(g_ang)) * 3.0 + Vector3(0, 0.5, 0)
+				var q3 := PhysicsRayQueryParameters3D.create(gpos, bp3)
+				if dspace.intersect_ray(q3).is_empty():
+					camt.global_position = gpos
+					break
+				if kk == 11:
+					camt.global_position = bp3 + Vector3(0.8, 2.6, 0.8)
+			camt.look_at(bp3, Vector3.UP)
+			camt.make_current()
+			await get_tree().create_timer(0.2).timeout
+			await get_tree().process_frame
+			await get_tree().process_frame
+			var img2: Image = get_viewport().get_texture().get_image()
+			if img2 != null:
+				img2.save_png("E:/工作目录2/models_probe/gait_bot%d.png" % j)
+				print("[DEATH-SHOT] gait_bot%d" % j)
+		camt.queue_free()
+		moved[0].qa_lock_crouch = false
+		moved[1].qa_lock_prone = false
+	else:
+		print("[DEATH] 活 bot 不足 2 个,跳过步态段")
+	# 还原 viewmodel
+	for rec in _dt_vmguns:
+		(rec[1] as Node).add_child(rec[0])
+	print("[DEATH] 认证完成")
+	get_tree().quit()

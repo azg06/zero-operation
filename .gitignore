@@ -15,6 +15,12 @@ web_export/
 Thumbs.db
 desktop.ini
 
+# Python 缓存（Blender 建模管线）
+__pycache__/
+
+# Godot 编辑器误在项目内生成的本地数据(editor_settings/app_userdata/export_templates)
+Godot/
+
 # 本地调试
 user://
 *.cfg.local
