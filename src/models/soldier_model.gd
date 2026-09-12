@@ -444,18 +444,52 @@ static func _cylx(rt: float, rb: float, h: float, mat: Material) -> MeshInstance
 	return mi
 
 
-## 玩家第一人称身体(骨骼 GLB 版):低头可见真实腿部,阴影 = 人形轮廓
+## ★第一人称身体的"眼—胸口"间距(米):由 player.gd 每帧把 Chest 骨下压这个量。
+## 士兵 GLB 的背心顶面 1.595m / 冲刺前倾最高 ~1.62m,与站立眼高 1.70m 只差 ~10cm;
+## 主相机 near=0.08 ⇒ 相机平面会把背心顶面切出一条可见裂缝(Blender 逐帧量化:
+## Idle -17° 最小视深 0.077m < 0.08 ⇒ 穿模)。下压 0.15 后间距 ~25cm(真人 ≈30cm),
+## 全兵种 x 全动画 x 全俯角最小视深 ≥0.143m,且低头看到的是正常大小的胸口。
+const FP_CHEST_DROP := 0.15
+
+
+## 玩家第一人称身体(骨骼 GLB 版):低头可见真实胸口/腿部,阴影 = 人形轮廓
 ## - 复用士兵骨骼 GLB;头/脖/双臂骨骼 pose 缩至 0.01(动画不轨 scale 不会被覆盖):
-##   头藏入胸腔防挡视线;手臂隐藏(第一人称手臂由 viewmodel 锥形臂+手模独立渲染,防双臂)
+##   头/脖收进躯干防挡视线;手臂隐藏(第一人称手臂由 viewmodel 锥形臂+手模独立渲染,防双臂)
+##   **胸腔 Chest 必须保持 1.0**(低头要看得见自己的胸口,见 main.gd 身体可见性注释);
+##   胸段整体下移由 player.gd::_apply_fp_chest_drop() 用 pose position 实现(见 FP_CHEST_DROP)
 ## - 影子补偿:Head 骨附件挂 SHADOWS_ONLY 头/盔代理(地面影子有头);
 ##   影子枪挂 AimPitch 骨附件(臂链已缩不可挂,枪影仍随视线俯仰)
 ## meta: skel / anim / gun_mount / far_hide
 static func build_player_body(skin := "standard", weapon_id := "", class_id := "assault") -> Node3D:
 	var g := build_soldier_glb("us", "", class_id, skin)
 	g.name = "PlayerBody"
+	# 玩家身体用**独立材质副本**:NPC 共享的调色材质不能被写 uniform(否则所有人一起让位)
+	var src_m: ShaderMaterial = null
+	var st0: Array = [g]
+	while not st0.is_empty():
+		var n0: Node = st0.pop_back()
+		if n0 is MeshInstance3D and (n0 as MeshInstance3D).material_override is ShaderMaterial:
+			src_m = (n0 as MeshInstance3D).material_override
+			break
+		for c0 in n0.get_children():
+			st0.append(c0)
+	if src_m != null:
+		var pm: ShaderMaterial = src_m.duplicate() as ShaderMaterial
+		var st1: Array = [g]
+		while not st1.is_empty():
+			var n1: Node = st1.pop_back()
+			if n1 is MeshInstance3D and (n1 as MeshInstance3D).material_override is ShaderMaterial:
+				(n1 as MeshInstance3D).material_override = pm
+			for c1 in n1.get_children():
+				st1.append(c1)
+		g.set_meta("fp_mat", pm)
 	var skel: Skeleton3D = g.get_meta("skel")
 	if skel != null:
 		# 藏头/脖/双臂:缩到 1cm 藏进躯干(GLB 动画只轨 rotation/location,scale 设置永久生效)
+		# ★Chest 严禁缩(缩掉 = 低头看不见自己的胸口,用户已明确否决):旧版把 Chest 一起缩到
+		#   1cm 是治标——穿模真根因是**站姿眼高错配**:GLB 胸口(背心顶面 1.595,冲刺前倾最高
+		#   ~1.62)与旧眼高 1.62 几乎等高,相机等于贴在胸腔里,主相机 near=0.08 把胸口整片裁掉
+		#   ⇒ 低头"看不到胸部/看到内部"。正解 = 眼高对齐模型真实眼位(1.62→1.70,净空 ~8cm)。
 		for bn in ["Head", "Neck", "ShoulderL", "ShoulderR",
 				"UpperArmL", "UpperArmR", "ForearmL", "ForearmR", "HandL", "HandR"]:
 			var bi := skel.find_bone(bn)
@@ -469,6 +503,7 @@ static func build_player_body(skin := "standard", weapon_id := "", class_id := "
 		var hs := _box(0.2, 0.24, 0.2, _mat(Color.html("#c8a080"), 0.8))
 		hs.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
 		ha.add_child(hs)
+		# (影子躯干代理已删:胸腔本体恢复渲染后自身即影子投手,再挂代理会双层叠影)
 		var hpal: Dictionary = SKINS.get(class_id, SKINS["assault"]).get(skin, SKINS["assault"]["standard"])
 		var hel := _box(0.24, 0.12, 0.24, _mat(Color.html(hpal["helmet"]), 0.85))
 		hel.position = Vector3(0, 0.14, 0)

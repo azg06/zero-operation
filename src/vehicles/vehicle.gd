@@ -49,6 +49,11 @@ static func TYPES() -> Dictionary:
 			"tank": { "hp": 3600.0, "max_speed": 8.5, "max_rev": -3.5, "accel": 4.5, "brake": 8.0, "turn": 0.85,
 				"radius": 2.6, "seat": Vector3(0, 2.45, 0.3), "vehicle_name": "主战坦克", "weapon": null, "sus": 0.35,
 				"sus_ground": 15.0, "sus_rate": 5.0 },
+			# 突击摩托:最快最灵活、装甲最薄(1 驾 1 乘,无炮塔)。960m 大图的快速穿插单位。
+			"motorcycle": { "hp": 460.0, "max_speed": 27.0, "max_rev": -7.0, "accel": 16.0, "brake": 13.0,
+				"turn": 2.4, "radius": 0.85, "seat": Vector3(0, 1.02, 0.10),
+				"vehicle_name": "突击摩托", "weapon": null, "sus": 1.7,
+				"sus_ground": 30.0, "sus_rate": 10.0 },
 		}
 	return _types
 
@@ -57,6 +62,12 @@ var type := "jeep"
 var def: Dictionary
 var pos := Vector3.ZERO
 var yaw := 0.0
+
+
+## 贴地高度: **可行驶面**(秋津市桥面/引道 drive_)优先, 否则回退地形高度场。
+## 旧版直接读 ground_h → 载具永远在地面高度, 任何桥都上不去(用户报"有几座桥车上不去")。
+func _vh(x: float, z: float) -> float:
+	return G.veh_h.call(x, z, pos.y)
 var speed := 0.0
 var steer := 0.0
 var driver = null                # 驾驶员(控制移动;只能驾驶,不能开炮)
@@ -124,6 +135,8 @@ func _init(x: float, z: float, p_yaw: float, p_type := "jeep") -> void:
 			mesh = VehicleModels.build_apc()
 		"aa":
 			mesh = VehicleModels.build_aa()
+		"motorcycle":
+			mesh = VehicleModels.build_motorcycle()
 	mesh.position = pos
 	mesh.rotation.y = yaw
 	add_child(mesh)
@@ -140,7 +153,8 @@ func is_tank() -> bool:
 
 
 func has_turret() -> bool:
-	return type != "jeep"
+	# 摩托车与吉普同为无炮塔载具(乘客位 = 后座,不接管炮塔)
+	return type == "tank" or type == "apc" or type == "aa"
 
 
 func team():
@@ -795,16 +809,16 @@ func update_vehicle(dt: float) -> void:
 	# 0.055,实测 5-8Hz 恒晃 97% 时间);短波长真颠簸(碎石/凸起/棱坎)差值显著 → 照常触发。
 	var rough := 0.0
 	if G.ground_h.is_valid():
-		var gh0: float = G.ground_h.call(pos.x, pos.z)
+		var gh0: float = _vh(pos.x, pos.z)
 		var d2_2 := 0.0
 		var d2_6 := 0.0
 		for ax in 2:
 			var px: float = sin(yaw) if ax == 0 else cos(yaw)
 			var pz: float = cos(yaw) if ax == 0 else -sin(yaw)
-			var h2p: float = G.ground_h.call(pos.x - px * 2, pos.z - pz * 2)
-			var h2n: float = G.ground_h.call(pos.x + px * 2, pos.z + pz * 2)
-			var h6p: float = G.ground_h.call(pos.x - px * 6, pos.z - pz * 6)
-			var h6n: float = G.ground_h.call(pos.x + px * 6, pos.z + pz * 6)
+			var h2p: float = _vh(pos.x - px * 2, pos.z - pz * 2)
+			var h2n: float = _vh(pos.x + px * 2, pos.z + pz * 2)
+			var h6p: float = _vh(pos.x - px * 6, pos.z - pz * 6)
+			var h6n: float = _vh(pos.x + px * 6, pos.z + pz * 6)
 			d2_2 += absf(h2p + h2n - 2.0 * gh0)
 			d2_6 += absf(h6p + h6n - 2.0 * gh0)
 		rough = 0.5 * maxf(0.0, d2_2 - d2_6 / 9.0)
@@ -822,12 +836,12 @@ func update_vehicle(dt: float) -> void:
 
 	# 地形贴合(BR 起伏:阻尼贴地 + 坡度速率限制;旧图平地 target 恒 0 → 行为不变)
 	if G.ground_h.is_valid():
-		var gh_t: float = G.ground_h.call(pos.x, pos.z)
+		var gh_t: float = _vh(pos.x, pos.z)
 		# 车体随地形倾斜采样(前后/左右 ±2m)
-		var h_f: float = G.ground_h.call(pos.x - sin(yaw) * 2, pos.z - cos(yaw) * 2)
-		var h_b: float = G.ground_h.call(pos.x + sin(yaw) * 2, pos.z + cos(yaw) * 2)
-		var h_l: float = G.ground_h.call(pos.x + cos(yaw) * 2, pos.z - sin(yaw) * 2)
-		var h_r: float = G.ground_h.call(pos.x - cos(yaw) * 2, pos.z + sin(yaw) * 2)
+		var h_f: float = _vh(pos.x - sin(yaw) * 2, pos.z - cos(yaw) * 2)
+		var h_b: float = _vh(pos.x + sin(yaw) * 2, pos.z + cos(yaw) * 2)
+		var h_l: float = _vh(pos.x + cos(yaw) * 2, pos.z - sin(yaw) * 2)
+		var h_r: float = _vh(pos.x - cos(yaw) * 2, pos.z + sin(yaw) * 2)
 		if not _ground_ready:
 			_sus_y = gh_t
 			_pitch_s = atan2(h_f - h_b, 4)
@@ -859,14 +873,17 @@ func update_vehicle(dt: float) -> void:
 	if mesh.has_meta("wheels"):
 		for w in mesh.get_meta("wheels"):
 			w.rotation.x += speed * dt / 0.42
-	if type == "jeep":
+	if not has_turret():
+		# 无炮塔载具(吉普/摩托):前轮转向枢轴
 		if mesh.has_meta("front_wheels"):
 			for p in mesh.get_meta("front_wheels"):
 				p.rotation.y = steer * 0.42
-	else:
+	elif mesh.has_meta("turret") and mesh.has_meta("cannon"):
 		var turret_node := mesh.get_meta("turret") as Node3D
 		var cannon_node := mesh.get_meta("cannon") as Node3D
-		var muzzle_node := mesh.get_meta("muzzle") as Node3D
+		var muzzle_node: Node3D = null
+		if mesh.has_meta("muzzle"):
+			muzzle_node = mesh.get_meta("muzzle") as Node3D
 		# 炮塔伺服角度 + 开炮机械震颤
 		turret_node.rotation.y = turret_yaw + turret_shake_yaw
 		# rotation.x 正值=炮口上扬,与 turret_pitch 同号(原负号导致俯仰反向)
@@ -885,7 +902,7 @@ func dispose() -> void:
 ## ==================== 步兵 vs 载具实体碰撞 ====================
 ## 载具出生点安全化:推离静态碰撞体,避免生成在废墟/拒马/箱体等小物件内部
 static func safe_spawn_pos(p: Vector3, radius: float) -> Vector3:
-	var y: float = G.ground_h.call(p.x, p.z) if G.ground_h.is_valid() else 0.0
+	var y: float = G.veh_h.call(p.x, p.z, p.y)
 	var q := Utils.move_collide(Vector3(p.x, y, p.z), radius, 2.2)
 	# 第二次推挤兜底:窄缝/多物夹缝中再往外挪一轮
 	return Utils.move_collide(q, radius, 2.2)

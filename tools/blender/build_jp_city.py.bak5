@@ -1,0 +1,2390 @@
+"""
+秋津市大型日本城市地图 —— 分区建模主脚本(tools/blender/build_jp_city.py)
+设计真源: tools/blender/jp_city_design.md(v2, 8 旗 + 双基地, 960x960m)
+
+用法:
+  blender --background --python build_jp_city.py -- zone1
+  blender --background --python build_jp_city.py -- zone1 norender
+产出:
+  models/map_akitsu/zone_N.glb   (视觉合并网格 + col_*/walk_* Empty 节点)
+  shots/akitsu/zoneN_{iso,top,street}.png (渲染验收)
+
+坐标系: 全部 Godot 语义(见 jp_common.py)。每个 zone 内坐标为【局部坐标】,
+原点 = 设计文档分区中心; 全局换算写在注释里。
+"""
+import sys, os, math
+import bpy
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from gunforge import reset, add_cyl, add_torus, g2b, gsz, rot_g2b, join_parts  # noqa
+from jp_common import (
+    add_box,  # jp_common 的零-ops 版本(覆盖 gunforge.add_box)
+    zmat, solid, deco, slab, wall_x, wall_z, stairs_x, stairs_z, floor_slab,
+    parapet, gable_roof, flat_roof, torii, stone_lantern, tree_cherry,
+    tree_pine, tree_cedar, vending_machine, utility_pole, wire_x, street_lamp,
+    guardrail_x, jersey_barrier, sandbag_wall, wreck_car, sign_board, noren,
+    zone_export, zone_render,
+)
+import jp_common as J
+
+ROOT = "E:/工作目录2/zero/steel_frontline_godot"
+
+
+# 草坪斑收缩(2026-09-10): 原设计的"草坪斑"每个分区铺了几万平米(神社区草地占 39%),
+# 全图航拍像高尔夫球场而不是城市。统一收缩到一半边长(= 1/4 面积), 保留绿地意向。
+LAWN_K = 0.5
+
+
+def _lawn(xa, xb, za, zb, k=None):
+    """把一块草地矩形朝中心收缩 k 倍, 返回新的 (xa, xb, za, zb)。"""
+    k = LAWN_K if k is None else k
+    cx, cz = (xa + xb) * 0.5, (za + zb) * 0.5
+    hw, hd = (xb - xa) * 0.5 * k, (zb - za) * 0.5 * k
+    return (cx - hw, cx + hw, cz - hd, cz + hd)
+MODEL_DIR = ROOT + "/models/map_akitsu"
+SHOT_DIR = ROOT + "/shots/akitsu"
+
+
+# ============================================================ Z1 神社+传统街区
+# 局部原点 = 旗 A 广场中心, 全局 (-300, +60)。
+# 参道沿 x(+150 一之鸟居 -> -52 二之鸟居 -> 拜殿)。
+def build_zone_1(render=True):
+    reset()
+    J._zone_cols.clear()
+    J._zone_walks.clear()
+    P = []
+
+    # ---------------- 地表铺装(视觉; 叠加层顶面逐层抬高 >=0.03 防 CYCLES 共面黑面) ----------------
+    P.append(slab("z1_ground", -160, 160, -100, 180, y=0, t=0.04, mat="asphalt_w"))          # 全区土面
+    P.append(slab("z1_sando", -52, 152, -3.2, 3.2, y=0.06, mat="stone"))                # 参道石板
+    P.append(slab("z1_plaza", -96, -52, -22, 22, y=0.06, mat="plaster"))                # 前庭白砂利
+    for i, (xa, xb, za, zb) in enumerate([                                              # 草坪斑
+            (-160, -140, -60, 40), (-160, -120, 60, 170), (60, 150, 20, 90),
+            (60, 150, -80, -14), (-60, 40, 60, 170), (-60, 20, -80, -14)]):
+        P.append(slab("z1_grass%d" % i, *_lawn(xa, xb, za, zb), y=0.035, t=0.05, mat="grass"))
+
+    # ---------------- 鸟居 x2 ----------------
+    P += torii("z1_torii1", 150, 0, h=9.0, span=7.0, rot90=True)     # 全局 (-150, 60)
+    P += torii("z1_torii2", -52, 0, h=7.5, span=6.0, rot90=True)     # 全局 (-352, 60)
+    # 社号木柱
+    P += sign_board("z1_sign", 146, 5.5, 1.35, 0.7, 2.3, rot=0.0, kind="wood_d")
+    P.append(solid("z1_sign_post", (0.12, 1.4, 0.12), (146, 0.7, 5.5), "wood_d", bev=0.01))
+
+    # ---------------- 石灯笼 x10 + 狛犬 ----------------
+    for xi, x in enumerate([135, 115, 95, 75, 55]):
+        for si, s in enumerate((-1, 1)):
+            P += stone_lantern("z1_lant%d_%d" % (xi, si), x, s * 5.6, h=1.7)
+    # 狛犬(台座+蹲兽剪影)
+    for si, s in enumerate((-1, 1)):
+        P.append(solid("z1_koma_ped%d" % si, (1.1, 0.55, 0.9), (-60, 0.28, s * 3.8), "stone", bev=0.03))
+        b = add_box("z1_koma_b%d" % si, (0.55, 0.62, 1.0), (-60, 0.85, s * 3.8), bevel=0.22)
+        zmat(b, "stone")
+        P.append(b)
+        h = add_box("z1_koma_h%d" % si, (0.42, 0.42, 0.5), (-60, 1.32, s * 3.8 - 0.25), bevel=0.16)
+        zmat(h, "stone")
+        P.append(h)
+
+    # ---------------- 手水舍(4 柱亭) ----------------
+    for i, (dx, dz) in enumerate([(-1, -1), (1, -1), (-1, 1), (1, 1)]):
+        c = add_cyl("z1_temyz_c%d" % i, 0.14, 2.6, (-72 + dx * 1.3, 1.3, -12 + dz * 1.1), axis="y", seg=8)
+        zmat(c, "wood_b")
+        P.append(c)
+    P.append(slab("z1_temyz_floor", -74, -70, -13.5, -10.5, y=0.12, t=0.12, mat="stone"))
+    P.append(slab("z1_temyz_roof", -74.6, -69.4, -14, -10, y=3.0, t=0.18, mat="roof_tile"))
+    P.append(solid("z1_temyz_basin", (1.4, 0.5, 1.0), (-72, 0.65, -12), "stone", bev=0.04))
+    P.append(deco("z1_temyz_water", (1.1, 0.06, 0.7), (-72, 0.86, -12), "water"))
+
+    # ---------------- 绘马架 ----------------
+    for i, (dx, dz) in enumerate([(-1, 0), (1, 0)]):
+        c = add_cyl("z1_ema_c%d" % i, 0.09, 2.0, (-76 + dx * 1.6, 1.0, 10 + dz), axis="y", seg=6)
+        zmat(c, "wood_d")
+        P.append(c)
+    P.append(solid("z1_ema_beam", (3.4, 0.14, 0.14), (-76, 1.9, 10), "wood_d", bev=0.01))
+    for i in range(6):                                   # 悬挂绘马
+        P.append(deco("z1_ema_p%d" % i, (0.22, 0.3, 0.02),
+                      (-77.1 + i * 0.42, 1.62, 10.05), "wood_b", bev=0.005))
+
+    # ---------------- 拜殿(核心可进建筑, 全局 x[-418,-396]) ----------------
+    # 基坛 + 台阶
+    P.append(solid("z1_ht_base", (22, 0.5, 12), (-107, 0.25, 0), "stone", bev=0.01))
+    J.walk("z1_ht_base_w", (22, 0.08, 12), (-107, 0.46, 0))
+    P += stairs_x("z1_ht_st", -96, -93.2, 0, 4.0, 0.0, 0.5, mat="stone", up_dir="-x")
+    P += stairs_x("z1_ht_st2", -96, -93.2, 6.5, 2.0, 0.0, 0.5, mat="stone", up_dir="-x")   # 东南角第二梯
+    # 四面墙(y 0.5-4.7): 东正面双门+中窗 / 南北门+窗
+    P += wall_z("z1_ht_e", -5, 5, -96, 0.3, 0.5, 4.7, "wood_b",
+                doors=[(-2.2, 1.5, 2.3), (2.2, 1.5, 2.3)], windows=[(0, 1.6, 1.5, 2.9)])
+    P += wall_x("z1_ht_s", -118, -96, -5, 0.3, 0.5, 4.7, "wood_b",
+                doors=[(-104, 1.4, 2.2)], windows=[(-112, 1.4, 1.5, 2.9), (-98.5, 1.2, 1.5, 2.9)])
+    P += wall_x("z1_ht_n", -118, -96, 5, 0.3, 0.5, 4.7, "wood_b",
+                doors=[(-108, 1.4, 2.2)], windows=[(-113, 1.4, 1.5, 2.9), (-100, 1.2, 1.5, 2.9)])
+    P += wall_z("z1_ht_w", -5, 5, -118, 0.3, 0.5, 4.7, "wood_b")
+    # 正面前廊柱 x5 + 柱顶贯
+    for i in range(5):
+        c = add_cyl("z1_ht_col%d" % i, 0.24, 4.2, (-94.6, 2.6, -4 + i * 2), axis="y", seg=8)
+        zmat(c, "wood_d")
+        P.append(c)
+    J.col("z1_ht_cols", (0.6, 4.2, 9.2), (-94.6, 2.6, 0))
+    P.append(deco("z1_ht_nagekan", (0.3, 0.25, 9.4), (-94.6, 3.9, 0), "wood_d"))
+    # 千木(脊端交叉柱 x2 组)
+    for si, sx in enumerate((-1, 1)):
+        for k, ang in enumerate((0.42, -0.42)):
+            b = add_box("z1_ht_chigi%d_%d" % (si, k), (0.16, 1.5, 0.16),
+                        (-95 + sx * 0.4, 7.0 - abs(ang), 0), bevel=0.02)
+            b.rotation_euler = rot_g2b((0, sx * ang, 0))
+            zmat(b, "wood_d")
+            P.append(b)
+    # 入母屋顶(双坡 + 脊)
+    P += gable_roof("z1_ht_roof", -119, -95, -6.5, 6.5, 5.0, 7.2, "roof_tile", overhang=0.7)
+    # 内部: 神棚 + 内柱
+    P.append(deco("z1_ht_altar", (3.0, 2.3, 1.0), (-116, 1.7, 0), "gold", bev=0.03))
+    P.append(deco("z1_ht_altar2", (2.2, 0.9, 0.7), (-116, 3.0, 0), "wood_d"))
+    for s in (-1, 1):
+        c = add_cyl("z1_ht_icol%d" % s, 0.2, 4.2, (-107, 2.6, s * 3.2), axis="y", seg=8)
+        zmat(c, "wood_d")
+        P.append(c)
+    # 弹痕(东墙外侧)
+    for i, (dz, dy) in enumerate([(-3.4, 1.6), (-2.9, 2.2), (3.1, 1.8), (3.6, 2.5), (0.8, 2.6)]):
+        P.append(deco("z1_ht_hole%d" % i, (0.05, 0.34, 0.3), (-95.8, dy, dz), "dark", bev=0.0))
+
+    # ---------------- 渡廊(拜殿-本殿) ----------------
+    P += floor_slab("z1_rk_floor", -124, -118, -1.2, 1.2, 0.55, 0.2, "wood_b")
+    P.append(solid("z1_rk_rail_s", (6, 0.9, 0.14), (-121, 1.0, -1.2), "wood_d", bev=0.01))
+    P.append(solid("z1_rk_rail_n", (6, 0.9, 0.14), (-121, 1.0, 1.2), "wood_d", bev=0.01))
+    for i in range(3):
+        c = add_cyl("z1_rk_col%d" % i, 0.12, 2.0, (-122.5 + i * 2.5, 1.55, 0), axis="y", seg=6)
+        zmat(c, "wood_d")
+        P.append(c)
+    P.append(slab("z1_rk_roof", -124.3, -117.7, -1.7, 1.7, y=2.6, t=0.14, mat="roof_tile"))
+
+    # ---------------- 本殿(内阵, 全局 x[-434,-424]) ----------------
+    P.append(solid("z1_hs_base", (11, 0.5, 9), (-129, 0.25, 0), "stone", bev=0.01))
+    J.walk("z1_hs_base_w", (11, 0.08, 9), (-129, 0.46, 0))
+    P += stairs_x("z1_hs_st", -124, -121.6, 0, 3.0, 0.0, 0.5, mat="stone", up_dir="-x")
+    P += wall_z("z1_hs_e", -4, 4, -124, 0.28, 0.5, 4.0, "vermilion",
+                doors=[(0, 1.3, 2.2)], windows=[(2.9, 1.1, 1.6, 2.7), (-2.9, 1.1, 1.6, 2.7)])
+    P += wall_x("z1_hs_n", -134, -124, 4, 0.28, 0.5, 4.0, "vermilion",
+                doors=[(-129, 1.3, 2.2)], windows=[(-125.6, 1.0, 1.6, 2.7), (-132.4, 1.0, 1.6, 2.7)])
+    P += wall_x("z1_hs_s", -134, -124, -4, 0.28, 0.5, 4.0, "vermilion",
+                windows=[(-126.5, 1.1, 1.6, 2.7), (-129, 1.1, 1.6, 2.7), (-131.5, 1.1, 1.6, 2.7)])
+    P += wall_z("z1_hs_w", -4, 4, -134, 0.28, 0.5, 4.0, "vermilion")
+    P += gable_roof("z1_hs_roof", -135, -123, -5.2, 5.2, 4.4, 6.4, "roof_tile", overhang=0.6)
+    # 内阵: 神龛 + 御神体
+    P.append(deco("z1_hs_za", (2.2, 1.6, 1.2), (-132.5, 1.3, 0), "wood_d", bev=0.03))
+    P.append(deco("z1_hs_kagami", (0.5, 0.5, 0.1), (-132.5, 2.4, 0), "metal"))
+    for i, (dx, dz) in enumerate([(-1.5, -1.5), (1.5, -1.5), (-1.5, 1.5), (1.5, 1.5)]):
+        c = add_cyl("z1_hs_icol%d" % i, 0.14, 3.5, (-129 + dx, 2.25, dz), axis="y", seg=6)
+        zmat(c, "wood_d")
+        P.append(c)
+
+    # ---------------- 社务所(可进, 全局 x[-370,-358] z[108,115]) ----------------
+    P += wall_x("z1_sm_s", -70, -58, 48, 0.28, 0, 3.4, "plaster",
+                doors=[(-64, 1.4, 2.2)], windows=[(-68, 1.4, 1.0, 2.2), (-60, 1.4, 1.0, 2.2)])
+    P += wall_x("z1_sm_n", -70, -58, 55, 0.28, 0, 3.4, "plaster",
+                doors=[(-66, 1.3, 2.2)], windows=[(-62, 1.4, 1.0, 2.2)])
+    P += wall_z("z1_sm_e", 48, 55, -58, 0.28, 0, 3.4, "plaster",
+                windows=[(51.5, 1.3, 1.0, 2.2)])
+    P += wall_z("z1_sm_w", 48, 55, -70, 0.28, 0, 3.4, "plaster")
+    P += gable_roof("z1_sm_roof", -71, -57, 47, 56, 3.6, 5.2, "roof_tile", overhang=0.5)
+    for i in range(3):                                   # 室内办公桌
+        P.append(deco("z1_sm_desk%d" % i, (1.6, 0.75, 0.7), (-67.5 + i * 3.2, 0.45, 52.5), "wood_d", bev=0.02))
+
+    # ---------------- 回廊(瑞垣, L 形 + 门洞) ----------------
+    P += wall_x("z1_kair_s", -118, -70, -16, 0.26, 0, 2.6, "vermilion",
+                doors=[(-94, 2.4, 2.2), (-80, 2.0, 2.2)])
+    P += wall_z("z1_kair_w", -16, 40, -70, 0.26, 0, 2.6, "vermilion",
+                doors=[(20, 2.0, 2.2)])
+    for i in range(7):                                   # 楹柱 + 檩
+        c = add_cyl("z1_kair_c%d" % i, 0.11, 2.9, (-118 + i * 8, 1.45, -16.25), axis="y", seg=6)
+        zmat(c, "vermilion")
+        P.append(c)
+    P.append(slab("z1_kair_roof", -119, -69, -17.1, -14.9, y=3.0, t=0.12, mat="roof_tile"))
+    P.append(slab("z1_kair_roof2", -71.1, -68.9, -16, 40, y=3.0, t=0.12, mat="roof_tile"))
+
+    # ---------------- 土塀(北缘) ----------------
+    P += wall_x("z1_dobei", -140, -100, 42, 0.4, 0, 2.2, "plaster",
+                doors=[(-120, 2.2, 1.9)])
+    P.append(slab("z1_dobei_cap", -140.3, -99.7, 41.6, 42.4, y=2.28, t=0.1, mat="roof_tile"))
+
+    # ---------------- 植栽 ----------------
+    for i, (x, z) in enumerate([(-98, 24), (-98, -24), (-72, 26), (-72, -26),
+                                (-50, 22), (-50, -22), (30, 15), (30, -15),
+                                (70, 15), (70, -15), (110, 15), (110, -15)]):
+        P += tree_cherry("z1_sak%d" % i, x, z, h=4.2 + (i % 3) * 0.5, r=2.1)
+    for i, (x, z) in enumerate([(-142, 8), (-142, -8), (-150, 18), (-150, -18)]):
+        P += tree_pine("z1_pine%d" % i, x, z, h=5.5)
+    for i in range(8):                                   # 北缘杉林
+        P += tree_cedar("z1_cedar%d" % i, -140 + i * 14, 165 + (i % 2) * 6, h=7.5)
+    for i in range(4):                                   # 南缘杉
+        P += tree_cedar("z1_cedar_s%d" % i, -120 + i * 24, -76, h=7.0)
+
+    # ---------------- 传统街区(旧街道 x=60, 町屋 x2) ----------------
+    P.append(slab("z1_shinstreet", 46, 74, -44, 44, y=0.05, t=0.05, mat="stone_d"))     # 石畳旧街道
+    # 町屋 1(南, 可进: 正门朝北 + 东侧门; 格子窗)
+    P += wall_x("z1_machi1_n", 52, 68, -24, 0.28, 0, 3.2, "wood_b",
+                doors=[(58, 1.3, 2.2)], windows=[(54.2, 1.6, 1.0, 2.4), (64.5, 1.6, 1.0, 2.4)])
+    P += wall_x("z1_machi1_s", 52, 68, -40, 0.28, 0, 3.2, "wood_b",
+                windows=[(56, 1.4, 1.0, 2.4), (63, 1.4, 1.0, 2.4)])
+    P += wall_z("z1_machi1_e", -40, -24, 68, 0.28, 0, 3.2, "wood_b",
+                doors=[(-30, 1.2, 2.1)])
+    P += wall_z("z1_machi1_w", -40, -24, 52, 0.28, 0, 3.2, "wood_b")
+    P += gable_roof("z1_machi1_roof", 51, 69, -41, -23, 3.4, 5.0, "roof_tile", overhang=0.5)
+    P.append(deco("z1_machi1_noren", (1.2, 0.5, 0.04), (58, 2.0, -23.8), "sign_b"))     # 暖帘
+    P.append(solid("z1_machi1_tabl", (2.0, 0.7, 0.8), (62, 0.4, -32), "wood_d", bev=0.02))  # 室内桌
+    # 町屋 2(北, 不可进装饰+格子窗)
+    P += wall_x("z1_machi2_n", 50, 66, 40, 0.28, 0, 3.2, "plaster",
+                windows=[(54, 1.6, 1.0, 2.4), (61.5, 1.6, 1.0, 2.4)])
+    P += wall_x("z1_machi2_s", 50, 66, 24, 0.28, 0, 3.2, "wood_b",
+                windows=[(54, 1.6, 1.0, 2.4), (61.5, 1.6, 1.0, 2.4)])
+    P += wall_z("z1_machi2_e", 24, 40, 66, 0.28, 0, 3.2, "plaster")
+    P += wall_z("z1_machi2_w", 24, 40, 50, 0.28, 0, 3.2, "plaster")
+    P += gable_roof("z1_machi2_roof", 49, 67, 23, 41, 3.4, 5.0, "roof_tile", overhang=0.5)
+    P.append(deco("z1_machi2_sign", (0.9, 0.5, 0.08), (57.5, 2.6, 23.8), "sign_o"))     # 招牌
+    # 吊灯笼(旧街道两侧)
+    for i, (x, s) in enumerate([(50, -1), (58, 1), (66, -1), (74, 1)]):
+        p = add_cyl("z1_chouchin_p%d" % i, 0.05, 2.6, (x, 1.3, s * 5.2), axis="y", seg=6)
+        zmat(p, "wood_d")
+        P.append(p)
+        l = add_cyl("z1_chouchin%d" % i, 0.28, 0.7, (x, 2.3, s * 5.2), axis="y", seg=8, taper=0.85)
+        zmat(l, "lamp")
+        P.append(l)
+
+    # ---------------- 参道休憩所 + 长椅(中段) ----------------
+    for i, (dx, dz) in enumerate([(-1, -1), (1, -1), (-1, 1), (1, 1)]):
+        c = add_cyl("z1_kyukei_c%d" % i, 0.11, 2.4, (90 + dx * 1.4, 1.2, 8 + dz * 1.1), axis="y", seg=6)
+        zmat(c, "wood_b")
+        P.append(c)
+    P.append(slab("z1_kyukei_roof", 88.2, 91.8, 6.5, 9.5, y=2.7, t=0.14, mat="roof_tile"))
+    for i, z in enumerate((4.5, -4.5)):                  # 长椅(参道两侧)
+        P.append(solid("z1_bench%d" % i, (1.8, 0.45, 0.5), (88, 0.25, z), "wood_d", bev=0.02))
+        P.append(solid("z1_bench_b%d" % i, (1.8, 0.5, 0.12), (88, 0.65, z + 0.19), "wood_d", bev=0.02))
+
+    # ---------------- 旗 A 掩体补强(广场中央 15m 内) ----------------
+    for i, (x, z, s) in enumerate([(-8, 6, 1.4), (6, -7, 1.7), (-3, -14, 1.2)]):        # 景石
+        r = bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=1, radius=s, location=g2b((x, s * 0.45, z)))
+        ob = bpy.context.active_object
+        ob.name = "z1_rock%d" % i
+        ob.scale = gsz((1.3, 0.7, 1.0))
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        zmat(ob, "stone_d")
+        P.append(ob)
+        J.col("z1_rock%d" % i, (s * 2.2, s * 0.9, s * 1.8), (x, s * 0.42, z))
+    for i, (x, z) in enumerate([(-5, 10), (5, 10)]):     # 幡柱(旗点地标+掩体柱)
+        p = add_cyl("z1_bashira%d" % i, 0.09, 4.5, (x, 2.25, z), axis="y", seg=6)
+        zmat(p, "wood_d")
+        P.append(p)
+        f = add_box("z1_bashira_f%d" % i, (0.5, 2.2, 0.03), (x + 0.3, 3.2, z), bevel=0.0)
+        zmat(f, "banner")
+        P.append(f)
+        J.col("z1_bashira%d" % i, (0.22, 4.5, 0.22), (x, 2.25, z))
+    P += sandbag_wall("z1_sb2", -14, -4, 2.6, 1.2)
+    P += sandbag_wall("z1_sb3", 12, 4, 2.6, -1.1)
+
+    # ---------------- 战场痕迹 + 街道设施 ----------------
+    P += jersey_barrier("z1_jb0", 122, -4.2, 2.0, 0.0)
+    P += jersey_barrier("z1_jb1", 122, 4.2, 2.0, 0.0)
+    P += jersey_barrier("z1_jb2", 118, 0, 2.0, 1.5)
+    P += sandbag_wall("z1_sb0", -90, -13, 3.0, 0.2)
+    P += sandbag_wall("z1_sb1", -86, 13, 3.0, -0.15)
+    P += wreck_car("z1_wreck", 100, -9, 0.35)
+    P += vending_machine("z1_vend0", -48, 18, rot=90.0, kind="soda_red")
+    P += vending_machine("z1_vend1", -48, -18, rot=90.0, kind="soda_blue")
+    P += street_lamp("z1_lamp0", -46, 12, 5.2, rot_z=1.6)
+    P += street_lamp("z1_lamp1", -46, -12, 5.2, rot_z=-1.6)
+    P += utility_pole("z1_pole0", 140, 9, 8.5)
+    P += utility_pole("z1_pole1", 80, 9, 8.5, trafo=True)
+    P += utility_pole("z1_pole2", 20, 9, 8.5)
+    P += wire_x("z1_wire0", 140, 80, 9, 7.2)
+    P += wire_x("z1_wire1", 80, 20, 9, 7.2)
+
+    # ---------------- 导出 + 渲染 ----------------
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    zone_export("akitsu_z1", P, MODEL_DIR + "/zone_1.glb")
+    if render:
+        zone_render("z1", (0, 0, 0), 170, SHOT_DIR + "/zone1")
+
+
+# ============================================================ Z2 本町商店街
+# 局部原点 = 区中心, 全局 (-140, -120): lx = gx+140, lz = gz+120。
+# 拱廊沿 z 200m(lz -110~+90 = 全局 z -230~-30); 国道 lz[69,91]; 県道 lx[71,89]。
+# 旗 C = 全局 (-140,-100) = 局部 (0, +20), 位于拱廊中北段。
+
+def _shop(prefix, lx0, lx1, lz0, lz1, h, face="e", mat="plaster",
+          door_z=None, enter_front=True, enter_back=True, roof="flat"):
+    """沿拱廊店铺: 临街面 face("e"=东墙 lx1 朝拱廊 / "w"=西墙 lx0 朝拱廊)。
+    enter_front -> 临街自动 1.4m 门洞; enter_back -> 背街门洞。"""
+    P = []
+    fx, bx = (lx1, lx0) if face == "e" else (lx0, lx1)
+    cz = (lz0 + lz1) / 2.0
+    d_f = [(door_z, 1.4, 2.2)] if door_z else ([(cz, 1.4, 2.2)] if enter_front else [])
+    d_b = [(cz, 1.4, 2.2)] if enter_back else []
+    P += wall_z(prefix + "_fe", lz0, lz1, fx, 0.26, 0, h, mat, doors=d_f,
+                windows=[] if d_f else [(cz + 3.0, 2.2, 0.9, 2.3), (cz - 3.0, 2.2, 0.9, 2.3)])
+    P += wall_z(prefix + "_fb", lz0, lz1, bx, 0.26, 0, h, mat, doors=d_b,
+                windows=[] if d_b else [(cz, 1.4, 1.0, 2.2)])
+    P += wall_x(prefix + "_s0", lx0, lx1, lz0, 0.26, 0, h, mat)
+    P += wall_x(prefix + "_s1", lx0, lx1, lz1, 0.26, 0, h, mat)
+    if roof == "flat":
+        P += flat_roof(prefix + "_roof", lx0 - 0.3, lx1 + 0.3, lz0 - 0.3, lz1 + 0.3, h,
+                       "concrete", walkable=False, parapet_h=0.5)
+    else:
+        P += gable_roof(prefix + "_roof", lx0, lx1, lz0, lz1, h - 0.2, h + 1.4, "roof_tile",
+                        overhang=0.35)
+    return P
+
+
+def build_zone_2(render=True):
+    reset()
+    J._zone_cols.clear()
+    J._zone_walks.clear()
+    P = []
+
+    # ---------------- 地表铺装(逐层抬升防共面黑面) ----------------
+    P.append(slab("z2_ground", -200, 200, -140, 140, y=0.03, t=0.05, mat="asphalt_w"))  # 城市地表
+    P.append(slab("z2_kokudo", -200, 200, 69, 91, y=0.05, t=0.04, mat="asphalt"))      # 国道段
+    P.append(slab("z2_kendo0", 71, 89, -140, 69, y=0.05, t=0.04, mat="asphalt"))       # 県道段(南, 避让国道)
+    P.append(slab("z2_kendo1", 71, 89, 91, 140, y=0.05, t=0.04, mat="asphalt"))        # 県道段(北)
+    P.append(slab("z2_kyudo", -104, -96, -140, 69, y=0.055, t=0.04, mat="stone_d"))    # 旧街道石畳
+    P.append(slab("z2_gai_center", -9, 9, -110, 90, y=0.06, t=0.04, mat="stone"))      # 拱廊地面
+    for i, (xa, xb, za, zb) in enumerate([                                             # 草坪斑
+            (-200, -150, -140, -90), (-200, -160, 100, 140), (100, 200, 100, 140),
+            (100, 180, -140, -100), (-200, -150, -60, -10)]):
+        P.append(slab("z2_grass%d" % i, *_lawn(xa, xb, za, zb), y=0.045, t=0.05, mat="grass"))
+    # 国道标线(中线 + 拱廊北口斑马线)
+    P.append(slab("z2_kokudo_cl", -200, 200, 79.8, 80.4, y=0.07, t=0.02, mat="paint_y"))
+    for i in range(7):                                    # 斑马线(拱廊北口)
+        P.append(slab("z2_zebra%d" % i, -8 + i * 2.4, -6.6 + i * 2.4, 66, 70, y=0.07, t=0.02, mat="paint_w"))
+    P.append(slab("z2_zebra_k", -2, 2, 66, 70, y=0.075, t=0.02, mat="paint_w"))        # (县道路口)
+
+    # ---------------- 拱廊主体(lz -110~+90, 宽 18, 顶 y6.0) ----------------
+    # 柱列(内缘 lx=±7.5, 每 10m)
+    for i in range(20):
+        lz = -108 + i * 10.4
+        for sx in (-7.5, 7.5):
+            c = add_box("z2_arc_c%d_%d" % (i, 1 if sx > 0 else 0), (0.55, 5.5, 0.55),
+                        (sx, 2.75, lz), bevel=0.02)
+            zmat(c, "concrete")
+            P.append(c)
+        J.col("z2_arc_c%d" % i, (0.7, 5.5, 0.7), (-7.5, 2.75, lz))
+        J.col("z2_arc_c%db" % i, (0.7, 5.5, 0.7), (7.5, 2.75, lz))
+    # 顶板 + 中央采光带
+    P.append(solid("z2_arc_roof", (18.4, 0.5, 200), (0, 6.25, -10), "concrete", bev=0.01))
+    P.append(deco("z2_arc_glass", (5.0, 0.54, 196), (0, 6.27, -10), "glass"))
+    P.append(deco("z2_arc_fascia_w", (0.4, 1.0, 200), (-9.2, 5.5, -10), "vermilion"))
+    P.append(deco("z2_arc_fascia_e", (0.4, 1.0, 200), (9.2, 5.5, -10), "vermilion"))
+    # 北口门楣(商店街招牌塔)
+    P.append(deco("z2_arc_gate", (22, 2.2, 1.0), (0, 7.6, 90.5), "sign_b"))
+    P.append(solid("z2_arch_gate", (1.0, 7.4, 1.0), (-10.5, 3.7, 90.5), "concrete", bev=0.02))
+    P.append(solid("z2_arch_gate2", (1.0, 7.4, 1.0), (10.5, 3.7, 90.5), "concrete", bev=0.02))
+    P.append(deco("z2_arc_gate_s", (22, 2.0, 0.9), (0, 7.5, -110.5), "sign_o"))
+    P.append(solid("z2_arch_gate3", (1.0, 7.4, 1.0), (-10.5, 3.7, -110.5), "concrete", bev=0.02))
+    P.append(solid("z2_arch_gate4", (1.0, 7.4, 1.0), (10.5, 3.7, -110.5), "concrete", bev=0.02))
+    # 拱廊顶灯 x16(emission, 照明 + 游戏灯位)
+    for i, lz in enumerate((-96, -84, -71, -59, -46, -34, -21, -9,
+                            4, 16, 29, 41, 54, 66, 78, 88)):
+        P.append(deco("z2_arc_lamp%d" % i, (2.6, 0.16, 0.9), (0, 5.54, lz), "lamp"))
+
+    # ---------------- 拱廊西排店铺(lx -19~-9, 深 10) ----------------
+    shops_w = [
+        ("rice",   -108, -90, 3.6, "wood_b", "sign_g"),
+        ("book",   -86,  -70, 3.6, "plaster", "sign_b"),
+        ("cafe",   -66,  -50, 4.0, "concrete", "sign_o"),
+        ("drug",   -46,  -6,  7.0, "plaster", "sign_g"),        # 药妆(2 层大店)
+        ("cloth",  -2,   18,  3.6, "brick", "sign_r"),
+        ("conv",   22,   42,  7.0, "plaster", "sign_o"),        # 便利店 1(2 层)
+        ("cam",    46,   62,  3.6, "concrete", "sign_b"),
+        ("bread",  66,   84,  3.6, "plaster", "sign_r"),
+    ]
+    for nm, z0, z1, h, m, sk in shops_w:
+        P += _shop("z2_sw_" + nm, -19, -9, z0, z1, h, face="e", mat=m)
+        P += sign_board("z2_sw_%s_sign" % nm, -8.7, (z0 + z1) / 2.0 + 2.0, h - 0.8,
+                        3.2, 0.9, rot=90.0, kind=sk)
+        if nm in ("drug", "conv", "rice"):
+            P.append(deco("z2_sw_%s_light" % nm, (0.35, 0.7, 1.6), (-8.9, 3.2, (z0 + z1) / 2.0), "lamp"))
+
+    # ---------------- 拱廊东排店铺(lx +9~+19) ----------------
+    shops_e = [
+        ("flor",  -108, -92, 3.6, "plaster", "sign_r"),
+        ("oden",  -88,  -72, 3.6, "wood_b", "sign_o"),
+        ("cafe",  -68,  -52, 4.0, "concrete", "sign_b"),
+        ("denki", -48,  -8,  7.0, "concrete", "sign_b"),        # 电器行(2 层)
+        ("izak",  -4,   12,  3.6, "wood_b", "sign_r"),
+        ("book",  16,   36,  3.6, "plaster", "sign_g"),
+        ("conv",  40,   60,  7.0, "plaster", "sign_g"),         # 便利店 2(2 层)
+        ("disc",  64,   84,  3.6, "brick", "sign_o"),
+    ]
+    for nm, z0, z1, h, m, sk in shops_e:
+        P += _shop("z2_se_" + nm, 9, 19, z0, z1, h, face="w", mat=m)
+        P += sign_board("z2_se_%s_sign" % nm, 8.7, (z0 + z1) / 2.0 + 2.0, h - 0.8,
+                        3.2, 0.9, rot=90.0, kind=sk)
+        if nm in ("denki", "conv"):
+            P.append(deco("z2_se_%s_light" % nm, (0.35, 0.7, 1.6), (8.9, 3.2, (z0 + z1) / 2.0), "lamp"))
+
+    # 店内设施(可进 6 家: drug/conv1/rice/denki/conv2/disc)
+    for nm, x, z in [("rice", -14, -99), ("drug", -14, -26), ("conv", -14, 32),
+                     ("denki", 14, -28), ("conv", 14, 50), ("disc", 14, 74)]:
+        pre = "z2_int_%s_%d" % (nm, int(z))
+        P.append(deco(pre + "_shelf1", (1.2, 1.8, 6.0), (x - 2.4, 0.9, z), "metal_d"))
+        P.append(deco(pre + "_shelf2", (1.2, 1.8, 6.0), (x + 2.4, 0.9, z), "metal_d"))
+        P.append(deco(pre + "_ctr", (2.2, 1.0, 0.8), (x, 0.5, z - 3.4), "wood_d"))
+
+    # ---------------- 旗 C 拱廊内掩体(旗 0,+20; 15m 内 >=6) ----------------
+    P.append(solid("z2_fc_fl0", (2.4, 0.65, 2.4), (0, 0.33, 8), "stone", bev=0.03))       # 花坛
+    P.append(deco("z2_fc_fl0p", (1.8, 0.35, 1.8), (0, 0.82, 8), "leaf"))
+    P.append(solid("z2_fc_fl1", (2.4, 0.65, 2.4), (0, 0.33, 32), "stone", bev=0.03))
+    P.append(deco("z2_fc_fl1p", (1.8, 0.35, 1.8), (0, 0.82, 32), "leaf"))
+    P += vending_machine("z2_fc_v0", -5.6, 14, rot=90.0, kind="soda_red")
+    P += vending_machine("z2_fc_v1", 5.6, 26, rot=90.0, kind="soda_blue")
+    for i, (x, z) in enumerate([(-4.5, 2.0), (4.5, 38.0)]):                               # 长椅
+        P.append(solid("z2_fc_b%d" % i, (1.8, 0.45, 0.5), (x, 0.25, z), "wood_d", bev=0.02))
+        P.append(solid("z2_fc_bb%d" % i, (1.8, 0.5, 0.12), (x, 0.65, z + 0.19), "wood_d", bev=0.02))
+    for i, (x, z) in enumerate([(-6.2, -2), (6.2, 6), (-6.2, 30)]):                       # 垃圾桶
+        c = add_cyl("z2_fc_tr%d" % i, 0.32, 0.85, (x, 0.43, z), axis="y", seg=8)
+        zmat(c, "metal_d")
+        P.append(c)
+
+    # ---------------- 居酒屋横丁(lx 24~64, lz -70~+10) ----------------
+    # 巷道铺装 3 纵(lx 30/44/58) + 1 横(lz -30)
+    for i, lx in enumerate((30, 44, 58)):
+        P.append(slab("z2_yoko%d" % i, lx - 2.2, lx + 2.2, -70, 10, y=0.06, t=0.04, mat="stone_d"))
+    P.append(slab("z2_yoko_h", 24, 64, -32.2, -27.8, y=0.065, t=0.04, mat="stone_d"))
+    # 居酒屋楼 x6(2 层 6.5m, 面宽 10 深 8), 可进 x2
+    izk = [
+        ("a", 26, 34, -68, -60, True), ("b", 40, 48, -66, -58, False),
+        ("c", 54, 62, -68, -60, False), ("d", 26, 34, -50, -42, False),
+        ("e", 50, 58, -48, -40, True), ("f", 38, 46, -22, -14, False),
+    ]
+    for nm, x0, x1, z0, z1, enter in izk:
+        d = [(x0 + 2.0, 1.3, 2.2)] if enter else []
+        P += wall_x("z2_iz_%s_n" % nm, x0, x1, z1, 0.26, 0, 6.5, "wood_b",
+                    doors=d, windows=[(x0 + 5.5, 1.3, 1.0, 2.3), (x0 + 7.0, 1.0, 4.0, 5.2)])
+        P += wall_x("z2_iz_%s_s" % nm, x0, x1, z0, 0.26, 0, 6.5, "wood_b",
+                    windows=[(x0 + 4.0, 1.3, 1.0, 2.3), (x0 + 7.0, 1.2, 4.0, 5.2)])
+        P += wall_z("z2_iz_%s_w" % nm, z0, z1, x0, 0.26, 0, 6.5, "wood_b")
+        P += wall_z("z2_iz_%s_e" % nm, z0, z1, x1, 0.26, 0, 6.5, "wood_b",
+                    doors=[(z0 + 4.0, 1.2, 2.1)] if enter else [])
+        P += gable_roof("z2_iz_%s_r" % nm, x0 - 0.2, x1 + 0.2, z0 - 0.2, z1 + 0.2, 6.3, 7.6,
+                        "roof_tile", overhang=0.3)
+        P += noren("z2_iz_%s_noren" % nm, x0 + 2.0, z1 + 0.16, 2.1, 1.2, 0.5, 0.0, "sign_r")
+        P += sign_board("z2_iz_%s_sign" % nm, x1 + 0.14, (z0 + z1) / 2.0, 4.6, 0.9, 1.6, rot=90.0,
+                        kind="sign_o")
+        # 挑灯 x2(门前)
+        for k, px in enumerate((x0 + 1.6, x0 + 4.4)):
+            p = add_cyl("z2_iz_%s_lp%d" % (nm, k), 0.045, 1.2, (px, 2.6, z1 + 0.35), axis="y", seg=6)
+            zmat(p, "wood_d")
+            P.append(p)
+            l = add_cyl("z2_iz_%s_lc%d" % (nm, k), 0.24, 0.6, (px, 2.15, z1 + 0.35), axis="y", seg=8, taper=0.85)
+            zmat(l, "lamp")
+            P.append(l)
+        if enter:
+            P.append(deco("z2_iz_%s_tbl" % nm, (2.4, 0.75, 0.9), (x0 + 5.0, 0.4, z0 + 4.0), "wood_d"))
+            P.append(deco("z2_iz_%s_tbl2" % nm, (2.4, 0.75, 0.9), (x0 + 5.0, 0.4, z0 + 6.5), "wood_d"))
+    # 横丁掩体(啤酒箱/瓦楞/电线杆/废弃单车)
+    P.append(solid("z2_yk_crate0", (1.1, 0.9, 0.8), (32.2, 0.45, -44), "wood_b", bev=0.02))
+    P.append(solid("z2_yk_crate1", (0.9, 0.7, 0.7), (46.0, 0.35, -20), "wood_b", bev=0.02))
+    P.append(solid("z2_yk_bin", (1.4, 1.1, 1.0), (57.5, 0.55, -38), "metal_d", bev=0.03))
+    P += utility_pole("z2_yk_pole0", 44, -52, 7.5)
+    P += utility_pole("z2_yk_pole1", 58, -24, 7.5, trafo=True)
+    P += wire_x("z2_yk_w0", 30, 58, -52, 6.2)
+    P += wire_x("z2_yk_w1", 30, 58, -24, 6.2)
+
+    # ---------------- 拉面店(横丁北口) ----------------
+    P += wall_x("z2_ramen_n", 24, 34, 16, 0.26, 0, 3.8, "concrete",
+                doors=[(27.0, 1.4, 2.2)], windows=[(31.5, 1.4, 1.0, 2.2)])
+    P += wall_x("z2_ramen_s", 24, 34, 6, 0.26, 0, 3.8, "concrete",
+                windows=[(29.0, 1.6, 1.0, 2.2)])
+    P += wall_z("z2_ramen_w", 6, 16, 24, 0.26, 0, 3.8, "concrete")
+    P += wall_z("z2_ramen_e", 6, 16, 34, 0.26, 0, 3.8, "concrete",
+                doors=[(11.0, 1.3, 2.2)])
+    P += gable_roof("z2_ramen_r", 23, 35, 5, 17, 3.6, 5.2, "metal", overhang=0.4)
+    P += noren("z2_ramen_noren", 27, 16.16, 2.2, 1.6, 0.6, 0.0, "sign_r")
+    P.append(deco("z2_ramen_kama", (1.8, 1.1, 1.0), (32, 0.55, 9), "metal_d"))            # 灶
+    P.append(deco("z2_ramen_ctr", (2.6, 1.05, 0.8), (28, 0.52, 8), "wood_d"))
+    for i in range(3):
+        P.append(deco("z2_ramen_st%d" % i, (0.8, 0.75, 0.8), (26 + i * 2.2, 0.38, 12.5), "wood_d"))
+
+    # ---------------- 西侧町屋排 x2(lx -126~-110, 可进 1) ----------------
+    for ri, (z0, z1) in enumerate([(16, 64), (-64, -16)]):
+        for k in range(4):
+            za = z0 + k * 12.4
+            zb = za + 11.2
+            enter = (ri == 0 and k == 1)
+            d = [(-118.0, 1.3, 2.2)] if enter else []
+            P += wall_x("z2_mc%d_%d_n" % (ri, k), -126, -110, zb, 0.26, 0, 3.4, "wood_b",
+                        doors=d, windows=[(-122.0, 1.6, 1.0, 2.5), (-114.0, 1.6, 1.0, 2.5)])
+            P += wall_x("z2_mc%d_%d_s" % (ri, k), -126, -110, za, 0.26, 0, 3.4, "wood_b",
+                        windows=[(-118.0, 1.6, 1.0, 2.5)])
+            P += wall_z("z2_mc%d_%d_w" % (ri, k), za, zb, -126, 0.26, 0, 3.4, "plaster")
+            P += wall_z("z2_mc%d_%d_e" % (ri, k), za, zb, -110, 0.26, 0, 3.4, "wood_b",
+                        doors=[(za + 8.0, 1.2, 2.1)] if enter else [])
+            P += gable_roof("z2_mc%d_%d_r" % (ri, k), -127, -109, za - 0.3, zb + 0.3, 3.5, 5.4,
+                            "roof_tile", overhang=0.5)
+        # 排间格窗檩
+    # 町屋可进件(ri0 k1): 室内
+    P.append(deco("z2_mc_int", (3.0, 0.7, 1.0), (-118, 0.4, 34), "wood_d"))
+
+    # ---------------- 停车场(西南) ----------------
+    P.append(slab("z2_park", -195, -135, -120, -70, y=0.05, t=0.04, mat="asphalt"))
+    for i in range(5):                                    # 车位线
+        P.append(slab("z2_park_l%d" % i, -190 + i * 11, -189.2 + i * 11, -116, -76,
+                      y=0.07, t=0.02, mat="paint_w"))
+    P += wreck_car("z2_park_w0", -178, -95, 0.1)
+    P += wreck_car("z2_park_w1", -155, -92, -0.15)
+    P += utility_pole("z2_park_pole", -170, -74, 8.5)
+
+    # ---------------- 便利店(独立, 面北朝国道) ----------------
+    P += wall_x("z2_cv_n", -40, -18, 55, 0.28, 0, 4.2, "plaster",
+                doors=[(-29, 2.0, 2.4)], windows=[(-36, 2.6, 1.0, 2.6), (-22, 2.6, 1.0, 2.6)])
+    P += wall_x("z2_cv_s", -40, -18, 43, 0.28, 0, 4.2, "plaster",
+                doors=[(-22, 1.3, 2.2)])
+    P += wall_z("z2_cv_w", 43, 55, -40, 0.28, 0, 4.2, "plaster")
+    P += wall_z("z2_cv_e", 43, 55, -18, 0.28, 0, 4.2, "plaster",
+                windows=[(49, 1.4, 1.0, 2.4)])
+    P += flat_roof("z2_cv_roof", -40.3, -17.7, 42.7, 55.3, 4.4, "concrete", parapet_h=0.5)
+    P.append(deco("z2_cv_sign", (7.0, 1.2, 0.3), (-29, 3.4, 55.2), "sign_g"))
+    for i in range(3):
+        P.append(deco("z2_cv_sh%d" % i, (1.2, 1.8, 5.0), (-37 + i * 4.0, 0.9, 47), "metal_d"))
+    P.append(deco("z2_cv_frz", (3.2, 1.9, 0.8), (-19.6, 0.95, 52), "soda_blue"))          # 冰柜
+
+    # ---------------- 公交站(国道南, 拱廊口西) ----------------
+    P.append(solid("z2_bus_plat", (14, 0.15, 2.6), (-30, 0.10, 64.5), "concrete", bev=0.01))
+    for i in range(3):
+        c = add_cyl("z2_bus_c%d" % i, 0.08, 2.8, (-36 + i * 6, 1.4, 64.5), axis="y", seg=6)
+        zmat(c, "metal_d")
+        P.append(c)
+    P.append(slab("z2_bus_roof", -37.5, -22.5, 63.3, 65.7, y=2.9, t=0.12, mat="metal"))
+    P += sign_board("z2_bus_sign", -22.5, 64.5, 1.8, 0.7, 1.6, rot=90.0, kind="sign_b")
+
+    # ---------------- 旧街道设施 + 北口广场 ----------------
+    for i, z in enumerate((-90, -50, -10, 30)):
+        P += utility_pole("z2_kyu_p%d" % i, -97.2, z, 8.5, trafo=(i % 2 == 1))
+    P += vending_machine("z2_vend0", -14, 62, rot=0.0, kind="soda_red")
+    P += vending_machine("z2_vend1", 20, 66, rot=0.0, kind="soda_blue")
+    P += wreck_car("z2_wreck0", -30, 74, 0.4)
+    P += jersey_barrier("z2_jb0", -6, 96, 2.0, 0.0)
+    P += jersey_barrier("z2_jb1", 6, 96, 2.0, 0.0)
+    P += jersey_barrier("z2_jb2", 0, 99, 2.0, 1.2)
+    P += sandbag_wall("z2_sb0", 34, -36, 3.0, 0.3)
+    for i, (x, z) in enumerate([(-60, 80), (30, 100), (-80, -30), (60, -60), (-160, 40), (40, -100)]):
+        P += tree_cherry("z2_sak%d" % i, x, z, h=4.0 + (i % 3) * 0.5, r=2.0)
+    P += street_lamp("z2_lamp0", -14, 90, 5.2, rot_z=1.6)
+    P += street_lamp("z2_lamp1", 14, -60, 5.2, rot_z=-1.6)
+    P += street_lamp("z2_lamp2", 84, -80, 5.2, rot_z=-1.57)
+    P += street_lamp("z2_lamp3", 84, 60, 5.2, rot_z=1.57)
+    P += utility_pole("z2_kd_p0", 72, -100, 8.5)
+    P += utility_pole("z2_kd_p1", 72, -20, 8.5, trafo=True)
+    P += utility_pole("z2_kd_p2", 72, 60, 8.5)
+    # 县道路口斑马线 x2
+    for i in range(5):
+        P.append(slab("z2_kd_zeb0_%d" % i, 70, 74, -46 + i * 2.4, -44.6 + i * 2.4, y=0.075, t=0.02, mat="paint_w"))
+        P.append(slab("z2_kd_zeb1_%d" % i, 86, 90, -46 + i * 2.4, -44.6 + i * 2.4, y=0.075, t=0.02, mat="paint_w"))
+    # 弹痕(拱廊柱/店墙)
+    for i, (x, z) in enumerate([(-8.9, -20), (8.9, -44), (-8.9, 52), (8.9, 70), (26, 22), (58, -62)]):
+        P.append(deco("z2_hole%d" % i, (0.06, 0.3, 0.26), (x, 1.5 + (i % 3) * 0.4, z), "dark", bev=0.0))
+
+    # ---------------- 地下街厅(全局 x[-146,-134] z[-30,+10], y-3.5; 北端敞接 Z3 通道) ----------------
+    dz = -3.5
+    P.append(slab("z2_dsg_floor", -6, 6, 90, 130, y=dz, t=0.3, mat="concrete_d"))
+    J.walk("z2_dsg_floor", (12, 0.08, 40), (0, dz - 0.04, 110))
+    # 顶板(楼梯井 lz[94,104] lx[2,5] 开洞 -> 三块)
+    P.append(solid("z2_dsg_ceil0", (12.6, 0.5, 26.4), (0, -0.31, 117.3), "concrete", bev=0.01))
+    P.append(solid("z2_dsg_ceil1", (8.1, 0.5, 14.6), (-2.25, -0.31, 96.95), "concrete", bev=0.01))
+    P.append(solid("z2_dsg_ceil2", (1.1, 0.5, 14.6), (5.75, -0.31, 96.95), "concrete", bev=0.01))
+    P += wall_x("z2_dsg_s", -6, 6, 90, 0.3, dz, -0.6, "concrete")
+    P += wall_x("z2_dsg_n", -6, -0.2, 130, 0.3, dz, -0.6, "concrete")   # 北墙仅西半(东半敞接通道)
+    P += wall_z("z2_dsg_w", 90, 130, -6, 0.3, dz, -0.6, "concrete",
+                doors=[(110, 2.0, 2.4)])                             # 西墙紧急出口(上梯)
+    P += wall_z("z2_dsg_e", 90, 130, 6, 0.3, dz, -0.6, "concrete")
+    # 西出口上行梯(厅内向西升出地面, 町屋后巷)
+    P += stairs_x("z2_dsg_wst", -6.5, -12.5, 110, 2.4, dz, 0.0, "concrete", up_dir="-x")
+    P.append(solid("z2_dsg_wr0", (0.12, 1.0, 2.8), (-9.6, 0.5, 108.5), "metal", bev=0.01))
+    P.append(solid("z2_dsg_wr1", (0.12, 1.0, 2.8), (-9.6, 0.5, 111.5), "metal", bev=0.01))
+    # 下沉楼梯(厅内南端向北升出广场, 井口开洞见顶板)
+    P += stairs_z("z2_dsg_st", 94, 104, 3.5, 3.0, dz, 0.0, "concrete", up_dir="+z")
+    P.append(solid("z2_dsg_sr0", (3.8, 1.0, 0.12), (3.5, 0.5, 104.5), "metal", bev=0.01))
+    P.append(solid("z2_dsg_sr1", (0.12, 1.0, 10.8), (1.7, 0.5, 99.1), "metal", bev=0.01))
+    P.append(solid("z2_dsg_sr2", (0.12, 1.0, 10.8), (5.3, 0.5, 99.1), "metal", bev=0.01))
+    # 厅内: kiosk x2 + 长椅 + 贩卖机 + 灯
+    P.append(solid("z2_dsg_k0", (3.0, 2.6, 2.4), (-3.4, dz + 1.3, 100), "metal", bev=0.03))
+    P.append(deco("z2_dsg_k0s", (3.1, 0.5, 0.12), (-3.4, dz + 2.2, 101.3), "sign_o"))
+    P.append(solid("z2_dsg_k1", (3.0, 2.6, 2.4), (3.4, dz + 1.3, 120), "metal", bev=0.03))
+    P.append(deco("z2_dsg_k1s", (0.12, 0.5, 3.1), (4.96, dz + 2.2, 120), "sign_b"))
+    for i, z in enumerate((104, 116)):
+        P.append(solid("z2_dsg_b%d" % i, (2.0, 0.45, 0.5), (0, dz + 0.25, z), "wood_d", bev=0.02))
+    P += vending_machine("z2_dsg_v0", -5.2, 124, rot=90.0, kind="soda_red")
+    P += vending_machine("z2_dsg_v1", 5.2, 96, rot=90.0, kind="soda_blue")
+    for i, z in enumerate((98, 112, 126)):
+        P.append(deco("z2_dsg_l%d" % i, (1.6, 0.1, 0.4), (0, -0.62, z), "lamp"))
+    P.append(deco("z2_dsg_map", (0.1, 1.0, 1.6), (5.85, dz + 1.6, 108), "sign_w"))
+
+    # ---------------- 导出 + 渲染 ----------------
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    zone_export("akitsu_z2", P, MODEL_DIR + "/zone_2.glb")
+    if render:
+        zone_render("z2", (0, 0, 0), 170, SHOT_DIR + "/zone2",
+                    extra_shots=[("arcade", (0, 1.7, 20), (0, 2.2, 80)),
+                                 ("arcade2", (0, 1.7, 20), (0, 2.2, -80))])
+
+
+# ============================================================ Z3 秋津站
+# 局部原点 = 区中心, 全局 (+50, +170): lx = gx-50, lz = gz-170。
+# 铁路 lz=0(复线, 轨面 y0.4); 站前大道 lx[23,37]; 站房 lz[-44,-26];
+# 月台 P1 lz[-18,-6] / P2 lz[+6,+18](面 y0.9); 天桥 y5(lx[-12,+12] lz[-26,+26]);
+# 地下通道 y-3.5: 主段 lx[-190,-45] lz[-118,-112] + 南北延段 lx[-190,-184] lz[-160,-118]
+# (延段北端敞接 Z2 地下街厅; 旗 B = 局部 (-20,-110))。
+
+def _car(name, x, z, rot=0.0, body="metal", wreck=False, y=0.0):
+    """简化停驾车(身+舱+4 轮)。col 两节罩盒。y= 地面基准(地下车库传 dz)。"""
+    P = []
+    r = math.radians(rot)
+    bm = "rust" if wreck else body
+    P.append(solid(name + "_b", (4.2, 0.55, 1.7), (x, y + 0.55, z), bm, bev=0.1, rot=(0, r, 0)))
+    P.append(solid(name + "_c", (2.2, 0.55, 1.6), (x - 0.2, y + 1.1, z), bm, bev=0.09, rot=(0, r, 0)))
+    for wx, wz in ((1.45, 0.85), (1.45, -0.85), (-1.45, 0.85), (-1.45, -0.85)):
+        px = x + math.cos(r) * wx + math.sin(r) * wz
+        pz = z - math.sin(r) * wx + math.cos(r) * wz
+        ax = "z" if abs(math.cos(r)) > 0.5 else "x"          # 轮轴垂直车身
+        w = add_cyl("%s_w%d%d" % (name, wx, wz), 0.32, 0.2, (px, y + 0.32, pz), axis=ax, seg=10)
+        zmat(w, "rubber")
+        P.append(w)
+    return P
+
+
+def build_zone_3(render=True):
+    reset()
+    J._zone_cols.clear()
+    J._zone_walks.clear()
+    P = []
+    dz = -3.5
+
+    # ---------------- 地表铺装 ----------------
+    P.append(slab("z3_ground", -150, 150, -150, 150, y=0.03, t=0.05, mat="asphalt_w"))  # 站前广场铺装
+    P.append(slab("z3_plaza", -100, 80, -140, -44, y=0.06, t=0.04, mat="stone"))        # 站前广场
+    P.append(slab("z3_plaza_n", -60, 110, 20, 80, y=0.06, t=0.04, mat="stone"))         # 北口
+    P.append(slab("z3_road", 23, 37, -150, 150, y=0.05, t=0.04, mat="asphalt"))         # 站前大道
+    P.append(slab("z3_road_cl", 29.7, 30.3, -150, -8, y=0.07, t=0.02, mat="paint_w"))
+    P.append(slab("z3_road_cl2", 29.7, 30.3, 8, 150, y=0.07, t=0.02, mat="paint_w"))
+    for i, (xa, xb, za, zb) in enumerate([                                              # 草坪斑
+            (-150, -110, -150, -120), (-150, -105, 90, 150), (90, 150, 90, 150),
+            (100, 150, -150, -110)]):
+        P.append(slab("z3_grass%d" % i, *_lawn(xa, xb, za, zb), y=0.045, t=0.05, mat="grass"))
+    # 广场斑马线(南入口 + 大道口)
+    for i in range(6):
+        P.append(slab("z3_zeb0_%d" % i, -14 + i * 2.4, -12.6 + i * 2.4, -46.5, -42.5,
+                      y=0.075, t=0.02, mat="paint_w"))
+        P.append(slab("z3_zeb1_%d" % i, 21, 25, -44 + i * 2.4, -41.6 + i * 2.4,
+                      y=0.075, t=0.02, mat="paint_w"))
+        P.append(slab("z3_zeb2_%d" % i, 35, 39, -44 + i * 2.4, -41.6 + i * 2.4,
+                      y=0.075, t=0.02, mat="paint_w"))
+
+    # ---------------- 站房(lx[-60,+60] lz[-44,-26], 高 8) ----------------
+    P += wall_x("z3_st_s", -60, 60, -44, 0.35, 0, 8, "concrete",
+                doors=[(0, 6.0, 3.5), (-48, 1.4, 2.2), (48, 1.4, 2.2)],
+                windows=[(-30, 4.0, 2.2, 4.6), (-10, 4.0, 2.2, 4.6), (10, 4.0, 2.2, 4.6), (30, 4.0, 2.2, 4.6)])
+    P += wall_x("z3_st_n", -60, 60, -26, 0.35, 0, 8, "concrete",
+                doors=[(-15, 3.0, 2.6), (15, 3.0, 2.6)],
+                windows=[(-40, 3.0, 2.2, 4.6), (0, 3.0, 2.2, 4.6), (40, 3.0, 2.2, 4.6)])
+    P += wall_z("z3_st_w", -44, -26, -60, 0.35, 0, 8, "concrete", doors=[(-35, 1.4, 2.2)])
+    P += wall_z("z3_st_e", -44, -26, 60, 0.35, 0, 8, "concrete", doors=[(-35, 1.4, 2.2)])
+    P += flat_roof("z3_st_roof", -60.4, 60.4, -44.4, -25.6, 8.2, "concrete", parapet_h=0.9)
+    P.append(deco("z3_st_name", (7.0, 1.3, 0.25), (0, 5.6, -43.7), "sign_w"))           # 站名
+    for wx in (-30, -10, 10, 30):                                                       # 南立面玻璃带
+        P.append(deco("z3_st_glass%d" % wx, (3.8, 2.2, 0.1), (wx, 3.4, -43.75), "glass"))
+    # 内部: 检票隔墙 + 闸机 + 售票机 + 柱网 + 长椅
+    P += wall_x("z3_st_gate", -20, 20, -35, 0.3, 0, 4.0, "concrete",
+                doors=[(-8, 2.4, 2.2), (8, 2.4, 2.2)])
+    for i, gx in enumerate((-6, -2, 2, 6)):                                             # 闸机
+        P.append(solid("z3_st_kib%d" % i, (0.4, 1.0, 1.6), (gx, 0.5, -33.2), "metal_d", bev=0.02))
+    for i, tx in enumerate((-20, -16, 44)):                                             # 售票机
+        P.append(solid("z3_st_tick%d" % i, (1.3, 1.9, 0.7), (tx, 0.95, -42.4), "sign_b", bev=0.03))
+    for gx in (-45, -30, -15, 0, 15, 30, 45):                                           # 柱网
+        for gz in (-30, -40):
+            c = add_cyl("z3_st_col%d_%d" % (gx, gz), 0.35, 8, (gx, 4, gz), axis="y", seg=8)
+            zmat(c, "concrete")
+            P.append(c)
+    for i, (bx, bz) in enumerate([(-35, -29), (-35, -41), (35, -29), (35, -41)]):       # 长椅
+        P.append(solid("z3_st_bench%d" % i, (3.0, 0.45, 0.5), (bx, 0.25, bz), "wood_d", bev=0.02))
+    # 弹痕(南立面)
+    for i, (hx, hy) in enumerate([(-38, 2.0), (-26, 3.2), (18, 2.4), (34, 3.6), (44, 2.2)]):
+        P.append(deco("z3_st_hole%d" % i, (0.4, 0.36, 0.06), (hx, hy, -43.66), "dark", bev=0.0))
+
+    # ---------------- 轨道区(lz[-5,+5], 轨面 y0.4) ----------------
+    P.append(slab("z3_ballast", -150, 150, -5, 5, y=0.15, t=0.3, mat="stone_d"))
+    for lz in (-2.53, -1.47, 1.47, 2.53):
+        P.append(solid("z3_rail%d" % int(lz * 10), (300, 0.12, 0.14), (0, 0.34, lz), "metal", bev=0.0))
+    for i in range(45):                                                                  # 枕木(月台段)
+        P.append(deco("z3_tie%d" % i, (0.24, 0.1, 4.4), (-60 + i * 4, 0.3, 0), "wood_d", bev=0.0))
+    # 静态车厢 x2(轨道 1, lx 35~75)
+    for i, cx in enumerate((45, 65)):
+        P.append(solid("z3_car%d_b" % i, (19.4, 2.5, 2.9), (cx, 1.75, -2), "metal", bev=0.08))
+        P.append(deco("z3_car%d_w" % i, (17.5, 0.9, 2.94), (cx, 2.35, -2), "glass"))
+        P.append(deco("z3_car%d_sk" % i, (18.4, 0.5, 2.7), (cx, 0.45, -2), "metal_d"))
+    # 接触网柱 + 电线
+    for i, px in enumerate((-135, -105, -75, -45, -15, 15, 45, 75, 105, 135)):
+        P += utility_pole("z3_cat%d" % i, px, 7.0, 9.0)
+    P += wire_x("z3_wire0", -140, 140, -2, 7.6)
+    P += wire_x("z3_wire1", -140, 140, 2, 7.6)
+
+    # ---------------- 道口(站前大道 lx[23,37] x lz=0) ----------------
+    P.append(slab("z3_xing0", 23, 37, -5, -1.4, y=0.42, t=0.08, mat="asphalt"))
+    P.append(slab("z3_xing1", 23, 37, 1.4, 5, y=0.42, t=0.08, mat="asphalt"))
+    P.append(slab("z3_xing2", 23, 37, -1.4, 1.4, y=0.42, t=0.08, mat="asphalt"))
+    for si, s in enumerate((-1, 1)):                                                     # 遮断机
+        pb = add_cyl("z3_xing_p%d" % si, 0.12, 2.2, (22.4, 1.1, s * 7), axis="y", seg=8)
+        zmat(pb, "metal_d")
+        P.append(pb)
+        arm = add_box("z3_xing_a%d" % si, (7.0, 0.09, 0.09), (26.4, 1.9, s * 7), bevel=0.01)
+        arm.rotation_euler = rot_g2b((s * 0.22, 0, 0))
+        zmat(arm, "sign_w")
+        P.append(arm)
+        P.append(solid("z3_xing_box%d" % si, (0.5, 1.3, 0.4), (22.4, 0.65, s * 7.6), "metal_d", bev=0.02))
+
+    # ---------------- 月台 P1/P2(y0.9) + 雨棚 ----------------
+    P += floor_slab("z3_p1", -20, 100, -18, -6, 0.9, 0.25, "concrete")
+    P += floor_slab("z3_p2", -20, 100, 6, 18, 0.9, 0.25, "concrete")
+    P.append(slab("z3_p1_line", -19, 99, -9.6, -9.3, y=0.93, t=0.02, mat="paint_y"))
+    P.append(slab("z3_p2_line", -19, 99, 9.3, 9.6, y=0.93, t=0.02, mat="paint_y"))
+    for pi, plz in ((1, -12), (2, 12)):                                                  # 雨棚柱+顶
+        for px in (-16, 0, 16, 32, 48, 64, 80, 96):
+            c = add_cyl("z3_p%d_c%d" % (pi, px), 0.18, 3.1, (px, 0.9 + 1.55, plz), axis="y", seg=8)
+            zmat(c, "metal")
+            P.append(c)
+        P.append(solid("z3_p%d_roof" % pi, (124, 0.15, 10), (40, 4.0, plz), "metal", bev=0.01))
+    for i, (bx, bz) in enumerate([(-10, -15), (30, -15), (70, -15), (-10, 15), (30, 15), (70, 15)]):
+        P.append(solid("z3_p_bench%d" % i, (2.0, 0.45, 0.5), (bx, 0.9 + 0.25, bz), "wood_d", bev=0.02))
+    # 月台端部坡道 x4(地面 y0 <-> 月台 y0.9)
+    P += stairs_z("z3_p1_rampW", -22, -18, -30, 3.0, 0.0, 0.9, "concrete", up_dir="+z")
+    P += stairs_z("z3_p1_rampE", -22, -18, 90, 3.0, 0.0, 0.9, "concrete", up_dir="+z")
+    P += stairs_z("z3_p2_rampW", 18, 22, -30, 3.0, 0.0, 0.9, "concrete", up_dir="-z")
+    P += stairs_z("z3_p2_rampE", 18, 22, 90, 3.0, 0.0, 0.9, "concrete", up_dir="-z")
+
+    # ---------------- 站厅天桥(y5, lx[-12,+12] lz[-26,+26]) ----------------
+    P += floor_slab("z3_bridge", -12, 12, -26, 26, 5.0, 0.3, "concrete")
+    P.append(slab("z3_bridge_floor", -11.5, 11.5, -25.5, 25.5, y=5.03, t=0.04, mat="stone_d"))
+    # 栏杆(楼梯口留缺)
+    P.append(solid("z3_brail_s0", (2.2, 0.9, 0.1), (-10.9, 5.45, -26), "metal", bev=0.01))
+    P.append(solid("z3_brail_s1", (18.2, 0.9, 0.1), (2.9, 5.45, -26), "metal", bev=0.01))
+    P.append(solid("z3_brail_n0", (18.2, 0.9, 0.1), (-2.9, 5.45, 26), "metal", bev=0.01))
+    P.append(solid("z3_brail_n1", (2.2, 0.9, 0.1), (10.9, 5.45, 26), "metal", bev=0.01))
+    P.append(solid("z3_brail_e", (0.1, 0.9, 47.0), (12, 5.45, 2.5), "metal", bev=0.01))
+    P.append(solid("z3_brail_w", (0.1, 0.9, 47.0), (-12, 5.45, -2.5), "metal", bev=0.01))
+    # 桥墩(月台上 x4 + 地面 x2)
+    for px in (-8, 8):
+        for pz in (-14, 14):
+            c = add_cyl("z3_bpier%d_%d" % (px, pz), 0.3, 3.8, (px, 0.9 + 1.9, pz), axis="y", seg=8)
+            zmat(c, "concrete")
+            P.append(c)
+    for pz in (-23, 23):
+        c = add_cyl("z3_bpier_g%d" % pz, 0.3, 4.7, (0, 2.35, pz), axis="y", seg=8)
+        zmat(c, "concrete")
+        P.append(c)
+    # 楼梯 x4
+    P += stairs_z("z3_st_p1", -26, -18, -8, 3.2, 0.9, 5.0, "concrete", up_dir="-z")
+    P += stairs_z("z3_st_p2", 18, 26, 8, 3.2, 0.9, 5.0, "concrete", up_dir="+z")
+    P += stairs_x("z3_st_g1", 12, 28, -23, 3.2, 0.0, 5.0, "concrete", up_dir="-x")
+    P += stairs_x("z3_st_g2", -28, -12, 23, 3.2, 0.0, 5.0, "concrete", up_dir="+x")
+
+    # ---------------- 地下通道(主段 + 延段, y-3.5) ----------------
+    P.append(slab("z3_duct_floor", -190, -45, -118, -112, y=dz, t=0.3, mat="concrete_d"))
+    J.walk("z3_duct_floor", (145, 0.08, 6), (-117.5, dz - 0.04, -115))
+    P.append(solid("z3_duct_ceil", (145.6, 0.5, 6.6), (-117.5, -0.31, -115), "concrete", bev=0.01))
+    P += wall_x("z3_duct_n", -190, -45, -118, 0.3, dz, -0.6, "concrete",
+                doors=[(-187, 6.0, 2.9)])                                                # 接延段洞
+    P += wall_x("z3_duct_s", -190, -45, -112, 0.3, dz, -0.6, "concrete",
+                doors=[(-47.5, 3.6, 2.9)])                                               # 楼梯穿出洞
+    P += wall_z("z3_duct_e", -118, -112, -45, 0.3, dz, -0.6, "concrete",
+                doors=[(-114.5, 3.0, 2.9)])
+    P += wall_z("z3_duct_w", -118, -112, -190, 0.3, dz, -0.6, "concrete")
+    # 南北延段(接 Z2 地下街厅; 北端敞开)
+    P.append(slab("z3_dux_floor", -190, -184, -160, -118, y=dz, t=0.3, mat="concrete_d"))
+    J.walk("z3_dux_floor", (6, 0.08, 42), (-187, dz - 0.04, -139))
+    P.append(solid("z3_dux_ceil", (6.6, 0.5, 42.6), (-187, -0.31, -139), "concrete", bev=0.01))
+    P += wall_z("z3_dux_w", -160, -118, -190, 0.3, dz, -0.6, "concrete")
+    P += wall_z("z3_dux_e", -160, -118, -184, 0.3, dz, -0.6, "concrete")
+    # 通道设备: 灯条 / 导向牌 / 消防栓 / 长椅
+    for i, px in enumerate((-180, -160, -140, -120, -100, -80, -60)):
+        P.append(deco("z3_duct_l%d" % i, (1.6, 0.1, 0.4), (px, -0.62, -115), "lamp"))
+    for i, (px, pz) in enumerate([(-170, -117.6), (-130, -112.4), (-90, -117.6), (-55, -112.4)]):
+        P.append(solid("z3_duct_hy%d" % i, (0.4, 0.8, 0.3), (px, dz + 0.4, pz), "sign_r", bev=0.02))
+    P.append(deco("z3_duct_map0", (0.1, 1.0, 1.6), (-184.15, dz + 1.6, -125), "sign_w"))
+    P.append(deco("z3_duct_map1", (0.1, 1.0, 1.6), (-184.15, dz + 1.6, -150), "sign_g"))
+    for i, px in enumerate((-150, -95)):
+        P.append(solid("z3_duct_b%d" % i, (2.0, 0.45, 0.5), (px, dz + 0.25, -113.2), "wood_d", bev=0.02))
+    # 广场下沉楼梯(通道东端上到广场)
+    P += stairs_z("z3_duct_st", -115, -105, -45, 3.6, dz, 0.0, "concrete", up_dir="+z")
+    P.append(solid("z3_duct_sr0", (4.4, 1.0, 0.12), (-45, 0.5, -103.6), "metal", bev=0.01))
+    P.append(solid("z3_duct_sr1", (0.12, 1.0, 2.6), (-47.2, 0.5, -104.9), "metal", bev=0.01))
+    P.append(solid("z3_duct_sr2", (0.12, 1.0, 2.6), (-42.8, 0.5, -104.9), "metal", bev=0.01))
+    P.append(slab("z3_duct_canopy", -48.2, -41.8, -107, -103, y=3.0, t=0.12, mat="glass"))
+    for px in (-47.6, -42.4):
+        c = add_cyl("z3_duct_cp%d" % px, 0.08, 3.0, (px, 1.5, -103.4), axis="y", seg=6)
+        zmat(c, "metal_d")
+        P.append(c)
+
+    # ---------------- 巴士环岛(中心 lx=10, lz=-80) ----------------
+    for i in range(12):
+        a = math.radians(i * 30)
+        px = 10 + math.cos(a) * 10.0
+        pz = -80 + math.sin(a) * 10.0
+        seg = add_box("z3_ring%d" % i, (8.0, 0.05, 4.6), (px, 0.115, pz), bevel=0.0)
+        seg.rotation_euler = rot_g2b((0, -(a + math.pi / 2), 0))     # 长轴切向
+        print("[ring] seg%d pos=(%.1f,%.1f) rot=%.2f" % (i, px, pz, -(a + math.pi / 2)))
+        zmat(seg, "asphalt_w")
+        P.append(seg)
+    c = add_cyl("z3_ring_edge", 6.0, 0.3, (10, 0.15, -80), axis="y", seg=20)
+    zmat(c, "stone")
+    P.append(c)
+    c2 = add_cyl("z3_ring_grass", 5.7, 0.32, (10, 0.16, -80), axis="y", seg=20)
+    zmat(c2, "grass")
+    P.append(c2)
+    P += tree_pine("z3_ring_pine", 10, -80, 5.5)
+    P += tree_cherry("z3_ring_sak0", 7, -77, 3.8, 1.8)
+    P += tree_cherry("z3_ring_sak1", 13, -83, 3.8, 1.8)
+
+    # ---------------- 出租车站(广场西) + 巴斯总站(广场东) ----------------
+    P.append(slab("z3_taxi", -70, -50, -110, -70, y=0.065, t=0.03, mat="asphalt_w"))
+    for i in range(3):                                                                    # 车位线
+        P.append(slab("z3_taxi_l%d" % i, -66 + i * 6, -65.2 + i * 6, -108, -74,
+                      y=0.08, t=0.02, mat="paint_w"))
+    for i, (cx, cz, rr) in enumerate([(-63, -90, 0.15), (-57, -90, 0.0), (-51, -90, -0.1)]):
+        P += _car("z3_taxi%d" % i, cx, cz, rr, body="taxi_y")
+    for i in range(3):                                                                    # 候车亭
+        c = add_cyl("z3_taxi_c%d" % i, 0.08, 2.6, (-60, 1.3, -72), axis="y", seg=6)
+        zmat(c, "metal_d")
+        P.append(c)
+    P.append(slab("z3_taxi_roof", -66, -54, -73.2, -70.8, y=2.7, t=0.1, mat="glass"))
+    P += sign_board("z3_taxi_sign", -50.5, -71, 1.6, 0.8, 1.4, rot=90.0, kind="sign_o")
+    # 巴士总站(雨棚站台 x2 泊位)
+    P.append(slab("z3_bus_plat", 52, 74, -118, -114, y=0.1, t=0.2, mat="concrete"))
+    for i in range(4):
+        c = add_cyl("z3_bus_c%d" % i, 0.09, 3.0, (55 + i * 6, 1.5, -116), axis="y", seg=6)
+        zmat(c, "metal_d")
+        P.append(c)
+    P.append(slab("z3_bus_roof", 51, 75, -117.2, -114.8, y=3.1, t=0.12, mat="metal"))
+    P += sign_board("z3_bus_sign", 74.5, -116, 1.8, 0.9, 1.6, rot=90.0, kind="sign_b")
+
+    # ---------------- 旗 B 掩体(旗局部 (-20,-110), 15m 内) ----------------
+    for i, (fx, fz) in enumerate([(-30, -100), (-12, -118), (-25, -122), (-8, -102)]):
+        P.append(solid("z3_fb_fl%d" % i, (2.4, 0.65, 2.4), (fx, 0.33, fz), "stone", bev=0.03))
+        P.append(deco("z3_fb_flp%d" % i, (1.8, 0.35, 1.8), (fx, 0.82, fz), "leaf"))
+    P += vending_machine("z3_fb_v0", -34, -112, rot=90.0, kind="soda_red")
+    P += vending_machine("z3_fb_v1", -8, -104, rot=90.0, kind="soda_blue")
+    for i, (sx, sz) in enumerate([(-18, -124), (-28, -108)]):
+        P.append(solid("z3_fb_bench%d" % i, (1.8, 0.45, 0.5), (sx, 0.25, sz), "stone", bev=0.02))
+    P += jersey_barrier("z3_fb_jb0", -20, -128, 2.0, 0.2)
+    P += jersey_barrier("z3_fb_jb1", -14, -130, 2.0, -0.15)
+    P += wreck_car("z3_fb_wreck", -2, -122, 0.5)
+
+    # ---------------- 北口 + 街道设施 + 战场痕迹 ----------------
+    P.append(slab("z3_bike", 45, 75, 24, 40, y=0.065, t=0.03, mat="asphalt_w"))
+    for i in range(4):                                                                    # 车棚柱
+        c = add_cyl("z3_bike_c%d" % i, 0.09, 2.6, (47 + (i % 2) * 26, 1.3, 25 + (i // 2) * 14),
+                    axis="y", seg=6)
+        zmat(c, "metal_d")
+        P.append(c)
+    P.append(slab("z3_bike_roof", 45, 75, 23.5, 40.5, y=2.7, t=0.1, mat="metal"))
+    for i in range(3):                                                                    # 停车架
+        P.append(solid("z3_bike_r%d" % i, (0.1, 0.5, 12), (54 + i * 6, 0.25, 32), "metal", bev=0.01))
+    for i, bx in enumerate((52, 56, 66)):                                                 # 自行车 x3
+        P.append(add_cyl("z3_bc%d_w0" % i, 0.3, 0.06, (bx, 0.3, 31.2), axis="z", seg=10))
+        P.append(add_cyl("z3_bc%d_w1" % i, 0.3, 0.06, (bx, 0.3, 32.8), axis="z", seg=10))
+        fr = add_box("z3_bc%d_f" % i, (1.4, 0.5, 0.08), (bx, 0.55, 32), bevel=0.02)
+        zmat(fr, "sign_b" if i % 2 else "sign_r")
+        P.append(fr)
+    P += vending_machine("z3_vend0", 20, 30, rot=0.0, kind="soda_blue")
+    P += wreck_car("z3_wreck0", -40, 60, 0.3)
+    P += jersey_barrier("z3_jb0", 40, -46, 2.0, 0.0)
+    P += jersey_barrier("z3_jb1", 44, -44, 2.0, 1.3)
+    P += sandbag_wall("z3_sb0", -50, -46, 3.0, 0.2)
+    P += sandbag_wall("z3_sb1", 55, 30, 3.0, -0.2)
+    for i, (x, z, rr) in enumerate([(-35, -135, 0.2), (-70, -125, 0.4), (45, -135, -0.3)]):
+        P += _car("z3_park%d" % i, x, z, rr, body="metal_d")
+    for i, (x, z) in enumerate([(-60, -50), (-60, -130), (60, -55), (60, -130)]):
+        P += tree_cherry("z3_sak%d" % i, x, z, h=4.2, r=2.0)
+    P += tree_pine("z3_pine0", -90, 40, 5.5)
+    P += tree_pine("z3_pine1", 95, 45, 5.5)
+    P += street_lamp("z3_lamp0", -35, -48, 5.2, rot_z=1.6)
+    P += street_lamp("z3_lamp1", 55, -48, 5.2, rot_z=-1.6)
+    P += street_lamp("z3_lamp2", 20, -60, 5.2, rot_z=0.0)
+    P += street_lamp("z3_lamp3", 20, 60, 5.2, rot_z=3.14)
+    P += street_lamp("z3_lamp4", -30, 26, 5.2, rot_z=1.6)
+    P += utility_pole("z3_pole0", 21, -100, 8.5)
+    P += utility_pole("z3_pole1", 21, 40, 8.5, trafo=True)
+    # 广场焦痕 + 碎玻璃
+    for i, (x, z) in enumerate([(-45, -70), (25, -95), (-15, -60)]):
+        P.append(deco("z3_scorch%d" % i, (2.6, 0.02, 2.0), (x, 0.11, z), "dark", bev=0.0))
+
+    # ---------------- 导出 + 渲染 ----------------
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    zone_export("akitsu_z3", P, MODEL_DIR + "/zone_3.glb")
+    if render:
+        zone_render("z3", (0, 0, 0), 170, SHOT_DIR + "/zone3",
+                    extra_shots=[("ring", (30, 18, -105), (10, 0, -80))])
+
+
+# ============================================================ Z8 临海新都心
+# 局部原点 = 区中心, 全局 (+200, -60): lx = gx-200, lz = gz+60。
+# 国道 lz[+9,+31]; A 馆 lx[-45,+5] lz[+45,+75](1F/2F/3F y4/8/12+屋顶 y12 = 全图制高点);
+# B 馆 lx[-95,-55] lz[+40,+70](2F h8); 旗 F = 局部 (-20,+40) 于馆前广场;
+# 地下停车场 y-3.5(lx[-50,+10] lz[+32,+72])+东坡道+西延通道(lx[-100,-50] lz[+64,+70] 待 B5 接 C 线)。
+
+def build_zone_8(render=True):
+    reset()
+    J._zone_cols.clear()
+    J._zone_walks.clear()
+    P = []
+    dz = -3.5
+
+    # ---------------- 地表铺装 ----------------
+    P.append(slab("z8_ground", -100, 100, -100, 100, y=0.03, t=0.05, mat="asphalt_w"))
+    P.append(slab("z8_kokudo", -100, 100, 9, 31, y=0.05, t=0.04, mat="asphalt"))        # 国道段
+    P.append(slab("z8_kokudo_cl", -100, 100, 19.7, 20.3, y=0.07, t=0.02, mat="paint_y"))
+    P.append(slab("z8_plaza", -100, 40, 33, 80, y=0.06, t=0.04, mat="stone"))           # F 广场
+    for i in range(6):                                                                   # 广场口斑马线
+        P.append(slab("z8_zeb%d" % i, -26 + i * 2.4, -24.6 + i * 2.4, 31, 35,
+                      y=0.075, t=0.02, mat="paint_w"))
+    for i, (xa, xb, za, zb) in enumerate([(-100, -60, -100, -30), (60, 100, -100, -40),
+                                          (60, 100, 40, 100), (-100, -40, 84, 100)]):
+        P.append(slab("z8_grass%d" % i, *_lawn(xa, xb, za, zb), y=0.045, t=0.05, mat="grass"))
+
+    # ---------------- A 馆(3F+屋顶, 幕墙) ----------------
+    AX0, AX1, AZ0, AZ1 = -45, 5, 45, 75
+    P.append(slab("z8_a_floor0", AX0, AX1, AZ0, AZ1, y=0.12, t=0.12, mat="concrete"))
+    # 柱网
+    for gx in (-40, -30, -20, -10, 0):
+        for gz in (50, 60, 70):
+            c = add_cyl("z8_a_col%d_%d" % (gx, gz), 0.42, 12, (gx, 6, gz), axis="y", seg=8)
+            zmat(c, "concrete")
+            P.append(c)
+            J.col("z8_a_col%d_%d" % (gx, gz), (0.9, 12, 0.9), (gx, 6, gz))
+    # 楼板 y4/y8(楼梯井 lx[0.5,5] lz[48,72.5] 让空)+ 屋顶 y12
+    P += floor_slab("z8_a_slab2", AX0, 0.5, AZ0, AZ1, 4.0, 0.3, "concrete")
+    P += floor_slab("z8_a_slab3", AX0, 0.5, AZ0, AZ1, 8.0, 0.3, "concrete")
+    P += floor_slab("z8_a_roof", AX0, AX1, AZ0, AZ1, 12.0, 0.3, "concrete")
+    P += parapet("z8_a_pp", AX0, AX1, AZ0, AZ1, 12.0, 0.9, 0.2, "concrete")
+    # 幕墙 2F/3F(glass 带+竖梃), 1F concrete 门窗墙
+    P += wall_x("z8_a_s1", AX0, AX1, AZ0, 0.3, 0, 4, "concrete",
+                doors=[(-20, 4.0, 3.2), (-40, 1.4, 2.2)],
+                windows=[(-30, 6.0, 0.9, 3.4), (-10, 6.0, 0.9, 3.4), (0, 4.0, 0.9, 3.4)])
+    P += wall_x("z8_a_n1", AX0, AX1, AZ1, 0.3, 0, 4, "concrete",
+                doors=[(-15, 1.6, 2.2)],
+                windows=[(-35, 6.0, 0.9, 3.4), (-25, 6.0, 0.9, 3.4), (-5, 6.0, 0.9, 3.4)])
+    P += wall_z("z8_a_w1", AZ0, AZ1, AX0, 0.3, 0, 4, "concrete",
+                doors=[(55, 1.4, 2.2)], windows=[(65, 5.0, 0.9, 3.4)])
+    P += wall_z("z8_a_e1", AZ0, AZ1, AX1, 0.3, 0, 4, "concrete",
+                doors=[(60, 1.4, 2.2)])
+    for lv, y0 in ((2, 4), (3, 8)):
+        P.append(solid("z8_a_glass_s%d" % lv, (50, 3.4, 0.15), (-20, y0 + 1.9, AZ0 + 0.15), "glass", bev=0.0))
+        P.append(solid("z8_a_glass_n%d" % lv, (50, 3.4, 0.15), (-20, y0 + 1.9, AZ1 - 0.15), "glass", bev=0.0))
+        P.append(solid("z8_a_glass_w%d" % lv, (0.15, 3.4, 30), (AX0 + 0.15, y0 + 1.9, 60), "glass", bev=0.0))
+        P.append(solid("z8_a_glass_e%d" % lv, (0.15, 3.4, 30), (AX1 - 0.15, y0 + 1.9, 60), "glass", bev=0.0))
+        for gx in (-40, -30, -20, -10, 0):
+            P.append(deco("z8_a_mull%d_%d" % (lv, gx), (0.22, 3.4, 0.34), (gx, y0 + 1.9, AZ0 + 0.15), "metal_d"))
+            P.append(deco("z8_a_mull%d_%de" % (lv, gx), (0.22, 3.4, 0.34), (gx, y0 + 1.9, AZ1 - 0.15), "metal_d"))
+    # 3F 南幕墙破口(碎窗)+ 玻璃碴
+    P.append(deco("z8_a_shatter0", (1.6, 0.06, 1.0), (-24, 0.10, 43.6), "glass"))
+    P.append(deco("z8_a_shatter1", (1.0, 0.06, 0.7), (-22.6, 0.10, 44.2), "glass"))
+    # 弹痕(南立面)
+    for i, (hx, hy) in enumerate([(-36, 1.8), (-28, 2.6), (-12, 2.2), (-6, 3.0), (-16, 1.6)]):
+        P.append(deco("z8_a_hole%d" % i, (0.4, 0.34, 0.08), (hx, hy, AZ0 - 0.18), "dark", bev=0.0))
+    # 楼梯间(东端): 井墙 + 三跑
+    P += wall_x("z8_a_stw", -2, 5, 47.5, 0.25, 0, 12, "concrete")
+    P += stairs_z("z8_a_st1", 48, 55, 1.5, 2.4, 0.0, 4.0, "concrete", up_dir="+z")
+    P += floor_slab("z8_a_lp1", -2, 5, 55, 58.5, 4.0, 0.15, "concrete")
+    P += stairs_z("z8_a_st2", 58.5, 65.5, 1.5, 2.4, 4.0, 8.0, "concrete", up_dir="+z")
+    P += floor_slab("z8_a_lp2", -2, 5, 65.5, 69, 8.0, 0.15, "concrete")
+    P += stairs_z("z8_a_st3", 69, 72.5, 1.5, 2.4, 8.0, 12.0, "concrete", up_dir="+z")
+    # 楼层 4/8 井口护栏
+    P.append(solid("z8_a_rail4", (0.1, 1.0, 5.0), (-1.5, 4.5, 60), "metal", bev=0.01))
+    P.append(solid("z8_a_rail8", (0.1, 1.0, 5.0), (-1.5, 8.5, 60), "metal", bev=0.01))
+    # 屋顶杂物
+    for i, (rx, rz) in enumerate([(-38, 52), (-30, 52), (-38, 68), (-30, 68)]):
+        P.append(solid("z8_a_hvac%d" % i, (2.4, 1.2, 1.6), (rx, 12.6, rz), "metal", bev=0.03))
+    P.append(solid("z8_a_tank", (2.0, 2.2, 2.0), (-12, 13.1, 60), "metal", bev=0.05))
+    c = add_cyl("z8_a_ant", 0.06, 5.0, (0, 14.5, 50), axis="y", seg=6)
+    zmat(c, "metal_d")
+    P.append(c)
+    # 室内 1F 大堂: 前台+闸机+长椅
+    P.append(deco("z8_a_desk", (5.0, 1.1, 0.9), (-20, 0.55, 52), "wood_d"))
+    for i in range(3):
+        P.append(solid("z8_a_gate%d" % i, (0.4, 1.0, 1.4), (-20 + i * 1.6 - 1.6, 0.5, 60), "metal_d", bev=0.02))
+    for i, (bx, bz) in enumerate([(-36, 62), (-4, 62)]):
+        P.append(solid("z8_a_bench%d" % i, (3.0, 0.45, 0.5), (bx, 0.25, bz), "wood_d", bev=0.02))
+
+    # ---------------- B 馆(2F h8) ----------------
+    BX0, BX1, BZ0, BZ1 = -95, -55, 40, 70
+    P += wall_x("z8_b_s", BX0, BX1, BZ0, 0.3, 0, 8, "concrete",
+                doors=[(-75, 3.0, 2.8), (-90, 1.4, 2.2)],
+                windows=[(-85, 5.0, 0.9, 3.4), (-65, 5.0, 0.9, 3.4)])
+    P += wall_x("z8_b_n", BX0, BX1, BZ1, 0.3, 0, 8, "concrete",
+                doors=[(-60, 1.4, 2.2)], windows=[(-80, 5.0, 0.9, 3.4)])
+    P += wall_z("z8_b_w", BZ0, BZ1, BX0, 0.3, 0, 8, "concrete", windows=[(50, 5.0, 0.9, 3.4)])
+    P += wall_z("z8_b_e", BZ0, BZ1, BX1, 0.3, 0, 8, "concrete", doors=[(45, 1.4, 2.2)])
+    P.append(solid("z8_b_glass2", (40, 3.4, 0.15), (-75, 5.9, BZ0 + 0.15), "glass", bev=0.0))
+    P.append(solid("z8_b_glass2n", (40, 3.4, 0.15), (-75, 5.9, BZ1 - 0.15), "glass", bev=0.0))
+    P += flat_roof("z8_b_roof", BX0 - 0.3, BX1 + 0.3, BZ0 - 0.3, BZ1 + 0.3, 8.2, "concrete",
+                   walkable=False, parapet_h=0.8)
+    P += floor_slab("z8_b_slab2", BX0, BX1, BZ0, BZ1, 4.0, 0.3, "concrete")
+    P += stairs_z("z8_b_st", 62, 68.4, -90, 2.2, 0.0, 4.0, "concrete", up_dir="+z")
+    # 室内: 大堂柱 + 2F 隔墙
+    for gx in (-90, -80, -70, -60):
+        c = add_cyl("z8_b_col%d" % gx, 0.38, 8, (gx, 4, 55), axis="y", seg=8)
+        zmat(c, "concrete")
+        P.append(c)
+    P += wall_x("z8_b_part", -95, -75, 62, 0.25, 4, 8, "plaster", doors=[(-85, 1.4, 2.2)])
+
+    # ---------------- 旗 F 广场掩体(旗局部 (-20,+40)) ----------------
+    for i, (fx, fz) in enumerate([(-30, 36), (-10, 46), (-30, 46), (-12, 34)]):
+        P.append(solid("z8_ff_fl%d" % i, (2.4, 0.65, 2.4), (fx, 0.33, fz), "stone", bev=0.03))
+        P.append(deco("z8_ff_flp%d" % i, (1.8, 0.35, 1.8), (fx, 0.82, fz), "leaf"))
+    P += vending_machine("z8_ff_v0", -34, 42, rot=90.0, kind="soda_red")
+    P += vending_machine("z8_ff_v1", -8, 36, rot=90.0, kind="soda_blue")
+    for i, (sx, sz) in enumerate([(-25, 52), (-15, 30), (-40, 36)]):
+        P.append(solid("z8_ff_bench%d" % i, (1.8, 0.45, 0.5), (sx, 0.25, sz), "stone", bev=0.02))
+    for i, (bx, bz) in enumerate([(-28, 42), (-14, 40)]):                                # 石球
+        s = bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=1, radius=0.7, location=g2b((bx, 0.5, bz)))
+        ob = bpy.context.active_object
+        ob.name = "z8_ff_ball%d" % i
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        zmat(ob, "stone_d")
+        P.append(ob)
+        J.col("z8_ff_ball%d" % i, (1.3, 1.2, 1.3), (bx, 0.5, bz))
+    P += wreck_car("z8_ff_wreck", 2, 34, 0.9)
+    # A 馆 1F 室内吊灯 x4
+    for i, (lx_, lz_) in enumerate([(-35, 55), (-25, 55), (-15, 55), (-5, 55)]):
+        P.append(deco("z8_a_lamp%d" % i, (2.2, 0.12, 0.5), (lx_, 3.82, lz_), "lamp"))
+    P += jersey_barrier("z8_ff_jb0", -20, 26, 2.0, 0.1)
+
+    # ---------------- 地下停车场(y-3.5) + 坡道 + 西延通道 ----------------
+    PX0, PX1, PZ0, PZ1 = -50, 10, 32, 72
+    P.append(slab("z8_pg_floor", PX0, PX1, PZ0, PZ1, y=dz, t=0.3, mat="concrete_d"))
+    J.walk("z8_pg_floor", (60, 0.08, 40), (-20, dz - 0.04, 52))
+    P.append(solid("z8_pg_ceil", (60.6, 0.5, 40.6), (-20, -0.31, 52), "concrete", bev=0.01))
+    P += wall_x("z8_pg_s", PX0, PX1, PZ0, 0.3, dz, -0.6, "concrete")
+    P += wall_x("z8_pg_n", PX0, PX1, PZ1, 0.3, dz, -0.6, "concrete")
+    P += wall_z("z8_pg_w", PZ0, PZ1, PX0, 0.3, dz, -0.6, "concrete",
+                doors=[(67, 6.0, 2.9)])                                                  # 西墙北段接通道
+    P += wall_z("z8_pg_e", PZ0, PZ1, PX1, 0.3, dz, -0.6, "concrete",
+                doors=[(52, 5.0, 2.9)])                                                  # 东墙坡道洞
+    for gx in (-44, -32, -20, -8, 4):                                                    # 柱网
+        for gz in (38, 52, 66):
+            c = add_cyl("z8_pg_col%d_%d" % (gx, gz), 0.32, 2.9, (gx, dz + 1.45, gz), axis="y", seg=8)
+            zmat(c, "concrete")
+            P.append(c)
+    for i in range(4):                                                                   # 车位线+车
+        P.append(slab("z8_pg_l%d" % i, -40 + i * 8, -39.2 + i * 8, 42, 48,
+                      y=dz + 0.05, t=0.02, mat="paint_w"))
+    for i, (cx, cz, rr) in enumerate([(-36, 45, 0.0), (-20, 45, 0.1), (-4, 45, -0.1), (-28, 62, 0.2)]):
+        P += _car("z8_pg_car%d" % i, cx, cz, rr, body="metal_d", y=dz)
+    for i, gz in enumerate((38, 48, 58, 68)):
+        P.append(deco("z8_pg_lamp%d" % i, (1.6, 0.1, 0.4), (-20, -0.62, gz), "lamp"))
+    P.append(deco("z8_pg_map", (0.1, 1.0, 1.6), (-49.85, dz + 1.6, 40), "sign_w"))
+    # 坡道(厅东墙洞向东升出地面)
+    P += stairs_x("z8_pg_ramp", 10, 33, 52, 5.0, dz, 0.0, "concrete", up_dir="+x")
+    P.append(solid("z8_pg_rw0", (23, 1.0, 0.2), (21.5, -1.5, 49.4), "concrete", bev=0.01))
+    P.append(solid("z8_pg_rw1", (23, 1.0, 0.2), (21.5, -1.5, 54.6), "concrete", bev=0.01))
+    P.append(solid("z8_pg_rail0", (0.12, 1.0, 6.2), (33.6, 0.5, 52), "metal", bev=0.01))
+    # 西延通道(待 B5 接 C 线; 西端封)
+    P.append(slab("z8_dux_floor", -100, -50, 64, 70, y=dz, t=0.3, mat="concrete_d"))
+    J.walk("z8_dux_floor", (50, 0.08, 6), (-75, dz - 0.04, 67))
+    P.append(solid("z8_dux_ceil", (50.6, 0.5, 6.6), (-75, -0.31, 67), "concrete", bev=0.01))
+    P += wall_x("z8_dux_n", -100, -50, 64, 0.3, dz, -0.6, "concrete")
+    P += wall_x("z8_dux_s", -100, -50, 70, 0.3, dz, -0.6, "concrete")
+    P += wall_z("z8_dux_w", 64, 70, -100, 0.3, dz, -0.6, "concrete")
+    for i, px in enumerate((-92, -78, -64)):
+        P.append(deco("z8_dux_l%d" % i, (1.6, 0.1, 0.4), (px, -0.62, 67), "lamp"))
+    for i, (px, pz) in enumerate([(-88, 64.4), (-62, 69.6)]):
+        P.append(solid("z8_dux_hy%d" % i, (0.4, 0.8, 0.3), (px, dz + 0.4, pz), "sign_r", bev=0.02))
+
+    # ---------------- 街道设施 + 战场痕迹 ----------------
+    P += vending_machine("z8_vend0", 20, 34, rot=0.0, kind="soda_red")
+    P += vending_machine("z8_vend1", -60, 6, rot=0.0, kind="soda_blue")
+    P += wreck_car("z8_wreck0", 50, 40, 0.3)
+    P += wreck_car("z8_wreck1", -70, 0, -0.2)
+    P += jersey_barrier("z8_jb0", -20, 34, 2.0, 0.0)
+    P += jersey_barrier("z8_jb1", -16, 34, 2.0, 1.2)
+    P += sandbag_wall("z8_sb0", 30, 36, 3.0, 0.2)
+    P += sandbag_wall("z8_sb1", -50, 36, 3.0, -0.15)
+    for i, (x, z) in enumerate([(-60, 80), (-70, 30), (30, 80), (20, 84)]):
+        P += tree_cherry("z8_sak%d" % i, x, z, h=4.2, r=2.0)
+    P += street_lamp("z8_lamp0", -50, 33.5, 5.2, rot_z=0.0)
+    P += street_lamp("z8_lamp1", 10, 33.5, 5.2, rot_z=3.14)
+    P += street_lamp("z8_lamp2", -20, 82, 5.2, rot_z=1.57)
+    P += utility_pole("z8_pole0", -80, 4, 8.5)
+    P += utility_pole("z8_pole1", 40, 4, 8.5, trafo=True)
+    P += wire_x("z8_wire0", -80, 40, 4, 7.2)
+    for i, (x, z) in enumerate([(-52, -20), (45, -30)]):
+        P.append(deco("z8_scorch%d" % i, (2.6, 0.02, 2.0), (x, 0.11, z), "dark", bev=0.0))
+
+    # ---------------- 导出 + 渲染 ----------------
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    zone_export("akitsu_z8", P, MODEL_DIR + "/zone_8.glb")
+    if render:
+        zone_render("z8", (0, 0, 0), 120, SHOT_DIR + "/zone8",
+                    extra_shots=[("lobby", (-20, 1.7, 36), (-20, 2.2, 60))])
+
+
+# ============================================================ Z6 秋津港
+# 局部原点 = 区中心, 全局 (+325, -160): lx = gx-325, lz = gz+160。
+# 国道 lz[+109,+131]; 海岸大道 lx[+87,+103]; 滨通り lz[-107,-93]; 高架 x=300 -> lx=-25(桥面 y8);
+# 海岸线 lx=+135(绝对 x=460); 旗 E = 局部 (+15,+40) 于集装箱堆场; 门吊检修平台 y10(竖梯狙击位)。
+
+def _container(name, x, z, rot=0.0, mat="sign_b"):
+    """集装箱 6.06 x 2.6 x 2.44。col 罩盒。"""
+    return [solid(name, (6.06, 2.6, 2.44), (x, 1.3, z), mat, bev=0.03,
+                  rot=(0, math.radians(rot), 0))]
+
+
+def _truck(name, x, z, rot=0.0, cab="sign_b"):
+    """简化箱式卡车(头+斗+底盘+4 轮)。"""
+    P = []
+    r = math.radians(rot)
+    P.append(solid(name + "_cab", (2.4, 2.3, 2.4), (x + math.cos(r) * 3.4, 1.45, z - math.sin(r) * 3.4),
+                   cab, bev=0.06, rot=(0, r, 0)))
+    P.append(solid(name + "_box", (6.2, 2.7, 2.5), (x - math.cos(r) * 1.9, 1.75, z + math.sin(r) * 1.9),
+                   "metal", bev=0.04, rot=(0, r, 0)))
+    P.append(solid(name + "_ch", (9.6, 0.5, 2.2), (x, 0.55, z), "metal_d", bev=0.02, rot=(0, r, 0)))
+    for wx, wz in ((3.4, 1.0), (3.4, -1.0), (-2.6, 1.0), (-2.6, -1.0)):
+        px = x + math.cos(r) * wx + math.sin(r) * wz
+        pz = z - math.sin(r) * wx + math.cos(r) * wz
+        ax = "z" if abs(math.cos(r)) > 0.5 else "x"
+        w = add_cyl("%s_w%d_%d" % (name, int(wx * 10), int(wz * 10)), 0.45, 0.28,
+                    (px, 0.45, pz), axis=ax, seg=10)
+        zmat(w, "rubber")
+        P.append(w)
+    return P
+
+
+def build_zone_6(render=True):
+    reset()
+    J._zone_cols.clear()
+    J._zone_walks.clear()
+    P = []
+
+    # ---------------- 地表铺装 ----------------
+    P.append(slab("z6_ground", -145, 145, -200, 200, y=0.03, t=0.05, mat="concrete_d"))  # 港区混凝土地坪
+    P.append(slab("z6_yard", -60, 85, -20, 105, y=0.05, t=0.04, mat="asphalt"))          # 堆场
+    P.append(slab("z6_kokudo", -25, 145, 109, 131, y=0.05, t=0.04, mat="asphalt"))       # 国道段(x>=300, 避让 Z8 段)
+    P.append(slab("z6_kokudo_cl", -145, 145, 119.7, 120.3, y=0.07, t=0.02, mat="paint_y"))
+    P.append(slab("z6_kaido0", 87, 103, -200, 109, y=0.05, t=0.04, mat="asphalt"))    # 海岸大道(南, 避让国道)
+    P.append(slab("z6_kaido1", 87, 103, 131, 200, y=0.05, t=0.04, mat="asphalt"))      # 海岸大道(北)
+    P.append(slab("z6_kaido_cl", 94.7, 95.3, -200, 200, y=0.07, t=0.02, mat="paint_w"))
+    P.append(slab("z6_hama0", -145, 87, -107, -93, y=0.05, t=0.04, mat="asphalt"))       # 滨通り(西, 避让海岸大道)
+    P.append(slab("z6_hama1", 103, 145, -107, -93, y=0.05, t=0.04, mat="asphalt"))       # 滨通り(东)
+    P.append(slab("z6_sea", 135, 145, -200, 200, y=-0.5, t=0.1, mat="water"))            # 海面(界内条)
+    for i, (xa, xb, za, zb) in enumerate([(-145, -110, -200, -120), (-145, -110, 140, 200),
+                                          (110, 145, -200, -140)]):
+        P.append(slab("z6_grass%d" % i, *_lawn(xa, xb, za, zb), y=0.045, t=0.05, mat="grass"))
+    # 斑马线(国道 x 堆场口 + 海岸大道 x 滨通り口)
+    for i in range(6):
+        P.append(slab("z6_zeb0_%d" % i, -6 + i * 2.4, -4.6 + i * 2.4, 105, 109,
+                      y=0.075, t=0.02, mat="paint_w"))
+        P.append(slab("z6_zeb1_%d" % i, 86, 90, -104 + i * 2.4, -101.6 + i * 2.4,
+                      y=0.075, t=0.02, mat="paint_w"))
+        P.append(slab("z6_zeb2_%d" % i, 100, 104, -104 + i * 2.4, -101.6 + i * 2.4,
+                      y=0.075, t=0.02, mat="paint_w"))
+
+    # ---------------- 集装箱垛 6(2 行 x 3 列; 旗 +15,+40 在巷道) ----------------
+    box_mats = ("sign_b", "sign_r", "sign_o", "metal", "rust", "metal_d")
+    stacks = [(-30, 20), (0, 20), (40, 20), (-30, 70), (0, 70), (40, 70)]
+    for si, (sx, sz) in enumerate(stacks):
+        for li in range(2):                                  # 2 层
+            for ci, czoff in enumerate((-1.28, 1.28)):       # 2 列并排
+                mat = box_mats[(si * 2 + li + ci) % len(box_mats)]
+                P += _container("z6_box%d_%d_%d" % (si, li, ci), sx, sz + czoff,
+                                rot=0.0, mat=mat)
+        # 顶层第三箱(部分垛)
+        if si % 2 == 0:
+            P += _container("z6_box%d_top" % si, sx, sz, rot=0.0,
+                            mat=box_mats[(si + 3) % len(box_mats)])
+    # 散箱(掩体)
+    P += _container("z6_box_s0", 15, 26, rot=8.0, mat="metal")
+    P += _container("z6_box_s1", 22, 58, rot=-14.0, mat="rust")
+
+    # ---------------- 门吊 x2(跨堆场, 检修平台 y10) ----------------
+    for gi, mgx in enumerate((-15, 35)):
+        for lx in (mgx - 14, mgx + 14):                      # 双腿
+            P.append(solid("z6_cr%d_leg%d" % (gi, 1 if lx > mgx else 0),
+                           (1.1, 12, 1.1), (lx, 6, 45), "metal", bev=0.02))
+            P.append(solid("z6_cr%d_legz%d" % (gi, 1 if lx > mgx else 0),
+                           (1.1, 12, 1.1), (lx, 6, -15), "metal", bev=0.02))
+        P.append(solid("z6_cr%d_beam" % gi, (30.5, 1.6, 2.2), (mgx, 13.0, 45), "sign_o", bev=0.02))
+        P.append(solid("z6_cr%d_beam2" % gi, (30.5, 1.6, 2.2), (mgx, 13.0, -15), "sign_o", bev=0.02))
+        P.append(solid("z6_cr%d_truss" % gi, (30.5, 0.35, 1.4), (mgx, 12.1, 15), "metal_d", bev=0.0))
+        P.append(solid("z6_cr%d_cab" % gi, (2.6, 2.2, 2.4), (mgx + 10, 11.4, 45), "metal_d", bev=0.04))
+        P.append(solid("z6_cr%d_trol" % gi, (1.8, 1.2, 1.8), (mgx - 6, 11.6, 15), "metal_d", bev=0.03))
+        # 检修平台 y10 + 竖梯(北腿旁; 狙击位)
+        P += floor_slab("z6_cr%d_plat" % gi, mgx + 12.5, mgx + 17.5, 41, 47, 10.0, 0.2, "metal")
+        P.append(solid("z6_cr%d_pfall" % gi, (5.2, 1.0, 0.12), (mgx + 15, 10.5, 41), "metal", bev=0.01))
+        c = add_cyl("z6_cr%d_ladd" % gi, 0.3, 10.0, (mgx + 18.3, 5.0, 44), axis="y", seg=6)
+        zmat(c, "metal_d")
+        P.append(c)
+        P.append(deco("z6_cr%d_ladr" % gi, (0.06, 10.0, 0.5), (mgx + 18.0, 5.0, 44), "metal_d"))
+    # 地面轨道
+    for gi, mgx in enumerate((-15, 35)):
+        for lx in (mgx - 14, mgx + 14):
+            P.append(solid("z6_cr%d_rail%d" % (gi, 1 if lx > mgx else 0),
+                           (1.0, 0.2, 130), (lx, 0.1, 15), "metal_d", bev=0.0))
+
+    # ---------------- 仓库 x3(可进 2: 北排 x2 + 西 1) ----------------
+    whs = [(-30, 160, 30, 18, True), (20, 160, 30, 18, True), (-90, 40, 26, 16, False)]
+    for wi, (wx, wz, ww, wd, enter) in enumerate(whs):
+        x0, x1 = wx - ww / 2.0, wx + ww / 2.0
+        z0, z1 = wz - wd / 2.0, wz + wd / 2.0
+        d = []
+        if enter:
+            d = [(wx, 6.0, 4.6)]
+        P += wall_x("z6_wh%d_s" % wi, x0, x1, z0, 0.3, 0, 7.5, "concrete_d",
+                    doors=d, windows=[(wx - ww / 4.0, 3.0, 2.5, 4.5), (wx + ww / 4.0, 3.0, 2.5, 4.5)])
+        P += wall_x("z6_wh%d_n" % wi, x0, x1, z1, 0.3, 0, 7.5, "concrete_d",
+                    doors=[(x0 + 4.0, 1.4, 2.4)] if enter else [],
+                    windows=[(wx, 3.0, 2.5, 4.5)])
+        P += wall_z("z6_wh%d_w" % wi, z0, z1, x0, 0.3, 0, 7.5, "concrete_d",
+                    doors=[(z0 + 4.0, 1.3, 2.4)] if enter else [])
+        P += wall_z("z6_wh%d_e" % wi, z0, z1, x1, 0.3, 0, 7.5, "concrete_d")
+        P += flat_roof("z6_wh%d_roof" % wi, x0 - 0.3, x1 + 0.3, z0 - 0.3, z1 + 0.3, 7.7,
+                       "metal", walkable=False, parapet_h=0.6)
+        # 卷帘门纹理(大门面)
+        for k in range(7):
+            P.append(deco("z6_wh%d_sh%d" % (wi, k), (6.0, 0.08, 0.06),
+                          (wx, 0.8 + k * 0.62, z0 - 0.18), "metal_d"))
+        if enter:
+            for k in range(3):                               # 室内货架/货箱
+                P.append(solid("z6_wh%d_rk%d" % (wi, k), (5.0, 2.2, 1.2),
+                               (wx - 8 + k * 7.0, 1.1, z1 - 3.0), "metal_d", bev=0.02))
+            P.append(solid("z6_wh%d_tb" % wi, (4.0, 1.1, 1.0), (wx, 0.55, z0 + 3.5), "wood_d", bev=0.02))
+
+    # ---------------- 卡车 x6 + 油罐 x2 ----------------
+    for ti, (tx, tz, tr) in enumerate([(-50, 90, 0.1), (-40, 90, 0.0), (60, 90, 0.0),
+                                       (60, 78, 3.14), (-70, -40, 1.57), (70, -60, -1.57)]):
+        P += _truck("z6_trk%d" % ti, tx, tz, tr, cab="sign_b" if ti % 2 else "sign_o")
+    for oi, ox in enumerate((-100, -70)):
+        c = add_cyl("z6_tank%d" % oi, 6.0, 8.0, (ox, 4.0, -45), axis="y", seg=16)
+        zmat(c, "concrete" if oi == 0 else "rust")
+        P.append(c)
+        J.col("z6_tank%d" % oi, (12.5, 8, 12.5), (ox, 4, -45))
+        P.append(add_cyl("z6_tank%d_top" % oi, 0.4, 1.2, (ox, 8.6, -45), axis="y", seg=8))
+        zmat(P[-1], "metal_d")
+        for k, (dx, dzoff, ln) in enumerate([(-1, 0, 14), (1, 0, 14), (0, -1, 14), (0, 1, 14)]):
+            P.append(solid("z6_tank%d_dy%d" % (oi, k), (ln, 1.2, 0.4) if dx else (0.4, 1.2, ln),
+                           (ox + dx * 7.2, 0.6, -45 + dzoff * 7.2), "concrete_d", bev=0.01))
+    # 烟囱(工业地标)
+    c = add_cyl("z6_chim", 1.6, 20, (-125, 10, 90), axis="y", seg=10, taper=0.82)
+    zmat(c, "brick")
+    P.append(c)
+    J.col("z6_chim", (3.4, 20, 3.4), (-125, 10, 90))
+    P.append(deco("z6_chim_band", (3.0, 0.4, 3.0), (-125, 18, 90), "paint_w"))
+
+    # ---------------- 架空管廊(堆场西缘) ----------------
+    for pi, px in enumerate((-58, -50)):
+        for gz in range(-15, 106, 24):
+            c = add_cyl("z6_pipe%d_%d" % (pi, gz), 0.28, 24, (px, 4.2, gz + 12), axis="z", seg=8)
+            zmat(c, "metal" if pi == 0 else "rust")
+            P.append(c)
+    for gz in (-10, 20, 50, 80, 100):
+        for px in (-58, -50):
+            c = add_cyl("z6_pipe_p%d_%d" % (int(px), gz), 0.18, 4.2, (px, 2.1, gz), axis="y", seg=6)
+            zmat(c, "metal_d")
+            P.append(c)
+
+    # ---------------- 架空天路(高架, lx=-25, 桥面 y8) ----------------
+    P += floor_slab("z6_elev0", -29, -21, -200, 0, 8.0, 0.5, "concrete")
+    P += floor_slab("z6_elev1", -29, -21, 0, 200, 8.0, 0.5, "concrete")
+    P.append(solid("z6_elev_rail0", (0.15, 1.1, 396), (-28.85, 8.55, 0), "metal", bev=0.01))
+    P.append(solid("z6_elev_rail1", (0.15, 1.1, 396), (-21.15, 8.55, 0), "metal", bev=0.01))
+    for gz in range(-180, 200, 40):
+        c = add_cyl("z6_elev_col%d" % gz, 1.1, 7.75, (-25, 3.875, gz), axis="y", seg=10)
+        zmat(c, "concrete")
+        P.append(c)
+        P.append(solid("z6_elev_cap%d" % gz, (10, 0.7, 3.0), (-25, 8.15, gz), "concrete", bev=0.02))
+    # 楼梯塔 x2(纯步兵天路上下口)
+    for tz in (-70, 170):
+        for dx in (-2.2, 2.2):
+            for dzz in (-1.6, 1.6):
+                P.append(solid("z6_elet%d_%d_%d" % (tz, int(dx), int(dzz)),
+                               (0.8, 8.4, 0.8), (-18.5 + dx, 4.2, tz + 12 + dzz), "concrete", bev=0.02))
+        P += stairs_z("z6_elet_st%d" % tz, tz, tz + 24, -18.5, 3.0, 0.0, 8.0, "concrete", up_dir="+z")
+        P += floor_slab("z6_elet_lp%d" % tz, -21, -17, tz + 24, tz + 27.5, 8.0, 0.25, "concrete")
+        P.append(solid("z6_elet_lr%d" % tz, (4.2, 1.0, 0.12), (-19, 8.5, tz + 24.06), "metal", bev=0.01))
+
+    # ---------------- 栈桥 + 海岸 ----------------
+    P += floor_slab("z6_pier", 135, 175, 20, 44, 1.2, 0.5, "concrete")
+    for px in (139, 155, 171):
+        for pz in (23, 41):
+            c = add_cyl("z6_pier_p%d_%d" % (px, pz), 0.5, 1.9, (px, 0.2, pz), axis="y", seg=8)
+            zmat(c, "concrete_d")
+            P.append(c)
+    for pz in (22, 42):
+        P.append(solid("z6_pier_rail%d" % pz, (40, 1.0, 0.12), (155, 1.75, pz), "metal", bev=0.01))
+    for bx, bz in ((137, 22), (137, 42), (173, 22), (173, 42)):
+        c = add_cyl("z6_bol%d_%d" % (bx, bz), 0.25, 0.9, (bx, 1.65, bz), axis="y", seg=8)
+        zmat(c, "metal_d")
+        P.append(c)
+    P += stairs_x("z6_pier_st", 127, 134, 32, 4.0, 0.0, 1.2, "concrete", up_dir="+x")
+    # 护岸墙(栈桥口留缺口 lz[16,48])
+    P.append(solid("z6_seawall0", (1.0, 2.5, 216), (134.5, 0.75, -92), "concrete_d", bev=0.01))
+    P.append(solid("z6_seawall1", (1.0, 2.5, 152), (134.5, 0.75, 124), "concrete_d", bev=0.01))
+
+    # ---------------- 厂区围墙(西缘, 国道口留门) ----------------
+    P += wall_z("z6_wall", -20, 110, -110, 0.25, 0, 2.2, "concrete_d",
+                doors=[(95, 8.0, 2.2)])
+
+    # ---------------- 旗 E 掩体(旗局部 (+15,+40); 垛间巷道) ----------------
+    for i, (bx, bz) in enumerate([(6, 34), (24, 46), (8, 52), (26, 34)]):
+        c = add_cyl("z6_fe_drum%d" % i, 0.35, 0.95, (bx, 0.48, bz), axis="y", seg=10)
+        zmat(c, "rust" if i % 2 else "metal")
+        P.append(c)
+    P += sandbag_wall("z6_fe_sb0", 15, 30, 3.0, 0.2)
+    P += sandbag_wall("z6_fe_sb1", 15, 52, 3.0, 3.14)
+    P += wreck_car("z6_fe_wreck", 15, 66, 0.4)
+    P += jersey_barrier("z6_fe_jb0", 15, 44, 2.0, 1.57)
+    P += jersey_barrier("z6_fe_jb1", 10, 44, 2.0, 1.57)
+
+    # ---------------- 街道设施 + 战场痕迹 ----------------
+    P += vending_machine("z6_vend0", 80, 100, rot=90.0, kind="soda_red")
+    P += vending_machine("z6_vend1", -20, 105, rot=0.0, kind="soda_blue")
+    P += wreck_car("z6_wreck0", -10, 120, 0.2)
+    P += jersey_barrier("z6_jb0", 30, 100, 2.0, 0.0)
+    P += jersey_barrier("z6_jb1", 34, 98, 2.0, 1.3)
+    P += sandbag_wall("z6_sb0", 85, 60, 3.0, 1.57)
+    for i, (x, z, rr) in enumerate([(-45, 30, 0.2), (55, 30, -0.15)]):
+        P += _car("z6_park%d" % i, x, z, rr, body="metal_d")
+    for i, (x, z) in enumerate([(50, 44), (30, 68)]):        # 箱垛破洞
+        P.append(deco("z6_hole%d" % i, (0.5, 0.8, 0.08), (x, 1.6, z), "dark", bev=0.0))
+    for i, (x, z) in enumerate([(-20, 60), (60, 55)]):
+        P.append(deco("z6_scorch%d" % i, (2.6, 0.02, 2.0), (x, 0.11, z), "dark", bev=0.0))
+    P += street_lamp("z6_lamp0", 84, 118, 5.2, rot_z=-1.57)
+    P += street_lamp("z6_lamp1", -20, 106, 5.2, rot_z=1.57)
+    P += utility_pole("z6_pole0", -40, 134, 8.5)
+    P += utility_pole("z6_pole1", 30, 134, 8.5, trafo=True)
+    P += wire_x("z6_wire0", -40, 30, 134, 7.2)
+
+    # ---------------- 导出 + 渲染 ----------------
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    zone_export("akitsu_z6", P, MODEL_DIR + "/zone_6.glb")
+    if render:
+        zone_render("z6", (0, 0, 0), 170, SHOT_DIR + "/zone6",
+                    extra_shots=[("yard", (60, 2.0, 20), (0, 3.0, 55))])
+
+
+# ============================================================ Z4 若叶住宅区
+# 局部原点 = 区中心, 全局 (+250, +340): lx = gx-250, lz = gz-340。
+# 巷网: A lx[-64.5,-55.5] / C lx[+45.5,+54.5] / B lz[+15.5,+24.5] / D lz[-64.5,-55.5](均 9m);
+# 儿童公园 lx[-56,+44] lz[-56,+14](旗 D = 局部 (-20,-30)); 公寓屋顶 y9 外置钢梯(可上 2 栋)。
+
+def _house(name, x, z, rot=0.0, enter=False):
+    """一户建 10x8 双坡顶(h6.8)。enter=True 时 1F 可进(前门+后门)。"""
+    P = []
+    r = math.radians(rot)
+    ca, sa = math.cos(r), math.sin(r)
+
+    def W(px, pz):
+        return (x + ca * px + sa * pz, z - sa * px + ca * pz)
+
+    # 1F 墙(局部系: 宽 10 沿 lx, 深 8 沿 lz) -> 用 rot=0/90 近似, 非 90 度角仅用于门朝向微调
+    if abs(sa) < 0.5:      # rot≈0/180: 墙沿 x
+        x0, x1, z0, z1 = x - 5, x + 5, z - 4, z + 4
+        fz = z1 if rot == 0 else z0                       # 前门面
+        bz = z0 if rot == 0 else z1
+        d_front = [(x - 1.5, 1.1, 2.1)] if enter else []
+        d_back = [(x + 2.0, 1.0, 2.1)] if enter else []
+        P += wall_x(name + "_f", x0, x1, fz, 0.24, 0, 2.8, "plaster",
+                    doors=d_front, windows=[(x - 3.2, 1.4, 0.9, 2.1)] if not d_front else [])
+        P += wall_x(name + "_b", x0, x1, bz, 0.24, 0, 2.8, "plaster",
+                    doors=d_back, windows=[(x - 2.0, 1.4, 0.9, 2.1), (x + 3.0, 1.4, 0.9, 2.1)])
+        P += wall_z(name + "_w", z0, z1, x0, 0.24, 0, 2.8, "plaster",
+                    windows=[(z, 1.4, 0.9, 2.1)])
+        P += wall_z(name + "_e", z0, z1, x1, 0.24, 0, 2.8, "plaster",
+                    windows=[(z, 1.4, 0.9, 2.1)])
+    else:                  # rot≈90/270: 墙沿 z
+        x0, x1, z0, z1 = x - 4, x + 4, z - 5, z + 5
+        fx = x1 if rot == 90 else x0
+        d_front = [(z - 1.5, 1.1, 2.1)] if enter else []
+        P += wall_z(name + "_f", z0, z1, fx, 0.24, 0, 2.8, "plaster",
+                    doors=d_front, windows=[(z + 2.5, 1.4, 0.9, 2.1)] if not d_front else [])
+        P += wall_z(name + "_b", z0, z1, x0 if rot == 90 else x1, 0.24, 0, 2.8, "plaster",
+                    windows=[(z, 1.4, 0.9, 2.1)])
+        P += wall_x(name + "_s", x0, x1, z0, 0.24, 0, 2.8, "plaster",
+                    windows=[(x, 1.4, 0.9, 2.1)])
+        P += wall_x(name + "_n", x0, x1, z1, 0.24, 0, 2.8, "plaster",
+                    windows=[(x, 1.4, 0.9, 2.1)])
+    # 2F 体量(小) + 双坡顶
+    P.append(solid(name + "_2f", (7.0, 2.4, 6.0), (x, 4.0, z), "plaster", bev=0.02,
+                   rot=(0, r, 0) if abs(sa) > 0.5 else (0, 0, 0)))
+    P += gable_roof(name + "_roof", x - 5.4, x + 5.4, z - 4.4, z + 4.4, 5.3, 6.8,
+                    "roof_tile", overhang=0.45)
+    if enter:
+        P.append(deco(name + "_tbl", (2.2, 0.7, 1.0), (x + 2.0, 0.35, z), "wood_d"))
+    return P
+
+
+def _apt(name, x, z, roof_ladder=False):
+    """公寓 20x12 3 层 h9 平顶。roof_ladder=True 外置钢梯可上屋顶(y9 walk)。"""
+    P = []
+    x0, x1, z0, z1 = x - 10, x + 10, z - 6, z + 6
+    P += wall_x(name + "_s", x0, x1, z0, 0.3, 0, 9, "concrete",
+                doors=[(x - 5, 1.4, 2.3), (x + 5, 1.4, 2.3)],
+                windows=[(x - 8, 1.6, 0.9, 2.3), (x, 1.6, 0.9, 2.3), (x + 8, 1.6, 0.9, 2.3)])
+    P += wall_x(name + "_n", x0, x1, z1, 0.3, 0, 9, "concrete",
+                windows=[(x - 6, 1.6, 0.9, 2.3), (x + 6, 1.6, 0.9, 2.3)])
+    P += wall_z(name + "_w", z0, z1, x0, 0.3, 0, 9, "concrete",
+                windows=[(z, 1.6, 0.9, 2.3)])
+    P += wall_z(name + "_e", z0, z1, x1, 0.3, 0, 9, "concrete",
+                doors=[(z, 1.3, 2.3)], windows=[(z + 3, 1.6, 0.9, 2.3)])
+    P += flat_roof(name + "_roof", x0 - 0.3, x1 + 0.3, z0 - 0.3, z1 + 0.3, 9.0, "concrete",
+                   walkable=roof_ladder, parapet_h=0.9)
+    # 层间腰线
+    for y in (3.0, 6.0):
+        P.append(deco(name + "_belt%d" % int(y), (20.4, 0.25, 12.4), (x, y, z), "concrete_d", bev=0.0))
+    # 楼梯间(北端凸出) + 1F 室内
+    P.append(solid(name + "_st", (4.0, 9.0, 2.6), (x + 7.5, 4.5, z1 + 1.3), "concrete", bev=0.02))
+    P.append(deco(name + "_box", (1.2, 1.8, 0.8), (x - 7, 0.9, z0 + 1.5), "metal_d"))
+    if roof_ladder:
+        # 外置钢梯(两跑: 0->4.5->9) + 屋顶入口
+        P += stairs_x(name + "_lad0", x1 + 1.0, x1 + 7.0, z + 4.5, 1.6, 0.0, 4.5, "metal", up_dir="+x")
+        P += floor_slab(name + "_ladp", x1 + 5.6, x1 + 8.0, z + 3.2, z + 5.8, 4.5, 0.15, "metal")
+        P += stairs_x(name + "_lad1", x1 + 1.0, x1 + 7.0, z + 6.6, 1.6, 4.5, 9.0, "metal", up_dir="-x")
+        P.append(solid(name + "_ladtop", (0.15, 1.0, 3.2), (x1 + 0.85, 9.5, z + 6.6), "metal", bev=0.01))
+    return P
+
+
+def build_zone_4(render=True):
+    reset()
+    J._zone_cols.clear()
+    J._zone_walks.clear()
+    P = []
+
+    # ---------------- 地表 ----------------
+    P.append(slab("z4_ground", -150, 150, -120, 120, y=0.03, t=0.05, mat="asphalt_w"))  # 住宅区柏油路
+    P.append(slab("z4_laneA", -64.5, -55.5, -120, 120, y=0.05, t=0.04, mat="asphalt"))
+    P.append(slab("z4_laneC", 45.5, 54.5, -120, 120, y=0.05, t=0.04, mat="asphalt"))
+    P.append(slab("z4_laneB0", -150, -64.5, 15.5, 24.5, y=0.05, t=0.04, mat="asphalt"))
+    P.append(slab("z4_laneB1", -55.5, 45.5, 15.5, 24.5, y=0.05, t=0.04, mat="asphalt"))
+    P.append(slab("z4_laneB2", 54.5, 150, 15.5, 24.5, y=0.05, t=0.04, mat="asphalt"))
+    P.append(slab("z4_laneD0", -150, -64.5, -64.5, -55.5, y=0.05, t=0.04, mat="asphalt"))
+    P.append(slab("z4_laneD1", -55.5, 45.5, -64.5, -55.5, y=0.05, t=0.04, mat="asphalt"))
+    P.append(slab("z4_laneD2", 54.5, 150, -64.5, -55.5, y=0.05, t=0.04, mat="asphalt"))
+    # 巷口斑马线 x2
+    for i in range(4):
+        P.append(slab("z4_zeb0_%d" % i, -63.5 + i * 2.2, -61.9 + i * 2.4, -66.5, -63.5,
+                      y=0.075, t=0.02, mat="paint_w"))
+    # 各户庭园砂砾
+    for i, (hx, hz) in enumerate([(-130, 45), (-105, 45), (-130, 85), (-105, 85),
+                                  (75, 45), (100, 45), (75, 85), (100, 85),
+                                  (-130, -95), (-105, -95), (-130, -75), (-105, -75),
+                                  (75, -95), (100, -95), (75, -75), (100, -75)]):
+        P.append(slab("z4_yard%d" % i, hx - 6.2, hx + 6.2, hz - 5.2, hz + 5.2,
+                      y=0.045, t=0.05, mat="sand"))
+
+    # ---------------- 一户建 x16(每街区 1 栋可进) ----------------
+    houses = [(-130, 45, 0, True), (-105, 45, 180, False), (-130, 85, 180, False), (-105, 85, 0, False),
+              (75, 45, 0, True), (100, 45, 180, False), (75, 85, 180, False), (100, 85, 0, False),
+              (-130, -95, 180, True), (-105, -95, 0, False), (-130, -75, 0, False), (-105, -75, 180, False),
+              (75, -95, 180, False), (100, -95, 0, False), (75, -75, 0, True), (100, -75, 180, False)]
+    for hi, (hx, hz, hr, he) in enumerate(houses):
+        P += _house("z4_h%d" % hi, hx, hz, rot=hr, enter=he)
+        # 门前三根造篱
+        if hr in (0, 180):
+            for k, bx in enumerate((hx - 4.2, hx + 4.2)):
+                P.append(solid("z4_h%d_f%d" % (hi, k), (0.12, 0.5, 0.12), (bx, 0.25, hz + (5.0 if hr == 0 else -5.0)),
+                               "wood_d", bev=0.01))
+    # 公共电线杆网(沿主巷)
+    for pi, (px, pz) in enumerate([(-60, -100), (-60, -40), (-60, 30), (-60, 90),
+                                   (50, -100), (50, 30), (50, 90),
+                                   (0, 20), (-120, 20), (120, 20), (0, -60), (-120, -60)]):
+        P += utility_pole("z4_pole%d" % pi, px, pz, 8.5, trafo=(pi % 4 == 1))
+    P += wire_x("z4_wire0", -60, 50, 30, 7.2)
+    P += wire_x("z4_wire1", -60, 50, -100, 7.2)
+    P += wire_x("z4_wire2", -120, 120, 20, 7.2)
+
+    # ---------------- 公寓 x4(AP1/AP4 屋顶外置钢梯) ----------------
+    P += _apt("z4_apt0", -120, 105, roof_ladder=True)
+    P += _apt("z4_apt1", 120, 105, roof_ladder=False)
+    P += _apt("z4_apt2", -120, -108, roof_ladder=False)
+    P += _apt("z4_apt3", 120, -108, roof_ladder=True)
+
+    # ---------------- 儿童公园(旗 D = 局部 (-20,-30)) ----------------
+    P.append(slab("z4_pk", -56, 44, -56, 14, y=0.055, t=0.05, mat="grass"))
+    P.append(slab("z4_pk_path", -30, -10, -56, 14, y=0.075, t=0.03, mat="stone"))
+    P.append(slab("z4_pk_sand", -24, -6, -46, -34, y=0.07, t=0.04, mat="sand"))          # 沙池
+    P.append(solid("z4_pk_sandb", (19.0, 0.3, 0.3), (-15, 0.2, -46), "wood_d", bev=0.01))
+    P.append(solid("z4_pk_sandb2", (19.0, 0.3, 0.3), (-15, 0.2, -34), "wood_d", bev=0.01))
+    # 滑梯(红柱+斜滑道)
+    P.append(solid("z4_pk_slide_p", (0.5, 1.8, 1.6), (-40, 0.9, -40), "sign_r", bev=0.03))
+    sl = add_box("z4_pk_slide", (0.8, 0.12, 5.2), (-40, 1.0, -35.4), bevel=0.02)
+    sl.rotation_euler = rot_g2b((-0.32, 0, 0))
+    zmat(sl, "sign_o")
+    P.append(sl)
+    J.col("z4_pk_slide", (1.0, 2.2, 6.0), (-40, 1.0, -36))
+    # 秋千(门形架+2 挂椅)
+    P.append(solid("z4_pk_sw_top", (5.6, 0.18, 0.18), (-46, 2.4, -48), "metal", bev=0.01))
+    for k, sx in enumerate((-48.2, -43.8)):
+        P.append(solid("z4_pk_sw_p%d" % k, (0.2, 2.5, 0.2), (sx, 1.25, -48), "metal", bev=0.01, rot=(0.5, 0, 0)))
+        P.append(solid("z4_pk_sw_s%d" % k, (0.5, 0.08, 0.25), (sx, 1.0, -47.4), "wood_d", bev=0.01))
+        P.append(deco("z4_pk_sw_r%d" % k, (0.04, 1.3, 0.04), (sx, 1.7, -47.6), "metal_d"))
+    # 攀爬架(框架)
+    for k in range(4):
+        P.append(solid("z4_pk_cl%d" % k, (0.12, 1.6, 0.12), (-32 + (k % 2) * 3.0, 0.8, -24 + (k // 2) * 3.0),
+                       "sign_b", bev=0.01))
+    P.append(solid("z4_pk_clt0", (3.4, 0.12, 0.12), (-30.5, 1.65, -24), "sign_b", bev=0.01))
+    P.append(solid("z4_pk_clt1", (3.4, 0.12, 0.12), (-30.5, 1.65, -21), "sign_b", bev=0.01))
+    # 长椅 x2 + 贩卖机 + 樱
+    for k, (bx, bz) in enumerate([(-50, -10), (0, 8)]):
+        P.append(solid("z4_pk_bench%d" % k, (1.8, 0.45, 0.5), (bx, 0.25, bz), "wood_d", bev=0.02))
+    P += vending_machine("z4_pk_vend", -52, 8, rot=90.0, kind="soda_red")
+    for k, (sx, sz) in enumerate([(-52, -50), (-8, 10), (40, -50), (38, 10)]):
+        P += tree_cherry("z4_pk_sak%d" % k, sx, sz, h=4.0, r=1.9)
+    # 小祠 + 小鸟居(公园东北角)
+    P += torii("z4_pk_torii", 36, 6, h=3.4, span=2.6, rot90=False)
+    P += wall_x("z4_pk_shrine", 32, 40, 12, 0.22, 0, 2.4, "wood_b",
+                doors=[(36, 1.1, 2.0)])
+    P += gable_roof("z4_pk_shrine_r", 31, 41, 11, 13, 2.6, 3.6, "roof_tile", overhang=0.4)
+
+    # ---------------- 停车场 + 街道设施 ----------------
+    P.append(slab("z4_park", 65, 125, -110, -65, y=0.05, t=0.04, mat="asphalt"))
+    for i in range(5):
+        P.append(slab("z4_park_l%d" % i, 70 + i * 10, 70.8 + i * 10, -106, -70,
+                      y=0.07, t=0.02, mat="paint_w"))
+    for i, (cx, cz, rr) in enumerate([(75, -85, 0.0), (95, -85, 0.1), (115, -85, 0.0)]):
+        P += _car("z4_park%d" % i, cx, cz, rr, body="metal" if i != 1 else "sign_b")
+    P += vending_machine("z4_vend0", -52, 28, rot=90.0, kind="soda_blue")
+    P += vending_machine("z4_vend1", 52, -50, rot=90.0, kind="soda_red")
+    P += wreck_car("z4_wreck0", -30, 110, 0.3)
+    P += jersey_barrier("z4_jb0", -20, -66, 2.0, 0.1)
+    # 垃圾收集点 x2(围栏+桶)
+    for gi, (gx, gz) in enumerate([(-68, 40), (58, -40)]):
+        P.append(solid("z4_trash%d_f" % gi, (3.0, 1.0, 0.1), (gx, 0.5, gz + 1.2), "metal", bev=0.01))
+        P.append(solid("z4_trash%d_s" % gi, (0.1, 1.0, 2.4), (gx - 1.5, 0.5, gz), "metal", bev=0.01))
+        c0 = add_cyl("z4_trash%d_b0" % gi, 0.4, 0.9, (gx - 0.7, 0.45, gz), axis="y", seg=8)
+        c1 = add_cyl("z4_trash%d_b1" % gi, 0.4, 0.9, (gx + 0.7, 0.45, gz), axis="y", seg=8)
+        zmat(c0, "sign_g")
+        zmat(c1, "metal_d")
+        P.append(c0)
+        P.append(c1)
+    for k, (sx, sz) in enumerate([(-90, 60), (90, 0), (-20, 110), (110, 40), (-110, -40)]):
+        P += tree_cherry("z4_sak%d" % k, sx, sz, h=4.2, r=2.0)
+    P += street_lamp("z4_lamp0", -58, 0, 5.0, rot_z=1.57)
+    P += street_lamp("z4_lamp1", 52, 60, 5.0, rot_z=-1.57)
+    # 旗 D 掩体(公园步道两侧)
+    for k, (fx, fz) in enumerate([(-26, -38), (-14, -22)]):
+        P.append(solid("z4_fd_fl%d" % k, (2.0, 0.55, 2.0), (fx, 0.28, fz), "stone", bev=0.03))
+        P.append(deco("z4_fd_flp%d" % k, (1.5, 0.3, 1.5), (fx, 0.7, fz), "leaf"))
+
+    # ---------------- 导出 + 渲染 ----------------
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    zone_export("akitsu_z4", P, MODEL_DIR + "/zone_4.glb")
+    if render:
+        zone_render("z4", (0, 0, 0), 165, SHOT_DIR + "/zone4",
+                    extra_shots=[("park", (-46, 4.5, -48), (0, 0.5, -32))])
+
+
+# ============================================================ Z5 西念寺
+# 局部原点 = 区中心, 全局 (-270, +340): lx = gx+270, lz = gz-340。
+# 旧街道 lx[+26,+34](8m 步行); 山门 lz=-100 lx=+10; 本堂 lx[-30,+50] lz[+20,+70](2 门);
+# 五重塔 (75,45) 24m 地标; 库里 lx[-90,-40]; 墓地 lx[+95,+170] lz[-90,+10]; 旗 H = 局部 (+10,-10)。
+
+def _pagoda(name, x, z):
+    """五重塔 24m(台基+5 层收分+出檐+塔刹)。地标, 不可进。"""
+    P = []
+    P.append(solid(name + "_base", (14, 1.2, 14), (x, 0.6, z), "stone", bev=0.02))
+    J.walk(name + "_base", (14, 0.08, 14), (x, 1.16, z))
+    P += stairs_x(name + "_st", x + 7, x + 10, z, 3.0, 0.0, 1.2, "stone", up_dir="+x")
+    w = 10.0
+    y = 1.2
+    for li in range(5):
+        hh = 3.6 if li == 0 else 2.9
+        P.append(solid("%s_b%d" % (name, li), (w, hh, w), (x, y + hh / 2.0, z), "vermilion", bev=0.02))
+        # 出檐(屋檐板, 收分)
+        ew = w + 3.6 - li * 0.5
+        P.append(slab("%s_e%d" % (name, li), x - ew / 2.0, x + ew / 2.0,
+                      z - ew / 2.0, z + ew / 2.0, y=y + hh, t=0.35, mat="roof_tile"))
+        # 层栏杆
+        if li < 4:
+            P.append(solid("%s_r%d" % (name, li), (w - 0.6, 0.7, 0.12), (x, y + hh + 0.5, z - w / 2.0 + 0.3),
+                           "wood_d", bev=0.01))
+            P.append(solid("%s_rr%d" % (name, li), (w - 0.6, 0.7, 0.12), (x, y + hh + 0.5, z + w / 2.0 - 0.3),
+                           "wood_d", bev=0.01))
+        y += hh
+        w -= 1.0
+    # 塔刹(相轮)
+    P.append(add_cyl(name + "_sc_pole", 0.22, 5.0, (x, y + 2.5, z), axis="y", seg=8))
+    zmat(P[-1], "metal_d")
+    for ri, rr in enumerate((1.1, 0.95, 0.8, 0.65, 0.5, 0.38)):
+        ring = add_torus(name + "_sc_r%d" % ri, rr, 0.07, (x, y + 1.0 + ri * 0.62, z))
+        zmat(ring, "gold")
+        P.append(ring)
+    return P
+
+
+def _grave(name, x, z):
+    """墓石(台座+碑+香立)。col 罩盒。"""
+    P = []
+    P.append(solid(name + "_b", (1.1, 0.35, 1.1), (x, 0.18, z), "stone_d", bev=0.02))
+    P.append(solid(name + "_t", (0.55, 1.15, 0.28), (x, 0.93, z), "stone", bev=0.04))
+    P.append(deco(name + "_i", (0.12, 0.3, 0.12), (x + 0.45, 0.5, z), "stone_d"))
+    J.col(name, (1.2, 1.5, 1.2), (x, 0.75, z))
+    return P
+
+
+def build_zone_5(render=True):
+    reset()
+    J._zone_cols.clear()
+    J._zone_walks.clear()
+    P = []
+
+    # ---------------- 地表 ----------------
+    P.append(slab("z5_ground", -190, 190, -120, 120, y=0.03, t=0.05, mat="asphalt_w"))  # 寺院土面
+    P.append(slab("z5_oldst", 26, 34, -120, 120, y=0.05, t=0.04, mat="stone_d"))         # 旧街道石板
+    P.append(slab("z5_sando", 6, 14, -95, 15, y=0.06, t=0.04, mat="stone"))              # 参道
+    for i, (xa, xb, za, zb) in enumerate([(-190, -140, -120, -20), (-190, -150, 30, 120),
+                                          (120, 190, -120, -40), (130, 190, 60, 120)]):
+        P.append(slab("z5_grass%d" % i, *_lawn(xa, xb, za, zb), y=0.045, t=0.05, mat="grass"))
+
+    # ---------------- 寺墙 + 山门 ----------------
+    P += wall_x("z5_wall_s", -30, 6, -100, 0.35, 0, 2.4, "plaster")                      # 南墙(西段)
+    P += wall_x("z5_wall_s2", 14, 90, -100, 0.35, 0, 2.4, "plaster")                     # 南墙(东段)
+    P += wall_z("z5_wall_w", -100, 90, -30, 0.35, 0, 2.4, "plaster", doors=[(-20, 2.0, 2.1)])
+    P += wall_z("z5_wall_e", -100, 90, 90, 0.35, 0, 2.4, "plaster",
+                doors=[(-60, 2.0, 2.1), (40, 2.0, 2.1)])
+    # 山门(两柱+冠木门)
+    for k, px in enumerate((8, 12)):
+        c = add_cyl("z5_gate_c%d" % k, 0.22, 3.6, (px, 1.8 + 0.3, -100), axis="y", seg=8)
+        zmat(c, "wood_d")
+        P.append(c)
+    P.append(solid("z5_gate_kasagi", (6.4, 0.3, 0.5), (10, 4.1, -100), "roof_tile", bev=0.03))
+    P.append(solid("z5_gate_nuki", (5.6, 0.22, 0.28), (10, 2.9, -100), "wood_d", bev=0.01))
+    P += stairs_x("z5_gate_st", 14, 17, -100, 5.0, 0.0, 0.3, "stone", up_dir="+x")
+    # 参道石灯笼 x6
+    for gi, gz in enumerate((-80, -60, -40, -20, 0, 12)):
+        P += stone_lantern("z5_lant%d" % gi, 4.5, gz, h=1.6)
+        P += stone_lantern("z5_lantb%d" % gi, 15.5, gz, h=1.6)
+
+    # ---------------- 本堂(2 门, 入母屋顶) ----------------
+    P.append(solid("z5_hd_base", (84, 0.7, 54), (10, 0.35, 45), "stone", bev=0.02))
+    J.walk("z5_hd_base", (84, 0.08, 54), (10, 0.66, 45))
+    P += stairs_x("z5_hd_st", 44, 50, 0, 6.0, 0.0, 0.7, "stone", up_dir="+x")
+    P += stairs_x("z5_hd_st2", -6, -3, 30, 2.5, 0.0, 0.7, "stone", up_dir="-x")
+    P += wall_x("z5_hd_s", -28, 48, 20, 0.3, 0.7, 6.2, "wood_b",
+                doors=[(10, 2.4, 2.6)], windows=[(-15, 1.8, 1.2, 2.8), (30, 1.8, 1.2, 2.8), (42, 1.8, 1.2, 2.8)])
+    P += wall_x("z5_hd_n", -28, 48, 70, 0.3, 0.7, 6.2, "wood_b",
+                windows=[(-15, 1.8, 1.2, 2.8), (0, 1.8, 1.2, 2.8), (30, 1.8, 1.2, 2.8)])
+    P += wall_z("z5_hd_w", 20, 70, -28, 0.3, 0.7, 6.2, "wood_b", windows=[(45, 1.8, 1.2, 2.8)])
+    P += wall_z("z5_hd_e", 20, 70, 48, 0.3, 0.7, 6.2, "wood_b",
+                doors=[(45, 1.7, 2.5)], windows=[(28, 1.8, 1.2, 2.8)])
+    P += gable_roof("z5_hd_roof", -31, 51, 17, 73, 6.6, 11.5, "roof_tile", overhang=1.2)
+    # 千木/脊饰
+    P.append(deco("z5_hd_ridge", (84, 0.3, 0.5), (10, 11.65, 45), "roof_tile"))
+    # 内部: 须弥坛+佛像+参拜席+内柱
+    P.append(solid("z5_hd_altar", (10, 1.3, 6), (10, 1.35, 62), "wood_d", bev=0.03))
+    b = add_box("z5_hd_buddha", (2.6, 3.2, 1.6), (10, 3.6, 64), bevel=0.2)
+    zmat(b, "gold")
+    P.append(b)
+    h = bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=1, radius=0.55, location=g2b((10, 5.9, 64)))
+    hb = bpy.context.active_object
+    hb.name = "z5_hd_head"
+    zmat(hb, "gold")
+    P.append(hb)
+    P.append(deco("z5_hd_halo", (3.6, 5.0, 0.12), (10, 4.6, 64.7), "gold"))
+    for k in range(6):                                   # 榻榻米参拜席
+        P.append(deco("z5_hd_tat%d" % k, (7.0, 0.12, 3.0), (10, 0.78, 30 + k * 3.1), "plaster"))
+    for gx in (-20, 0, 20, 40):
+        for gz in (28, 62):
+            c = add_cyl("z5_hd_col%d_%d" % (gx, gz), 0.34, 5.5, (gx, 0.7 + 2.75, gz), axis="y", seg=8)
+            zmat(c, "wood_d")
+            P.append(c)
+
+    # ---------------- 五重塔(地标 24m) ----------------
+    P += _pagoda("z5_tower", 75, 45)
+
+    # ---------------- 库里(僧房, 2 门) ----------------
+    P += wall_x("z5_kr_s", -90, -40, 25, 0.28, 0, 4.2, "plaster",
+                doors=[(-65, 1.5, 2.3)], windows=[(-80, 1.8, 1.0, 2.4), (-55, 1.8, 1.0, 2.4), (-46, 1.8, 1.0, 2.4)])
+    P += wall_x("z5_kr_n", -90, -40, 55, 0.28, 0, 4.2, "plaster",
+                doors=[(-50, 1.4, 2.3)], windows=[(-70, 1.8, 1.0, 2.4)])
+    P += wall_z("z5_kr_w", 25, 55, -90, 0.28, 0, 4.2, "plaster")
+    P += wall_z("z5_kr_e", 25, 55, -40, 0.28, 0, 4.2, "plaster", windows=[(40, 1.8, 1.0, 2.4)])
+    P += gable_roof("z5_kr_roof", -92, -38, 23, 57, 4.6, 7.0, "roof_tile", overhang=0.8)
+    for k in range(3):                                   # 室内桌榻
+        P.append(deco("z5_kr_tb%d" % k, (3.0, 0.6, 1.0), (-80 + k * 12, 0.3, 40), "wood_d"))
+
+    # ---------------- 墓地(石墙围+石碑 18) ----------------
+    P += wall_x("z5_cem_s", 95, 170, -90, 0.3, 0, 1.8, "stone_d", doors=[(110, 2.4, 1.7), (150, 2.4, 1.7)])
+    P += wall_x("z5_cem_n", 95, 170, 10, 0.3, 0, 1.8, "stone_d")
+    P += wall_z("z5_cem_w", -90, 10, 95, 0.3, 0, 1.8, "stone_d")
+    P += wall_z("z5_cem_e", -90, 10, 170, 0.3, 0, 1.8, "stone_d")
+    for gi in range(18):
+        gx = 105 + (gi % 6) * 11
+        gz = -75 + (gi // 6) * 32
+        P += _grave("z5_gr%d" % gi, gx, gz)
+    P += tree_cedar("z5_cem_c0", 100, 0, 8.0)
+    P += tree_cedar("z5_cem_c1", 165, -80, 8.0)
+
+    # ---------------- 钟楼 + 枯山水庭院 + 手水舍 ----------------
+    for k, (dx, dz2) in enumerate([(-1, -1), (1, -1), (-1, 1), (1, 1)]):
+        c = add_cyl("z5_bell_c%d" % k, 0.22, 3.4, (55 + dx * 1.6, 1.7 + 0.4, -55 + dz2 * 1.6),
+                    axis="y", seg=8)
+        zmat(c, "wood_d")
+        P.append(c)
+    P.append(slab("z5_bell_roof", 52, 58, -58, -52, y=4.2, t=0.2, mat="roof_tile"))
+    bell = add_cyl("z5_bell", 0.8, 1.3, (55, 2.4, -55), axis="y", seg=12, taper=0.75)
+    zmat(bell, "gold")
+    P.append(bell)
+    P.append(slab("z5_ka_sand", -100, -40, -70, -20, y=0.055, t=0.05, mat="plaster"))    # 白砂
+    for k, (sx, sz, sr) in enumerate([(-80, -45, 1.0), (-68, -35, 0.7), (-92, -30, 0.55)]):
+        s = bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=1, radius=sr, location=g2b((sx, sr * 0.5, sz)))
+        ob = bpy.context.active_object
+        ob.name = "z5_ka_rock%d" % k
+        ob.scale = gsz((1.4, 0.65, 1.0))
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        zmat(ob, "stone_d")
+        P.append(ob)
+        J.col("z5_ka_rock%d" % k, (sr * 2.6, sr, sr * 1.8), (sx, sr * 0.45, sz))
+    for k in range(5):                                   # 耙纹
+        P.append(deco("z5_ka_line%d" % k, (52, 0.02, 0.10), (-70, 0.085, -62 + k * 8), "stone_d"))
+    for k, (dx, dz2) in enumerate([(-1, -1), (1, -1), (-1, 1), (1, 1)]):
+        c = add_cyl("z5_temyz_c%d" % k, 0.13, 2.4, (-2 + dx * 1.2, 1.2, -60 + dz2 * 1.0), axis="y", seg=6)
+        zmat(c, "wood_b")
+        P.append(c)
+    P.append(slab("z5_temyz_roof", -4, 0, -62, -58, y=2.7, t=0.15, mat="roof_tile"))
+    P.append(solid("z5_temyz_basin", (1.2, 0.45, 0.9), (-2, 0.6, -60), "stone", bev=0.04))
+
+    # ---------------- 杉林 + 樱 + 街道设施 ----------------
+    for k in range(10):
+        P += tree_cedar("z5_cedar%d" % k, -150 + k * 33, 100 + (k % 2) * 12, h=8.5)
+    for k in range(5):
+        P += tree_cedar("z5_cedar_e%d" % k, 120 + k * 14, 60 + (k % 2) * 20, h=8.0)
+    for k, (sx, sz) in enumerate([(2, -70), (18, -75), (2, 80), (18, 85), (-20, -80), (40, -75)]):
+        P += tree_cherry("z5_sak%d" % k, sx, sz, h=4.2, r=2.1)
+    P += vending_machine("z5_vend0", 20, -88, rot=0.0, kind="soda_blue")
+    P += wreck_car("z5_wreck0", 30, -60, 0.3)
+    P += jersey_barrier("z5_jb0", 30, -30, 2.0, 1.57)
+    P += sandbag_wall("z5_sb0", 30, 60, 3.0, 1.57)
+    # 弹痕(本堂南墙)
+    for i, (hx, hy) in enumerate([(-5, 1.8), (20, 2.4), (38, 2.0)]):
+        P.append(deco("z5_hd_hole%d" % i, (0.4, 0.32, 0.08), (hx, hy, 19.8), "dark", bev=0.0))
+
+    # ---------------- 导出 + 渲染 ----------------
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    zone_export("akitsu_z5", P, MODEL_DIR + "/zone_5.glb")
+    if render:
+        zone_render("z5", (0, 0, 0), 170, SHOT_DIR + "/zone5",
+                    extra_shots=[("hondo", (10, 1.7, 8), (10, 3.0, 50))])
+
+
+# ============================================================ Z7 汐见海滨
+# 局部原点 = 区中心, 全局 (-80, -360): lx = gx+80, lz = gz+360。
+# 浜通り lz[+93,+107]; 旧街道 lx[-164,-156]; 沙滩 lz[-100,-60]; 海面 lz[-120,-100] y-0.5;
+# 防波堤 lz[-88,-80] 顶 y0.7(台阶 x2, 消波块群); 灯塔 (110,-40); 喷泉广场旗 G = 局部 (+20,0)。
+
+def build_zone_7(render=True):
+    reset()
+    J._zone_cols.clear()
+    J._zone_walks.clear()
+    P = []
+
+    # ---------------- 地表 ----------------
+    P.append(slab("z7_ground", -180, 180, -60, 120, y=0.03, t=0.05, mat="sand"))
+    P.append(slab("z7_beach", -180, 180, -100, -60, y=0.02, t=0.06, mat="sand"))
+    P.append(slab("z7_sea", -180, 180, -120, -100, y=-0.5, t=0.1, mat="water"))
+    P.append(slab("z7_hama", -180, 180, 93, 107, y=0.05, t=0.04, mat="asphalt"))         # 浜通り段
+    P.append(slab("z7_hama_cl", -180, 180, 99.7, 100.3, y=0.07, t=0.02, mat="paint_w"))
+    P.append(slab("z7_oldst", -164, -156, -60, 93, y=0.05, t=0.04, mat="stone_d"))       # 旧街道接驳
+    P.append(slab("z7_plaza", -30, 70, -35, 35, y=0.06, t=0.04, mat="stone"))            # 喷泉广场
+    P.append(slab("z7_path_v", 16, 24, -60, 90, y=0.065, t=0.03, mat="stone"))           # 园路(竖)
+    P.append(slab("z7_path_h", -120, 160, -4, 4, y=0.065, t=0.03, mat="stone"))          # 园路(横)
+    for i, (xa, xb, za, zb) in enumerate([(-180, -140, 40, 90), (100, 180, 50, 90),
+                                          (-180, -140, -60, -40)]):
+        P.append(slab("z7_grass%d" % i, *_lawn(xa, xb, za, zb), y=0.045, t=0.05, mat="grass"))
+
+    # ---------------- 防波堤(离岸, 顶 y0.7 walk, 台阶 x2) ----------------
+    P.append(solid("z7_levee", (180, 0.7, 8), (-30, 0.35, -84), "concrete_d", bev=0.01))
+    J.walk("z7_levee", (180, 0.08, 8), (-30, 0.66, -84))
+    P.append(solid("z7_levee_rail_s", (180, 1.0, 0.12), (-30, 1.2, -88.2), "metal", bev=0.01))
+    P += stairs_x("z7_levee_st0", -126, -119, -84, 4.0, 0.0, 0.7, "concrete", up_dir="+x")
+    P += stairs_x("z7_levee_st1", 53, 60, -84, 4.0, 0.0, 0.7, "concrete", up_dir="-x")
+    # 消波块 x8(堤外侧水中)
+    for ti, tx in enumerate((-110, -80, -50, -20, 10, 40, 55, -140)):
+        b = add_box("z7_tetra%d" % ti, (1.6, 1.6, 1.6), (tx, -0.1, -95 + (ti % 3) * 3), bevel=0.0)
+        b.rotation_euler = rot_g2b((0.6, 0.5 * (1 if ti % 2 else -1), 0.35))
+        zmat(b, "concrete_d")
+        P.append(b)
+    # 堤上长椅 x3(钓鱼/机枪位)
+    for bi, bx in enumerate((-90, -30, 30)):
+        P.append(solid("z7_lv_bench%d" % bi, (1.8, 0.45, 0.5), (bx, 0.95, -82), "wood_d", bev=0.02))
+        P.append(solid("z7_lv_benchb%d" % bi, (1.8, 0.5, 0.12), (bx, 1.35, -81.8), "wood_d", bev=0.02))
+
+    # ---------------- 灯塔(地标) ----------------
+    c = add_cyl("z7_lh_body", 3.5, 14, (110, 7, -40), axis="y", seg=14)
+    zmat(c, "plaster")
+    P.append(c)
+    J.col("z7_lh", (7.5, 14, 7.5), (110, 7, -40))
+    for bi, by in enumerate((3.5, 8.5)):                  # 红白条带
+        ring = add_cyl("z7_lh_band%d" % bi, 3.52, 1.4, (110, by, -40), axis="y", seg=14)
+        zmat(ring, "sign_r")
+        P.append(ring)
+    P.append(add_cyl("z7_lh_gal", 4.2, 0.4, (110, 14.2, -40), axis="y", seg=14))
+    zmat(P[-1], "metal")
+    lg = add_cyl("z7_lh_lamp", 2.2, 2.2, (110, 15.5, -40), axis="y", seg=12)
+    zmat(lg, "lamp")
+    P.append(lg)
+    cap = add_cyl("z7_lh_cap", 2.8, 0.5, (110, 16.9, -40), axis="y", seg=12, taper=0.2)
+    zmat(cap, "metal_d")
+    P.append(cap)
+    P.append(slab("z7_lh_base", 104, 116, -46, -34, y=0.3, t=0.3, mat="concrete"))
+    # 塔门(西向)+ 内部旋梯简化为 3 层平台(不开放, col)
+    P.append(solid("z7_lh_door", (0.2, 2.4, 1.5), (106.6, 1.5, -40), "wood_d", bev=0.02))
+
+    # ---------------- 喷泉广场(旗 G = (+20,0)) ----------------
+    ring = add_cyl("z7_fq_edge", 5.5, 0.65, (-20, 0.33, 0), axis="y", seg=18)
+    zmat(ring, "stone")
+    P.append(ring)
+    wat = add_cyl("z7_fq_water", 4.9, 0.55, (-20, 0.28, 0), axis="y", seg=18)
+    zmat(wat, "water")
+    P.append(wat)
+    core = add_cyl("z7_fq_core", 0.6, 1.8, (-20, 1.2, 0), axis="y", seg=10)
+    zmat(core, "stone")
+    P.append(core)
+    J.col("z7_fq", (11.5, 1.3, 11.5), (-20, 0.65, 0))
+    # 旗 G 掩体: 花坛 x4 + 长椅 x4 + 贩卖机 x2
+    for k, (fx, fz) in enumerate([(2, -12), (38, -12), (2, 12), (38, 12)]):
+        P.append(solid("z7_fg_fl%d" % k, (2.4, 0.65, 2.4), (fx, 0.33, fz), "stone", bev=0.03))
+        P.append(deco("z7_fg_flp%d" % k, (1.8, 0.35, 1.8), (fx, 0.82, fz), "leaf"))
+    for k, (bx, bz) in enumerate([(-6, -8), (44, -8), (-6, 8), (44, 8)]):
+        P.append(solid("z7_fg_bench%d" % k, (1.8, 0.45, 0.5), (bx, 0.25, bz), "wood_d", bev=0.02))
+    P += vending_machine("z7_fg_v0", 20, -16, rot=180.0, kind="soda_red")
+    P += vending_machine("z7_fg_v1", 20, 16, rot=0.0, kind="soda_blue")
+    P += wreck_car("z7_fg_wreck", -12, 28, 0.4)
+
+    # ---------------- 凉亭 x2 + 游客中心(2 门) ----------------
+    for pi, (px, pz) in enumerate([(-70, 40), (-90, -20)]):
+        for k, (dx, dz2) in enumerate([(-1, -1), (1, -1), (-1, 1), (1, 1)]):
+            c = add_cyl("z7_gaz%d_c%d" % (pi, k), 0.16, 2.8, (px + dx * 1.6, 1.4, pz + dz2 * 1.6),
+                        axis="y", seg=8)
+            zmat(c, "wood_b")
+            P.append(c)
+        P.append(slab("z7_gaz%d_roof" % pi, px - 2.4, px + 2.4, pz - 2.4, pz + 2.4,
+                      y=3.0, t=0.18, mat="roof_tile"))
+        P.append(solid("z7_gaz%d_tb" % pi, (2.0, 0.7, 0.8), (px, 0.35, pz), "wood_d", bev=0.02))
+    # 游客中心(glass 幕墙小屋, 南门+西门)
+    P += wall_x("z7_vc_s", 85, 135, 15, 0.25, 0, 4.0, "concrete",
+                doors=[(105, 2.2, 2.6)], windows=[(95, 4.0, 0.9, 2.8), (120, 4.0, 0.9, 2.8)])
+    P += wall_x("z7_vc_n", 85, 135, 45, 0.25, 0, 4.0, "concrete",
+                windows=[(95, 4.0, 0.9, 2.8), (110, 4.0, 0.9, 2.8), (125, 4.0, 0.9, 2.8)])
+    P += wall_z("z7_vc_w", 15, 45, 85, 0.25, 0, 4.0, "concrete",
+                doors=[(30, 1.5, 2.5)])
+    P += wall_z("z7_vc_e", 15, 45, 135, 0.25, 0, 4.0, "concrete",
+                windows=[(30, 4.0, 0.9, 2.8)])
+    P += flat_roof("z7_vc_roof", 84.7, 135.3, 14.7, 45.3, 4.2, "concrete", walkable=False, parapet_h=0.5)
+    P.append(solid("z7_vc_glass", (49.6, 2.0, 0.12), (110, 1.9, 15.15), "glass", bev=0.0))
+    for k in range(3):                                   # 室内长台
+        P.append(deco("z7_vc_tb%d" % k, (4.0, 0.9, 1.0), (95 + k * 12, 0.45, 30), "wood_d"))
+
+    # ---------------- 黑松 + 樱 + 街道设施 + 战痕 ----------------
+    for k, (sx, sz) in enumerate([(-150, 70), (-120, 30), (-60, 60), (-30, 70), (60, 60),
+                                  (90, 20), (140, 70), (150, 0), (-100, -30), (40, -45)]):
+        P += tree_pine("z7_pine%d" % k, sx, sz, h=5.5)
+    for k, (sx, sz) in enumerate([(-40, 20), (0, 40), (80, -10), (120, 40)]):
+        P += tree_cherry("z7_sak%d" % k, sx, sz, h=4.2, r=2.0)
+    P += street_lamp("z7_lamp0", 18, -40, 5.0, rot_z=0.0)
+    P += street_lamp("z7_lamp1", 18, 40, 5.0, rot_z=3.14)
+    P += street_lamp("z7_lamp2", -60, 0, 5.0, rot_z=1.57)
+    P += utility_pole("z7_pole0", -160, 90, 8.5)
+    P += utility_pole("z7_pole1", 60, 90, 8.5, trafo=True)
+    P += wire_x("z7_wire0", -160, 60, 90, 7.2)
+    P += wreck_car("z7_wreck0", -110, -70, 0.3)
+    P += jersey_barrier("z7_jb0", 30, 40, 2.0, 0.2)
+    P += jersey_barrier("z7_jb1", 34, 38, 2.0, -1.2)
+    P += sandbag_wall("z7_sb0", -30, -80, 3.0, 0.0)
+    P += sandbag_wall("z7_sb1", 20, -82, 3.0, 3.14)
+    # 弹痕(游客中心)
+    for i, (hx, hy) in enumerate([(95, 2.0), (120, 2.6), (128, 1.6)]):
+        P.append(deco("z7_vc_hole%d" % i, (0.4, 0.3, 0.08), (hx, hy, 14.8), "dark", bev=0.0))
+    # 焦痕(广场)
+    P.append(deco("z7_scorch0", (1.4, 0.02, 1.0), (28, 0.11, -22), "stone_d", bev=0.0))
+    P.append(deco("z7_scorch1", (0.9, 0.02, 0.7), (29.2, 0.115, -21), "stone_d", bev=0.0))
+
+    # ---------------- 导出 + 渲染 ----------------
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    zone_export("akitsu_z7", P, MODEL_DIR + "/zone_7.glb")
+    if render:
+        zone_render("z7", (0, 0, 0), 165, SHOT_DIR + "/zone7",
+                    extra_shots=[("beach", (60, 1.8, -45), (-60, 1.0, -84))])
+
+
+# ============================================================ Z9 道网+填充(全图缝合)
+# 局部原点 = 地图中心 (0,0), 即局部坐标 = 绝对坐标。
+# 只建各分区未覆盖的路网缺口 + 跨线桥 + 红绿灯 + 填充楼, 避免与 Z1-Z8 已建段重叠。
+# 已建段: 国道[-340,60]Z2/[100,300]Z8/[300,470]Z6; 県道[-260,20]Z2; 站前大道[20,320]Z3;
+#         海岸大道[-360,40]Z6; 浜通り[-260,80]Z7/[180,470]Z6; 旧街道[-260,-11]Z2/[16,104]Z1;
+#         铁路[-100,200]Z3; 高架[-360,40]Z6。
+
+def _tlight(name, x, z, rot=0.0):
+    """红绿灯(杆+横臂+三色灯箱)。"""
+    P = []
+    r = math.radians(rot)
+    pole = add_cyl(name + "_pole", 0.09, 5.0, (x, 2.5, z), axis="y", seg=8)
+    zmat(pole, "metal_d")
+    P.append(pole)
+    ax = math.cos(r)
+    az = -math.sin(r)
+    P.append(solid(name + "_arm", (abs(ax) * 2.6 + 0.12, 0.08, abs(az) * 2.6 + 0.12),
+                   (x + ax * 1.3, 4.9, z + az * 1.3), "metal_d", bev=0.01))
+    box = add_box(name + "_box", (0.34, 0.95, 0.3), (x + ax * 2.5, 4.55, z + az * 2.5), bevel=0.02)
+    zmat(box, "metal_d")
+    P.append(box)
+    for k, (lm, ly) in enumerate((("sign_r", 0.30), ("paint_y", 0.0), ("sign_g", -0.30))):
+        lamp = add_box("%s_l%d" % (name, k), (0.20, 0.20, 0.06),
+                       (x + ax * 2.5, 4.55 + ly, z + az * 2.5), bevel=0.0)
+        zmat(lamp, lm)
+        P.append(lamp)
+    J.col(name, (0.24, 5.0, 0.24), (x, 2.5, z))
+    return P
+
+
+def _fillbld(name, x, z, w, d, h, enter=False, mat="concrete", roof="flat",
+             wall_t=0.35, roof_mat="roof_tile", door_w=2.6):
+    """沿街填充楼。enter=True 南侧开门(1F 可进);mat 墙体材质;roof=flat|gable。
+    填空批次用:按区位切换 町屋(wood_b+瓦坡顶)/ 一户建(plaster+坡顶)/ 商铺 / 办公楼。"""
+    P = []
+    x0, x1, z0, z1 = x - w / 2.0, x + w / 2.0, z - d / 2.0, z + d / 2.0
+    dh = door_w
+    win_y = min(3.0, max(1.4, h * 0.55))
+    win_h = min(1.0, max(0.7, h * 0.5))
+    P += wall_x(name + "_s", x0, x1, z0, wall_t, 0, h, mat,
+                doors=[(x, dh, min(2.4, h - 0.4))] if enter else [],
+                windows=[(x0 + w * 0.25, win_y, 1.0, win_h), (x0 + w * 0.75, win_y, 1.0, win_h)])
+    P += wall_x(name + "_n", x0, x1, z1, wall_t, 0, h, mat,
+                windows=[(x0 + w * 0.25, win_y, 1.0, win_h), (x0 + w * 0.75, win_y, 1.0, win_h)])
+    P += wall_z(name + "_w", z0, z1, x0, wall_t, 0, h, mat,
+                windows=[(z, win_y, 1.0, win_h)] if d > 7.0 else [])
+    P += wall_z(name + "_e", z0, z1, x1, wall_t, 0, h, mat,
+                windows=[(z, win_y, 1.0, win_h)] if d > 7.0 else [])
+    if roof == "gable":
+        P += gable_roof(name + "_roof", x0 - 0.4, x1 + 0.4, z0 - 0.4, z1 + 0.4, h - 0.2, h + 1.5,
+                        roof_mat, overhang=0.45)
+    else:
+        P += flat_roof(name + "_roof", x0 - 0.3, x1 + 0.3, z0 - 0.3, z1 + 0.3, h + 0.2,
+                       mat, walkable=False, parapet_h=0.9)
+        for y in range(4, int(h) - 1, 4):                # 层间腰线
+            P.append(deco("%s_belt%d" % (name, y), (w + 0.2, 0.3, d + 0.2), (x, y, z),
+                          "concrete_d", bev=0.0))
+        # 屋顶杂物(水箱/风管)+ 女墙已由 flat_roof 生成
+        if h >= 10.0:
+            P.append(solid(name + "_hvac", (1.4, 1.2, 1.2), (x0 + w * 0.3, h + 0.8, z0 + d * 0.3),
+                           "metal_d", bev=0.03))
+            P.append(solid(name + "_tank", (1.0, 1.6, 1.0), (x1 - w * 0.28, h + 1.0, z1 - d * 0.3),
+                           "metal", bev=0.04))
+    if enter:
+        P.append(deco(name + "_ctr", (w * 0.4, 1.0, 0.8), (x, 0.5, z0 + 1.6), "wood_d"))
+    return P
+
+
+# ---------------- 城市填空批:把空旷街区补上建筑(数据驱动选点:避让路网/旗点/保留区) ----------------
+FILL_SPOTS = [
+    (-28.0, 436.0), (36.0, 436.0), (212.0, 420.0), (-28.0, 372.0), (36.0, 372.0),
+    (100.0, 356.0), (164.0, 356.0), (-28.0, 308.0), (36.0, 308.0), (100.0, 292.0),
+    (164.0, 292.0), (-28.0, 244.0), (36.0, 244.0), (212.0, 244.0), (-220.0, 212.0),
+    (-156.0, 212.0), (-92.0, 212.0), (-220.0, 148.0), (-156.0, 148.0), (-92.0, 148.0),
+    (180.0, 148.0), (20.0, 100.0), (132.0, 100.0), (228.0, 100.0), (-124.0, 84.0),
+    (180.0, 52.0), (-204.0, 20.0), (-108.0, 20.0), (-204.0, -76.0), (-92.0, -76.0),
+    (100.0, -76.0), (164.0, -76.0), (-28.0, -124.0), (36.0, -124.0), (-188.0, -140.0),
+    (100.0, -140.0), (164.0, -140.0), (-28.0, -188.0), (36.0, -188.0), (-204.0, -204.0),
+    (100.0, -204.0), (164.0, -204.0),
+    # ---- 第二轮补:分区地面未覆盖的缺口区(960² 内 21.4% 空区) ----
+    (231.0, 60.5), (220.5, 121.0), (279.5, 62.0), (269.0, 109.0), (328.0, 63.5),
+    (331.0, 110.5), (376.5, 65.0), (379.5, 112.0),
+    (-409.0, -349.5), (-419.5, -289.0), (-363.5, -395.0), (-360.5, -348.0),
+    (-371.0, -301.0), (-422.5, -232.0), (-415.0, -195.5), (-421.0, -145.5),
+    (-413.5, -109.0), (-375.5, -235.0), (-368.0, -198.5), (-374.0, -148.5),
+    (-380.0, -112.0),
+    (-5.0, 346.5), (-2.0, 393.5), (43.5, 348.0), (46.5, 395.0),
+    (116.0, -404.0), (163.0, -393.5), (210.0, -396.5), (257.0, -399.5),
+    (304.0, -402.5), (337.5, -392.0), (384.5, -395.0),
+    (123.5, -332.0), (126.5, -285.0),
+    (-112.0, 37.5), (-118.0, 87.5), (-124.0, 124.0),
+]
+
+
+def _fill_batch():
+    """按区位风格铺填空建筑。**每栋即时 join 成单件** —— 否则几千个物体最终进一次大 join,
+    Blender 的 object.join 是超线性的,Z9 会卡十几分钟。每 7 个点位改做小停车场。"""
+    rng = __import__("random").Random(20260910)
+    P = []
+    J.BEVEL_SCALE = 0.0            # 填充楼关倒角:通用盒子, 航拍看不到 2cm 倒角, 省一半面数
+    for i, (x, z) in enumerate(FILL_SPOTS):
+        q = []
+        if i % 7 == 6:
+            # 小停车场(划线 + 2 台车 + 路灯)
+            q.append(slab("z9_fp%d" % i, x - 11, x + 11, z - 9, z + 9, y=0.06, t=0.05, mat="asphalt_w"))
+            for k in range(4):
+                q.append(slab("z9_fpl%d_%d" % (i, k), x - 8 + k * 4, x - 7.6 + k * 4, z - 7, z + 7,
+                              y=0.075, t=0.02, mat="paint_w"))
+            q += _car("z9_fpc%d0" % i, x - 6, z - 4, 0.0, body="sign_b")
+            q += _car("z9_fpc%d1" % i, x + 6, z + 4, 0.0, body="metal")
+            q += street_lamp("z9_fplamp%d" % i, x - 12.5, z, 5.2, rot_z=1.57)
+        else:
+            # 风格按区位判定
+            if z < -340 or (x < -340 and z < -240):       # 临海带/西南工业角 -> 仓库厂房
+                w_, d_, h_ = rng.uniform(16, 26), rng.uniform(12, 20), rng.uniform(6.5, 10.0)
+                mat_, roof_ = ("concrete_d" if i % 2 else "metal_d"), "flat"
+            elif x < -80 and z < 240:                     # 神社东侧/商店街西 -> 町屋
+                w_, d_, h_ = rng.uniform(10, 13), rng.uniform(8, 11), rng.uniform(4.0, 5.2)
+                mat_, roof_ = "wood_b", "gable"
+            elif x > 95 and z > 215:                      # 住宅区 -> 一户建
+                w_, d_, h_ = rng.uniform(8.5, 11.5), rng.uniform(8.5, 11.5), rng.uniform(5.2, 6.6)
+                mat_, roof_ = ("plaster" if i % 2 else "wood_b"), "gable"
+            elif abs(x) <= 95:                             # 中央商业带 -> 商铺
+                w_, d_, h_ = rng.uniform(12, 18), rng.uniform(10, 15), rng.uniform(8.0, 13.0)
+                mat_, roof_ = ("plaster" if i % 2 else "brick"), "flat"
+            else:                                          # 其余 -> 办公楼
+                w_, d_, h_ = rng.uniform(15, 22), rng.uniform(13, 19), rng.uniform(13.0, 27.0)
+                mat_, roof_ = ("concrete" if i % 2 else "concrete_d"), "flat"
+            q += _fillbld("z9_fb%d" % (i + 10), x, z, w_, d_, h_, enter=(i % 3 == 0),
+                          mat=mat_, roof=roof_)
+            if i % 4 == 1:
+                q += vending_machine("z9_fbv%d" % i, x + w_ * 0.5 + 1.2, z - d_ * 0.3,
+                                     rot=1.5708, kind=("soda_red" if i % 2 else "soda_blue"))
+            if i % 5 == 2:
+                q += sign_board("z9_fbs%d" % i, x - w_ * 0.5 - 0.9, z + d_ * 0.35, 3.0, 0.3, 1.6,
+                                rot=1.5708, kind=("sign_r" if i % 2 else "sign_o"))
+        m = join_parts("z9_fill%02d" % i, [o for o in q if o is not None])
+        if m is not None:
+            P.append(m)
+    J.BEVEL_SCALE = 1.0
+    return P
+
+
+
+def build_zone_9(render=True):
+    reset()
+    J._zone_cols.clear()
+    J._zone_walks.clear()
+    P = []
+
+    # ---------------- 路网缺口铺装 ----------------
+    P.append(slab("z9_kokudo_w", -480, -340, -51, -29, y=0.05, t=0.04, mat="asphalt"))   # 国道西段
+    P.append(slab("z9_kokudo_gap", 60, 100, -51, -29, y=0.05, t=0.04, mat="asphalt"))    # 国道缝(Z2-Z8)
+    P.append(slab("z9_kokudo_cl0", -480, -340, 19.7, 20.3, y=0.07, t=0.02, mat="paint_y"))
+    P.append(slab("z9_kendo_s", -69, -51, -480, -260, y=0.05, t=0.04, mat="asphalt"))    # 県道南段
+    P.append(slab("z9_kendo_n", -69, -51, 20, 480, y=0.05, t=0.04, mat="asphalt"))       # 県道北段
+    P.append(slab("z9_kendo_cl", -60.3, -59.7, 20, 150, y=0.07, t=0.02, mat="paint_w"))
+    P.append(slab("z9_kendo_cl2", -60.3, -59.7, 190, 480, y=0.07, t=0.02, mat="paint_w"))
+    P.append(slab("z9_ekimae0", 73, 87, -480, -51, y=0.05, t=0.04, mat="asphalt"))       # 站前大道南段(避让国道)
+    P.append(slab("z9_ekimae1", 73, 87, -29, 20, y=0.05, t=0.04, mat="asphalt"))
+    P.append(slab("z9_kaigan_s", 412, 428, -480, -360, y=0.05, t=0.04, mat="asphalt"))   # 海岸大道南段
+    P.append(slab("z9_kaigan_n", 412, 428, 40, 480, y=0.05, t=0.04, mat="asphalt"))      # 海岸大道北段
+    P.append(slab("z9_hama_w", -480, -260, -267, -253, y=0.05, t=0.04, mat="asphalt"))   # 浜通り西段
+    P.append(slab("z9_hama_gap", 80, 180, -267, -253, y=0.05, t=0.04, mat="asphalt"))    # 浜通り缝(Z7-Z6)
+    P.append(slab("z9_kyudo", -244, -236, -11, 16, y=0.055, t=0.04, mat="stone_d"))      # 旧街道缝
+    P.append(slab("z9_kyudo_n", -244, -236, 104, 480, y=0.055, t=0.04, mat="stone_d"))   # 旧街道北段
+    # 斑马线(国道 x 站前大道口)
+    for i in range(6):
+        P.append(slab("z9_zeb0_%d" % i, 71 + i * 2.4, 73.4 + i * 2.4, -34, -30,
+                      y=0.075, t=0.02, mat="paint_w"))
+        P.append(slab("z9_zeb1_%d" % i, 86.6 - i * 2.4, 89 - i * 2.4, -50, -46,
+                      y=0.075, t=0.02, mat="paint_w"))
+
+    # ---------------- 県道跨线桥(y4.5 跨铁路 z170, 步兵+轻型载具) ----------------
+    P += floor_slab("z9_ovp", -69, -51, 158, 182, 4.5, 0.5, "concrete")
+    P.append(solid("z9_ovp_rail0", (0.15, 1.1, 24), (-68.9, 5.05, 170), "metal", bev=0.01))
+    P.append(solid("z9_ovp_rail1", (0.15, 1.1, 24), (-51.1, 5.05, 170), "metal", bev=0.01))
+    for cz in (164, 176):
+        c = add_cyl("z9_ovp_col%d" % cz, 1.0, 4.25, (-60, 2.125, cz), axis="y", seg=10)
+        zmat(c, "concrete")
+        P.append(c)
+    P += stairs_z("z9_ovp_ramp_n", 128, 158, -60, 10.0, 0.0, 4.5, "concrete", up_dir="+z")
+    P += stairs_z("z9_ovp_ramp_s", 182, 212, -60, 10.0, 0.0, 4.5, "concrete", up_dir="-z")
+    # ---------------- 铁路延伸(道砟+轨条) ----------------
+    # 2026-09-10 修: 旧版轨道一路铺到 x=±480(护岸外) = "新干线直接通向海里"。
+    # 现在两端在地图内收口 —— 西端没入岬の隧道, 东端止于秋津货物駅的车止木。
+    P.append(slab("z9_rail_bed_w", -447, -100, 165, 175, y=0.15, t=0.3, mat="stone_d"))
+    P.append(slab("z9_rail_bed_e", 200, 468, 165, 175, y=0.15, t=0.3, mat="stone_d"))
+    for lz in (-2.53, -1.47, 1.47, 2.53):
+        P.append(solid("z9_railw%d" % int(lz * 10), (347, 0.12, 0.14), (-273.5, 0.34, 170 + lz), "metal", bev=0.0))
+        P.append(solid("z9_raile%d" % int(lz * 10), (268, 0.12, 0.14), (334, 0.34, 170 + lz), "metal", bev=0.0))
+    # 西口:秋津隧道(岬の丘 + 洞口)。铁路在护岸内没入山体 —— 日本海岸线的经典处理
+    P.append(solid("z9_tun_w_hill_n", (46, 14, 26), (-469, 7.0, 145), "stone_d", bev=0.5))
+    P.append(solid("z9_tun_w_hill_s", (46, 14, 26), (-469, 7.0, 195), "stone_d", bev=0.5))
+    P.append(solid("z9_tun_w_hill_t", (46, 6, 26), (-469, 11.0, 170), "stone_d", bev=0.5))
+    P += wall_z("z9_tun_w_face", 150, 190, -447, 1.2, 0, 9.6, "concrete_d",
+                doors=[(170, 26, 7.8)])                       # 洞口(26m 宽复线洞门)
+    P.append(solid("z9_tun_w_dark", (28, 7.8, 25), (-463, 3.9, 170), "dark_opening", bev=0.0))
+    P.append(deco("z9_tun_w_band", (1.6, 0.7, 30), (-446.4, 9.0, 170), "concrete", bev=0.0))
+    for gi, gz in enumerate((158.0, 182.0)):                  # 洞口翼墙
+        P.append(solid("z9_tun_w_wing%d" % gi, (3.0, 5.0, 6.0), (-448.0, 2.5, gz), "concrete_d", bev=0.02))
+    # 东口:秋津货物駅(侧线 + 车止木 + 站台小屋 + 围墙)
+    P.append(slab("z9_ryd_ground", 440, 474, 142, 198, y=0.17, t=0.3, mat="stone_d"))
+    for si, slz in enumerate((152.0, 158.0, 182.0, 188.0)):   # 侧线 4 条
+        P.append(solid("z9_ryd_r%d" % si, (30, 0.12, 0.14), (455, 0.34, slz), "metal", bev=0.0))
+    for bi, blz in enumerate((152.0, 158.0, 182.0, 188.0)):   # 车止木 x4(轨道物理终点)
+        P.append(solid("z9_ryd_stop%d" % bi, (1.2, 1.1, 1.4), (469, 0.55, blz), "sign_r", bev=0.02))
+        P.append(deco("z9_ryd_stopb%d" % bi, (2.6, 0.5, 1.8), (466.5, 0.25, blz), "concrete_d", bev=0.02))
+    P += _fillbld("z9_ryd_off", 462, 205, 11, 9, 4.6, False, mat="plaster", roof="gable")
+    P.append(solid("z9_ryd_wall", (2.0, 2.2, 62), (440, 1.1, 170), "concrete_d", bev=0.02))
+
+    # ---------------- 高架北段(z40~452)+ 南段(z-452~-360) ----------------
+    # 2026-09-10 修: 旧版建在 x=-300, 而 Z6 段在 x=+300 —— 跨区错位 600m(用户报"高架直接断了")。
+    # 设计线位 x=+300(见 jp_city_design.md §路网)。两端不再铺到护岸, 各以楼梯塔收口。
+    P += floor_slab("z9_elev_n0", 296, 304, 40, 260, 8.0, 0.5, "concrete")
+    P += floor_slab("z9_elev_n1", 296, 304, 260, 452, 8.0, 0.5, "concrete")
+    P.append(solid("z9_elev_nr0", (0.15, 1.1, 412), (296.15, 8.55, 246), "metal", bev=0.01))
+    P.append(solid("z9_elev_nr1", (0.15, 1.1, 412), (303.85, 8.55, 246), "metal", bev=0.01))
+    for gz in range(60, 453, 40):
+        c = add_cyl("z9_elev_nc%d" % gz, 1.1, 7.75, (300, 3.875, gz), axis="y", seg=10)
+        zmat(c, "concrete")
+        P.append(c)
+        P.append(solid("z9_elev_ncap%d" % gz, (10, 0.7, 3.0), (300, 8.15, gz), "concrete", bev=0.02))
+    P += floor_slab("z9_elev_s", 296, 304, -452, -360, 8.0, 0.5, "concrete")
+    P.append(solid("z9_elev_sr", (0.15, 1.1, 92), (296.15, 8.55, -406), "metal", bev=0.01))
+    P.append(solid("z9_elev_sr2", (0.15, 1.1, 92), (303.85, 8.55, -406), "metal", bev=0.01))
+    for gz in (-440, -400, -370):
+        c = add_cyl("z9_elev_sc%d" % gz, 1.1, 7.75, (300, 3.875, gz), axis="y", seg=10)
+        zmat(c, "concrete")
+        P.append(c)
+        P.append(solid("z9_elev_scap%d" % gz, (10, 0.7, 3.0), (300, 8.15, gz), "concrete", bev=0.02))
+    # 两端楼梯塔(高架天路上下口;设计 §步兵捷径 y8)
+    P += stairs_z("z9_evt_n", 424.0, 452.0, 300.0, 9.0, 0.0, 8.0, "concrete", up_dir="+z")
+    P += stairs_z("z9_evt_s", -452.0, -424.0, 300.0, 9.0, 0.0, 8.0, "concrete", up_dir="-z")
+    for tag, tz in (("n", 452.0), ("s", -452.0)):
+        P.append(solid("z9_evt_%s_tower" % tag, (12, 9.6, 12), (300, 4.8, tz), "concrete", bev=0.02))
+        P.append(deco("z9_evt_%s_sign" % tag, (3.4, 1.2, 0.2), (300, 7.4, tz - 6.2), "sign_g", bev=0.0))
+
+    # ---------------- 红绿灯 x8 路口(对角 2 盏) ----------------
+    lights = [(-60, -40, 0.0), (-240, -40, 0.0), (80, -40, 0.0), (420, -40, 0.0),
+              (-60, -260, 1.57), (420, -260, 1.57), (-240, 170, 0.0), (80, -260, 1.57)]
+    for li, (lx, lz, lr) in enumerate(lights):
+        P += _tlight("z9_tl%d" % li, lx - 13, lz - 13, lr)
+        P += _tlight("z9_tlb%d" % li, lx + 13, lz + 13, lr + 3.14159)
+
+    # ---------------- 填充楼 x6(国道南侧空隙带, 可进 2) ----------------
+    P += _fillbld("z9_fb0", -30, -85, 14, 14, 16, False)
+    P += _fillbld("z9_fb1", 0, -85, 12, 12, 12, True)
+    P += _fillbld("z9_fb2", 30, -85, 14, 14, 20, False)
+    P += _fillbld("z9_fb3", -30, 0, 14, 14, 14, False)
+    P += _fillbld("z9_fb4", 0, 0, 12, 12, 18, True)
+    P += _fillbld("z9_fb5", 30, 0, 14, 14, 12, False)
+    # ---------- 全图基底铺装:补分区地面未覆盖的 21.4% 空区 ----------
+    # 顶面 -0.02:正好压在各分区地面(y0~0.03)之下,只在缝隙处露出,杜绝"兜底泥地透出来"
+    P.append(slab("z9_base", -480, 480, -480, 480, y=-0.02, t=0.03, mat="asphalt_w"))
+    # ---------- 海岸:環島護岸(内侧 ±478,与 G.bounds 对齐) ----------
+    P.append(solid("z9_quay_n", (966, 5.4, 5.0), (0, -2.25, -480.5), "concrete_d"))
+    P.append(solid("z9_quay_s", (966, 5.4, 5.0), (0, -2.25, 480.5), "concrete_d"))
+    P.append(solid("z9_quay_w", (5.0, 5.4, 966), (-480.5, -2.25, 0), "concrete_d"))
+    P.append(solid("z9_quay_e", (5.0, 5.4, 966), (480.5, -2.25, 0), "concrete_d"))
+    # 護岸压顶(露出水面的一圈灰边)+ 内侧栏杆
+    for qn, (qx, qz, qw, qd) in {
+            "n": (0, -477.0, 960, 1.6), "s": (0, 477.0, 960, 1.6),
+            "w": (-477.0, 0, 1.6, 960), "e": (477.0, 0, 1.6, 960)}.items():
+        P.append(solid("z9_qcap_" + qn, (qw, 0.5, qd), (qx, 0.25, qz), "concrete"))
+    # 消波块(护岸外侧水面,两排错位)
+    for pi, pz in enumerate(range(-460, 470, 26)):
+        for k in (-1, 1):
+            P.append(solid("z9_tetra_w%d_%d" % (pi, k), (3.2, 3.2, 3.2),
+                           (-486.0 - (0 if k < 0 else 4.0), 0.4, pz), "concrete_d", bev=0.6))
+    for pi, px in enumerate(range(-460, 470, 30)):
+        P.append(solid("z9_tetra_s%d" % pi, (3.2, 3.2, 3.2), (px, 0.4, 486.5), "concrete_d", bev=0.6))
+    for pi, px in enumerate(range(-430, 470, 34)):
+        P.append(solid("z9_tetra_e%d" % pi, (3.2, 3.2, 3.2), (486.5, 0.4, px), "concrete_d", bev=0.6))
+    # 海岸道路带(南缘,兼作载具通道)
+    P.append(slab("z9_coastro", -470, 470, -450, -436, y=0.05, t=0.04, mat="asphalt"))
+    # 城市填空批:80 处空旷街区补建筑(数据驱动选点,避让路网/旗点/保留区)
+    P += _fill_batch()
+    for k, (sx, sz) in enumerate([(-15, -60), (15, -60), (-15, 20), (15, 20)]):
+        P += vending_machine("z9_vend%d" % k, sx, sz, rot=180.0 if k < 2 else 0.0,
+                             kind="soda_red" if k % 2 else "soda_blue")
+    P += wreck_car("z9_wreck0", -50, -60, 0.3)
+    P += jersey_barrier("z9_jb0", -10, -60, 2.0, 0.1)
+    P += sandbag_wall("z9_sb0", 40, -60, 3.0, 0.0)
+
+    # ---------------- 公车站 x4 ----------------
+    for bi, (bx, bz, br) in enumerate([(-100, -32, 0.0), (140, -48, 3.14), (420, -120, 1.57), (-30, -248, 0.0)]):
+        P.append(solid("z9_bus%d_plat" % bi, (6.0, 0.15, 2.4), (bx, 0.1, bz), "concrete", bev=0.01))
+        for k in range(2):
+            c = add_cyl("z9_bus%d_c%d" % (bi, k), 0.08, 2.6, (bx - 2.4 + k * 4.8, 1.3, bz), axis="y", seg=6)
+            zmat(c, "metal_d")
+            P.append(c)
+        P.append(slab("z9_bus%d_roof" % bi, bx - 3.2, bx + 3.2, bz - 1.2, bz + 1.2,
+                      y=2.7, t=0.1, mat="metal"))
+        P += sign_board("z9_bus%d_sign" % bi, bx + 3.3, bz, 1.7, 0.7, 1.5, rot=90.0, kind="sign_b")
+
+    # ---------------- 导出 + 渲染 ----------------
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    zone_export("akitsu_z9", P, MODEL_DIR + "/zone_9.glb")
+    if render:
+        zone_render("z9", (0, 0, 0), 170, SHOT_DIR + "/zone9",
+                    extra_shots=[("cross", (-30, 2.0, -70), (-60, 3.0, -120)),
+                                 ("overpass", (-30, 1.8, 140), (-60, 4.0, 175))])
+
+
+# ============================================================ Z10 边缘+基地(局部=绝对, 原点 0,0)
+# US 基地 (-430,-420) / RU 基地 (+430,+420): 沙袋围线+帐篷×4+指挥帐+弹药箱+哨塔+卡车;
+# 西缘稻田 6 格(x[-474,-426] z[-150,-60]); 北缘杉林带(z[+440,+478])。
+
+def _tent(name, x, z, rot=0.0, w=4.0, l=6.0, h=2.2):
+    """军用帐篷(两斜面屋面板+背山墙)。col 罩盒。"""
+    P = []
+    r = math.radians(rot)
+    px = math.cos(r)
+    pz = -math.sin(r)
+    for s in (-1, 1):
+        slope = add_box("%s_s%d" % (name, 1 if s > 0 else 0),
+                        (l, 0.1, w * 0.62), (x, h * 0.55, z), bevel=0.0, rot_g=(0, r, 0))
+        slope.rotation_euler = rot_g2b((s * math.atan2(h, w / 2.0), r, 0))
+        slope.location = g2b((x - pz * s * w * 0.25, h * 0.55, z + px * s * w * 0.25))
+        zmat(slope, "tent")
+        P.append(slope)
+    back = add_box("%s_b" % name, (w * 0.55, h * 0.9, 0.12), (x, h * 0.45, z), bevel=0.0, rot_g=(0, r, 0))
+    back.location = g2b((x + px * l / 2.0 * (1 if rot >= 0 else -1), h * 0.45,
+                         z + pz * l / 2.0))
+    zmat(back, "tent")
+    P.append(back)
+    J.col(name, (abs(px) * l + abs(pz) * w + 0.4, h, abs(pz) * l + abs(px) * w + 0.4), (x, h / 2.0, z))
+    return P
+
+
+def _base(name, cx, cz, rot=180.0):
+    """前進基地(围线+帐篷群+哨塔+卡车)。rot=朝向。"""
+    P = []
+    r = math.radians(rot)
+    ca, sa = math.cos(r), math.sin(r)
+
+    def W(dx, dz):
+        return (cx + ca * dx + sa * dz, cz - sa * dx + ca * dz)
+
+    # 砾石地面
+    gx, gz = W(0, 0)
+    P.append(slab(name + "_ground", gx - 35, gx + 35, gz - 30, gz + 30, y=0.04, t=0.06, mat="sand"))
+    # 沙袋围线(仅朝战场两面, 另两面靠地图边)
+    segs = [(-30, 26, 60, 0.0), (30, -26, 52, 1.57)]
+    for si, (dx, dz2, ln, lr) in enumerate(segs):
+        wx, wz = W(dx, dz2)
+        P += sandbag_wall("%s_per%d" % (name, si), wx, wz, ln, lr + r)
+    # 帐篷 x4 + 指挥帐
+    for ti, (dx, dz2, tr) in enumerate([(-18, -12, 0.0), (-6, -12, 0.0), (6, -12, 0.0), (18, -12, 0.0)]):
+        tx, tz = W(dx, dz2)
+        P += _tent("%s_tent%d" % (name, ti), tx, tz, tr + r)
+    cmdx, cmdz = W(0, 8)
+    P += _tent(name + "_cmd", cmdx, cmdz, r, w=7.0, l=9.0, h=3.0)
+    # 弹药箱堆 x2 + 油桶 x3
+    for ai, (dx, dz2) in enumerate([(-24, 10), (-21, 13)]):
+        ax, az = W(dx, dz2)
+        for k in range(3):
+            P.append(solid("%s_ammo%d_%d" % (name, ai, k), (1.0, 0.5, 0.6),
+                           (ax, 0.25 + (k % 2) * 0.52, az + (k // 2) * 0.7), "wood_b", bev=0.02,
+                           rot=(0, r + k * 0.2, 0)))
+    for oi, (dx, dz2) in enumerate([(24, 12), (26, 10), (25, 14)]):
+        ox, oz = W(dx, dz2)
+        c = add_cyl("%s_barrel%d" % (name, oi), 0.35, 0.95, (ox, 0.48, oz), axis="y", seg=10)
+        zmat(c, "metal_d" if oi != 1 else "rust")
+        P.append(c)
+    # 哨塔(4 柱+平台 y3+顶)
+    tx, tz = W(26, -18)
+    for k, (dx, dz2) in enumerate([(-1, -1), (1, -1), (-1, 1), (1, 1)]):
+        P.append(solid("%s_tw_p%d" % (name, k), (0.25, 3.4, 0.25),
+                       (tx + dx * 1.4, 1.7, tz + dz2 * 1.4), "wood_d", bev=0.01))
+    P += floor_slab("%s_tw_plat" % name, tx - 2.0, tx + 2.0, tz - 2.0, tz + 2.0, 3.4, 0.15, "wood_d")
+    P.append(slab("%s_tw_roof" % name, tx - 2.4, tx + 2.4, tz - 2.4, tz + 2.4, y=5.6, t=0.15, mat="tent"))
+    for k in range(4):
+        P.append(solid("%s_tw_r%d" % (name, k), (4.0 if k < 2 else 0.1, 0.9, 0.1 if k < 2 else 4.0),
+                       (tx + (0 if k < 2 else (-2 + k * 2) * 0 + (k - 2.5) * 1.3), 3.85,
+                        tz + ((k - 1.5) * 1.3 if k < 2 else 0)),
+                       "wood_d", bev=0.01))
+    # 卡车 + 灯杆 x2
+    tkx, tkz = W(18, 16)
+    P += _truck(name + "_trk", tkx, tkz, rot + 90.0, cab="sign_o")
+    for li, (dx, dz2) in enumerate([(-28, 20), (10, -20)]):
+        lx, lz = W(dx, dz2)
+        pole = add_cyl("%s_lamp%d" % (name, li), 0.08, 6.0, (lx, 3.0, lz), axis="y", seg=6)
+        zmat(pole, "metal_d")
+        P.append(pole)
+        P.append(deco("%s_lamp%d_h" % (name, li), (0.5, 0.15, 0.3), (lx, 6.0, lz), "lamp"))
+    return P
+
+
+def build_zone_10(render=True):
+    reset()
+    J._zone_cols.clear()
+    J._zone_walks.clear()
+    P = []
+
+    # ---------------- 地表(边缘带基底) ----------------
+    P.append(slab("z10_ground_s", -480, 480, -480, -440, y=0.03, t=0.05, mat="grass"))
+    P.append(slab("z10_ground_w", -480, -440, -440, 480, y=0.03, t=0.05, mat="grass"))
+    P.append(slab("z10_ground_n", -480, 480, 440, 480, y=0.03, t=0.05, mat="grass"))
+    P.append(slab("z10_ground_e", 440, 480, -440, 440, y=0.03, t=0.05, mat="grass"))
+
+    # ---------------- 西缘稻田 6 格 ----------------
+    for ri in range(3):
+        for ci in range(2):
+            fx = -474 + ci * 26
+            fz = -140 + ri * 32
+            P.append(slab("z10_paddy%d_%d" % (ri, ci), fx, fx + 24, fz, fz + 18,
+                          y=0.08, t=0.06, mat="water"))
+            # 田埂(四边)
+            P.append(solid("z10_dyke%d_%d_0" % (ri, ci), (25.4, 0.4, 0.7), (fx + 12, 0.2, fz - 0.35),
+                           "grass", bev=0.0))
+            P.append(solid("z10_dyke%d_%d_1" % (ri, ci), (25.4, 0.4, 0.7), (fx + 12, 0.2, fz + 18.35),
+                           "grass", bev=0.0))
+            P.append(solid("z10_dyke%d_%d_2" % (ri, ci), (0.7, 0.4, 19.4), (fx - 0.35, 0.2, fz + 9),
+                           "grass", bev=0.0))
+            P.append(solid("z10_dyke%d_%d_3" % (ri, ci), (0.7, 0.4, 19.4), (fx + 24.35, 0.2, fz + 9),
+                           "grass", bev=0.0))
+
+    # ---------------- 北缘杉林带 ----------------
+    for k in range(16):
+        P += tree_cedar("z10_cedar%d" % k, -380 + k * 50, 452 + (k % 3) * 8, h=9.0)
+
+    # ---------------- US / RU 前進基地 ----------------
+    P += _base("z10_us", -430, -420, rot=0.0)
+    P += _base("z10_ru", 430, 420, rot=180.0)
+    # 基地旗标(辨识)
+    for nm, bx, bz in (("us", -430, -440), ("ru", 430, 400)):
+        p = add_cyl("z10_%s_flag_p" % nm, 0.09, 7.0, (bx, 3.5, bz), axis="y", seg=6)
+        zmat(p, "metal")
+        P.append(p)
+        f = add_box("z10_%s_flag_f" % nm, (1.6, 1.0, 0.04), (bx + 0.85, 6.2, bz), bevel=0.0)
+        zmat(f, "sign_r" if nm == "us" else "sign_b")
+        P.append(f)
+        J.col("z10_%s_flag" % nm, (0.22, 7.0, 0.22), (bx, 3.5, bz))
+
+    # ---------------- 导出 + 渲染 ----------------
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    zone_export("akitsu_z10", P, MODEL_DIR + "/zone_10.glb")
+    if render:
+        zone_render("z10", (0, 0, 0), 170, SHOT_DIR + "/zone10",
+                    extra_shots=[("usbase", (-395, 60, -370), (-430, 0, -425)),
+                                 ("paddy", (-390, 55, -30), (-450, 0, -105))])
+
+
+BUILDERS = {
+    "zone1": build_zone_1,
+    "zone2": build_zone_2,
+    "zone3": build_zone_3,
+    "zone8": build_zone_8,
+    "zone6": build_zone_6,
+    "zone4": build_zone_4,
+    "zone5": build_zone_5,
+    "zone7": build_zone_7,
+    "zone9": build_zone_9,
+    "zone10": build_zone_10,
+}
+
+
+if __name__ == "__main__":
+    args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else ["zone1"]
+    target = args[0]
+    do_render = "norender" not in args
+    if target in BUILDERS:
+        BUILDERS[target](render=do_render)
+    else:
+        print("未知 zone: %s (可用: %s)" % (target, ", ".join(BUILDERS)))

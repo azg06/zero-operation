@@ -723,4 +723,5 @@ def main():
         print("[SOLDIER] 导出完成:", out)
 
 
-main()
+if __name__ == "__main__":
+    main()

@@ -326,7 +326,109 @@ def build_aa():
     return
 
 
-BUILDERS = {"jeep": build_jeep, "tank": build_tank, "apc": build_apc, "aa": build_aa}
+# ============================================================ 突击摩托
+def build_motorcycle():
+    """轻型突击摩托(1 驾 1 乘, 无炮塔)。
+    契约: Steer_F(前转向枢轴, 绕 y) / WheelF·WheelR(轮自转, 绕 x)。
+    前叉·车把·前挡泥板·大灯·仪表一并挂 Steer_F, 转向时整前部跟随(真摩托观感)。
+    v3(2026-09-11): 侧视验收修正 —— ①大灯紧贴前叉(旧版悬空 0.38m) ②油箱→过渡块→
+    座垫→尾罩四段连续(消台阶) ③左右侧盖板包住发动机上方遮缝 ④Swingarm 收窄。"""
+    reset()
+    R = 0.33                        # 车轮半径
+    FZ, RZ = -0.70, 0.68            # 前/后轮中心(前方 -Z); 轴距 1.38m
+    # --- 前转向组(整组挂 Steer_F) ----------------------------------
+    steer = add_empty("Steer_F", (0, R, FZ))
+    for sx in (-0.118, 0.118):      # 前叉双管(后倾 ~23°): 底端=轮心, 顶端=三角台
+        fk = add_box("Fork%d" % round(sx * 100), (0.075, 0.74, 0.075),
+                     (sx, 0.66, -0.535), bevel=0.015, rot_g=(0.40, 0, 0))
+        parent_to(fk, steer)
+    tc = add_box("TripleClamp", (0.31, 0.07, 0.13), (0, 0.985, -0.385), bevel=0.012)
+    parent_to(tc, steer)
+    stm = add_cyl("Steerer", 0.030, 0.09, (0, 1.025, -0.375), axis="y", seg=10)
+    parent_to(stm, steer)
+    bar = add_cyl("Handlebar", 0.022, 0.66, (0, 1.075, -0.36), axis="x", seg=10)
+    parent_to(bar, steer)
+    for sx in (-0.30, 0.30):
+        gp = add_cyl("Grip%d" % round(sx * 100), 0.031, 0.13, (sx, 1.075, -0.36), axis="x", seg=10)
+        parent_to(gp, steer)
+        lv = add_cyl("Lever%d" % round(sx * 100), 0.010, 0.13, (sx * 0.80, 1.065, -0.43), axis="z", seg=8)
+        parent_to(lv, steer)
+    for sx in (-0.32, 0.32):        # 后视镜(短杆, 旧版像天线)
+        ms = add_cyl("MirrorStem%d" % round(sx * 100), 0.013, 0.15, (sx, 1.14, -0.36), axis="y", seg=8)
+        parent_to(ms, steer)
+        mg = add_box("Mirror%d" % round(sx * 100), (0.15, 0.10, 0.02), (sx, 1.225, -0.36), bevel=0.012)
+        parent_to(mg, steer)
+    # 大灯紧贴前叉前方(y0.80 处前叉 z≈-0.476)
+    hl = add_cyl("Headlight", 0.115, 0.12, (0, 0.80, -0.565), axis="z", seg=16, bevel=0.012)
+    parent_to(hl, steer)
+    fm = add_box("FenderF", (0.17, 0.035, 0.38), (0, R + 0.335, FZ), bevel=0.02)
+    parent_to(fm, steer)
+    dsh = add_box("Dash", (0.18, 0.08, 0.05), (0, 1.10, -0.44), bevel=0.012)
+    parent_to(dsh, steer)
+    # 前轮(自转挂 Steer_F; 胎 + 毂 + 辐条 + 刹车盘)
+    fspin = add_empty("WheelF", (0, R, FZ))
+    parent_to(fspin, steer)
+    for o in (add_cyl("WheelF_Tire", R, 0.13, (0, R, FZ), axis="x", seg=22, bevel=0.02),
+              add_cyl("WheelF_Hub", R * 0.34, 0.14, (0, R, FZ), axis="x", seg=12),
+              add_cyl("WheelF_Disc", R * 0.62, 0.022, (0.083, R, FZ), axis="x", seg=14)):
+        parent_to(o, fspin)
+    for i in range(3):
+        sp = add_box("WheelF_Spoke%d" % i, (0.022, R * 1.74, 0.022),
+                     (0, R, FZ), rot_g=(i * 1.047, 0, 0))
+        parent_to(sp, fspin)
+    # --- 后轮 ------------------------------------------------------
+    rspin = add_empty("WheelR", (0, R, RZ))
+    for o in (add_cyl("WheelR_Tire", R, 0.175, (0, R, RZ), axis="x", seg=22, bevel=0.02),
+              add_cyl("WheelR_Hub", R * 0.34, 0.185, (0, R, RZ), axis="x", seg=12)):
+        parent_to(o, rspin)
+    for i in range(3):
+        sp = add_box("WheelR_Spoke%d" % i, (0.022, R * 1.74, 0.022),
+                     (0, R, RZ), rot_g=(i * 1.047, 0, 0))
+        parent_to(sp, rspin)
+    # --- 车体: 油箱→过渡块→座垫→尾罩 四段首尾相接 -------------------
+    add_box("Tank", (0.32, 0.26, 0.62), (0, 0.80, -0.14), bevel=0.06)
+    add_box("TankSeat", (0.30, 0.16, 0.22), (0, 0.765, 0.22), bevel=0.04)
+    add_box("Seat", (0.28, 0.11, 0.46), (0, 0.755, 0.44), bevel=0.035)
+    add_box("Tail", (0.24, 0.16, 0.30), (0, 0.775, 0.75), bevel=0.045)
+    add_box("TailLight", (0.11, 0.05, 0.04), (0, 0.83, 0.905))
+    for sx in (-0.15, 0.15):        # 车架连接件(油箱底 → 发动机顶): 小件, 不做整幅裙板
+        add_box("SideCover%d" % round(sx * 100), (0.026, 0.15, 0.34), (sx, 0.615, -0.06), bevel=0.012)
+    add_box("Engine", (0.36, 0.32, 0.40), (0, 0.45, -0.06), bevel=0.03)
+    for i in range(4):              # 风冷散热片
+        add_box("_Fin%d" % i, (0.38, 0.022, 0.30), (0, 0.34 + i * 0.075, -0.06))
+    add_box("Swingarm", (0.22, 0.07, 0.44), (0, 0.38, 0.44), bevel=0.02)
+    add_box("FenderR", (0.16, 0.03, 0.32), (0, 0.615, 0.80), bevel=0.02)
+    add_box("Chain", (0.03, 0.08, 0.60), (-0.145, 0.345, 0.36))
+    # 排气: 发动机后方 → 斜段抬升 → 高位消音器(贴后轮外侧上方; 旧版水平贯穿后轮像车轴)
+    for sx in (-0.165, 0.165):
+        add_cyl("Pipe%d" % round(sx * 100), 0.040, 0.40, (sx, 0.295, 0.03), axis="z", seg=12)
+        add_box("PipeMid%d" % round(sx * 100), (0.075, 0.075, 0.26),
+                (sx, 0.375, 0.28), rot_g=(0.78, 0, 0), bevel=0.012)
+        add_cyl("Muffler%d" % round(sx * 100), 0.056, 0.32, (sx, 0.545, 0.66), axis="z",
+                seg=12, taper=0.9)
+    for sx in (-0.27, 0.27):        # 脚踏
+        add_cyl("Peg%d" % round(sx * 100), 0.018, 0.15, (sx, 0.43, 0.04), axis="x", seg=8)
+    for sx in (-0.13, 0.13):        # 后减震
+        add_box("Shock%d" % round(sx * 100), (0.042, 0.32, 0.042), (sx, 0.545, 0.47),
+                rot_g=(0.30, 0, 0))
+    add_box("Kickstand", (0.032, 0.42, 0.032), (-0.225, 0.185, 0.14), rot_g=(0, 0, -0.32))
+    apply_materials([
+        ("WheelF_Hub", "metal"), ("WheelR_Hub", "metal"), ("WheelF_Disc", "metal"),
+        ("WheelF_Spoke", "metal"), ("WheelR_Spoke", "metal"),
+        ("Wheel", "dark"), ("Tire", "dark"),
+        ("Frame", "dark"), ("Swingarm", "dark"), ("Seat", "dark"), ("TankSeat", "dark"),
+        ("Chain", "dark"), ("Grip", "dark"), ("Dash", "dark"), ("TailLight", "dark"),
+        ("Engine", "metal"), ("Fin", "metal"), ("Shock", "metal"), ("Peg", "metal"),
+        ("Muffler", "dark"), ("Pipe", "dark"), ("Fork", "chrome"),
+        ("Handlebar", "chrome"), ("Steerer", "chrome"), ("TripleClamp", "chrome"),
+        ("Mirror", "chrome"), ("Lever", "chrome"), ("Headlight", "chrome"),
+        ("PipeMid", "dark"),
+    ], default="olive")
+    return
+
+
+BUILDERS = {"jeep": build_jeep, "tank": build_tank, "apc": build_apc, "aa": build_aa,
+            "motorcycle": build_motorcycle}
 
 
 def main():

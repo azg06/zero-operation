@@ -83,6 +83,8 @@ func setup_map(map_id: String) -> void:
 			var vdef: Dictionary = Vehicle.TYPES().get(ptype, Vehicle.TYPES()["jeep"])
 			var spawn_p: Vector3 = Vehicle.safe_spawn_pos(Vector3(float(s["x"]), 0.0, float(s["z"])), float(vdef["radius"]))
 			G.vehicles.append(Vehicle.new(spawn_p.x, spawn_p.z, float(s["yaw"]), ptype))
+		# 地图周边随机补充(只征服/大图;战役模式纯净无载具)
+		_spawn_random_vehicles(18, 20260911)
 	for v in G.vehicles:
 		G.main.add_child(v)
 	# 清理旧部署物(掩体需连带回收碰撞体,否则新地图会残留隐形墙)
@@ -138,6 +140,67 @@ func setup_map(map_id: String) -> void:
 		G.aircraft.append(Aircraft.new("ru", "jet"))
 	for a in G.aircraft:
 		G.main.add_child(a)
+
+
+## 地图周边随机补充载具(用户: "960m 太大,刷的载具要多一些;除了占领点位在地图周围也随机刷")。
+## 选址全部确定性(seed 固定 → 分布随机但每局一致,QA 可复现):
+##   ① 导航格 3×3 全通 = 18m 见方开阔路面(路口/广场),不会把车塞进巷子或楼里
+##   ② 头顶 4.5m 内有遮挡 → 判为室内/桥下,跳过
+##   ③ 离旗帜 >20m、出生点 >22m、已有载具 >9m
+##   ④ 42% 概率出摩托(快速穿插),其余吉普;不按队伍分配 —— 谁先开到算谁的
+func _spawn_random_vehicles(count: int, seed_v: int) -> int:
+	if not G.nav_ok:
+		return 0
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_v
+	var all_spawns: Array = []
+	all_spawns.append_array(G.spawns["us"])
+	all_spawns.append_array(G.spawns["ru"])
+	var placed := 0
+	var tries := 0
+	var cell := 6.0     # == G.NAV_CELL
+	while placed < count and tries < count * 60:
+		tries += 1
+		var cx := rng.randi_range(1, G.nav_n - 2)
+		var cz := rng.randi_range(1, G.nav_n - 2)
+		if not G.nav_open_pad(cx, cz, 1):
+			continue
+		var x: float = G.nav_org + (cx + 0.5) * cell
+		var z: float = G.nav_org + (cz + 0.5) * cell
+		if absf(x) > 430.0 or absf(z) > 430.0:
+			continue
+		var sy: float = G.ground_h.call(x, z)
+		if sy < -0.2:
+			continue
+		if Utils.raycast_world(Vector3(x, sy + 1.0, z), Vector3.UP, 4.5) != null:
+			continue
+		var bad := false
+		for f in G.flags:
+			if Vector2(f.pos.x - x, f.pos.z - z).length() < 20.0:
+				bad = true
+				break
+		if not bad:
+			for sp in all_spawns:
+				if Vector2(sp.x - x, sp.z - z).length() < 22.0:
+					bad = true
+					break
+		if not bad:
+			for v in G.vehicles:
+				if Vector2(v.pos.x - x, v.pos.z - z).length() < 9.0:
+					bad = true
+					break
+		if bad:
+			continue
+		var vt: String = "motorcycle" if rng.randf() < 0.42 else "jeep"
+		G.vehicles.append(Vehicle.new(x, z, rng.randf_range(0.0, TAU), vt))
+		placed += 1
+	var dbg := PackedStringArray()
+	for i in range(maxi(0, G.vehicles.size() - placed), G.vehicles.size()):
+		dbg.append("(%.0f,%.0f)%s" % [G.vehicles[i].pos.x, G.vehicles[i].pos.z,
+			"摩" if G.vehicles[i].type == "motorcycle" else "吉"])
+	print("[VEH] 随机补充载具 %d/%d 台(尝试 %d 次, 种子 %d)" % [placed, count, tries, seed_v])
+	print("[VEH]   落点: %s" % ", ".join(dbg))
+	return placed
 
 
 ## ============ 开局/部署 ============
@@ -226,9 +289,16 @@ func _start_match_sync(mode := "conquest") -> void:
 	# [BALANCE 8/10] 突破模式:防守方(ru)兵力 11→8(削弱 25%),进攻方 11 保持;
 	# 地图拉大(360→420)后出生区外推,配合封锁线 45m 出生点保护,消除"出门团灭"
 	# [BALANCE] 进攻方人数 23→25,防守方 20→19:进攻方多两人,弥补攻方推进损耗
+	# [SCALE 9/10] 地图级人数:MapDef.extra["bot_per_team"](秋津市 960m 大图 = 64 v 64,
+	# 每队 AI 63,玩家占我方 1 席);未配置的图保持 25 不变。
+	var per_team := 25
+	var md_pt = MapsData.M().get(map_id, null)
+	if md_pt != null and md_pt.extra != null and md_pt.extra.has("bot_per_team"):
+		per_team = int(md_pt.extra["bot_per_team"])
+	print("[SCALE] 地图 %s 每队 AI=%d(合计 %d 人)" % [map_id, per_team, per_team * 2 + 1])
 	if G.menus != null and G.menus.has_method("set_loading_stage"):
 		G.menus.set_loading_stage("正在加载作战单位", 0.62, "步兵小队与战场 AI 正在部署")
-	G.bot_manager.reset(25, -6 if mode == "breakthrough" else 1)
+	G.bot_manager.reset(per_team, -6 if mode == "breakthrough" else 1)
 	if G.menus != null and G.menus.has_method("set_loading_stage"):
 		G.menus.set_loading_stage("正在配发武器", 0.78, "玩家装备与小队配置同步")
 	G.hud.spawn_point = null
@@ -1759,10 +1829,15 @@ func _update_flag_capture(f: Flag, dt: float, verb: String) -> void:
 			ru += 1
 	f.contested = us > 0 and ru > 0
 	var prev_owner = f.owner_team
-	if us > 0 and ru == 0:
-		f.progress = minf(100, f.progress + dt * 22 * mini(us, 3))
-	elif ru > 0 and us == 0:
-		f.progress = maxf(-100, f.progress - dt * 22 * mini(ru, 3))
+	# ★ 2026-09-10 修(实测): 旧版要求"对方人数严格为 0"才推进进度 → 64v64 的高密度下,
+	#   两面几乎同时在旗圈里(实测 84s 内 6 面中立旗进度零变化、永远争而不决), 旗永远
+	#   不翻面。改为**净人数优势**推进(战地同款): 人多的一方按 (自己-对方) 推进,
+	#   人数持平则进度冻结。
+	var net := us - ru
+	if net > 0:
+		f.progress = minf(100, f.progress + dt * 22 * mini(net, 3))
+	elif net < 0:
+		f.progress = maxf(-100, f.progress - dt * 22 * mini(-net, 3))
 	# 归属判定(播报/音效按玩家阵营)
 	var my_team: String = G.player.team if G.player != null else "us"
 	if f.progress >= 100 and f.owner_team != "us":

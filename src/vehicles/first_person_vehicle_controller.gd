@@ -18,7 +18,11 @@ enum Station { DRIVER, GUNNER, OBSERVER }
 
 const LOOK_YAW_MAX := 2.0
 const LOOK_PITCH_UP := 1.22
-const LOOK_PITCH_DOWN := -1.05
+# [FIX 2026-09-11 v3] 目镜俯角收到 **-11.5°**(真实战车炮镜俯角只有 -7°~-10°)。
+#   相机在炮塔顶上方 ~0.36m, 低头越多越快"落到"炮塔顶面高度 ⇒ 满屏自家顶盖
+#   (qa_ads_tank_up 实拍)。-11.5° 时视线要在前方 1.8m 外才降到炮塔顶面, 而炮塔
+#   壳只伸到前方 1.4m ⇒ 目镜内看不到任何自家车体。打近处地面改用第三人称。
+const LOOK_PITCH_DOWN := -0.20
 const FP_FOV := 86.0
 
 ## 车型 → 乘员位配置(局部坐标与 vehicle_models.gd 的内构几何对齐)
@@ -30,11 +34,13 @@ const STATION_CFG := {
 	#   aa   平台节点原点 (0,1.68,0.85),平台顶 world 1.85(敞开炮座)
 	"tank": {
 		"driver": { "pos": Vector3(0.0, 1.30, 0.35), "fov": 86.0 },
-		# [FIX] 炮手/观瞄眼位抬到炮塔壳顶上方(world 1.80+0.32=2.12 > 壳顶 1.97),
-		# 敞开舱盖观察 —— 旧版 0.02(world 1.82)整颗头埋在壳内,
-		# ADS 下半屏被炮塔壳内壁挡住 45%(qa_veh_tank_ads 实锤)
-		"gunner": { "pos": Vector3(0.0, 0.32, -0.55), "fov": 86.0 },
-		"optic": { "pos": Vector3(0.28, 0.32, -0.85), "fov": 40.0 },
+		# ★[FIX 2026-09-11 v2] 眼位必须高过**炮塔壳实测顶面**, 否则相机被埋在壳内 ——
+		#   实拍(qa_ads_tank_up)低头满屏是内壁纹理。实测 tank.glb `Turret` 子树网格
+		#   y 到 **2.16**(不是注释里写的 1.97!), 旧 optic y=2.12 ⇒ 相机在壳里 4cm。
+		#   现取炮塔节点原点(0,1.80,0.20)+0.72 = world 2.52(壳顶上方 0.36m)。
+		#   x/z 取 0 ⇒ 相机落在**炮塔旋转轴正上方**, 炮塔转动时相机不公转(无视差漂移)。
+		"gunner": { "pos": Vector3(0.0, 0.72, 0.0), "fov": 86.0 },
+		"optic": { "pos": Vector3(0.0, 0.72, 0.0), "fov": 40.0 },
 		"motion": {
 			"vibe": 0.0045, "accel_pitch": 0.007,
 			"brake_pitch": 0.005, "steer_roll": 0.012,
@@ -45,8 +51,12 @@ const STATION_CFG := {
 	},
 	"aa": {
 		"driver": { "pos": Vector3(0.0, 1.60, -1.50), "fov": 86.0 },
-		"gunner": { "pos": Vector3(0.0, 0.67, -0.35), "fov": 86.0 },
-		"optic": { "pos": Vector3(0.30, 0.69, -0.70), "fov": 46.0 },
+		# ★[FIX 2026-09-11 v2] 实测 aa.glb: 敞开炮座顶 1.85, 炮盾顶 2.32, 炮管顶 2.19,
+		#   后方雷达板 2.25~2.83(z 0.48~0.81)。旧 optic world (0.30,2.37,0.15) 正压在
+		#   炮盾(x±0.65, z 0.13~0.18)上方 ⇒ 低头就是自家炮盾。现移到炮塔轴正上方
+		#   (0, 2.43, 0.90): 高过炮盾/炮管, 且在雷达板 z 范围之外。
+		"gunner": { "pos": Vector3(0.0, 0.75, 0.05), "fov": 86.0 },
+		"optic": { "pos": Vector3(0.0, 0.75, 0.05), "fov": 46.0 },
 		"motion": {
 			"vibe": 0.0065, "accel_pitch": 0.008,
 			"brake_pitch": 0.006, "steer_roll": 0.015,
@@ -57,10 +67,11 @@ const STATION_CFG := {
 	},
 	"apc": {
 		"driver": { "pos": Vector3(0.0, 1.38, -1.85), "fov": 86.0 },
-		# [FIX] 炮手/观瞄眼位抬到炮塔壳顶上方(world 2.14+0.32=2.46 > 壳顶 2.41),
-		# 敞开炮座观察 —— 旧版 0.10(world 2.24)被内饰顶棚 2.32 夹出 0.1m 视缝
-		"gunner": { "pos": Vector3(0.0, 0.32, -0.50), "fov": 86.0 },
-		"optic": { "pos": Vector3(0.0, 0.32, -0.55), "fov": 44.0 },
+		# ★[FIX 2026-09-11 v2] 实测 apc.glb: 炮塔壳顶 **2.46**, 顶上还有 AmmoBox(2.67) /
+		#   SightBox(2.58) / Antenna(3.33)。旧 optic world y=2.46 正好贴壳顶 ⇒ ADS 穿帮。
+		#   现取炮塔节点原点(0,2.14,-0.30)+0.71 = world 2.85(高过弹箱与瞄准盒)。
+		"gunner": { "pos": Vector3(0.0, 0.71, 0.0), "fov": 86.0 },
+		"optic": { "pos": Vector3(0.0, 0.71, 0.0), "fov": 44.0 },
 		"motion": {
 			"vibe": 0.0055, "accel_pitch": 0.007,
 			"brake_pitch": 0.005, "steer_roll": 0.014,
@@ -70,14 +81,35 @@ const STATION_CFG := {
 		"reticle": "autocannon",
 	},
 	"jeep": {
-		"driver": { "pos": Vector3(-0.45, 1.62, 0.45), "fov": 86.0 },
-		"gunner": { "pos": Vector3(0.45, 1.62, 0.45), "fov": 86.0 },
+		# [FIX 2026-09-11] 眼位抬到真实驾驶高度(座垫 1.01 + 坐姿眼高 ~0.71)并前移:
+		#   旧 1.62/0.45 时视线从仪表台(顶 1.29)下方穿过 —— 低头看到的是引擎盖,
+		#   而不是方向盘(用户要"第一人称看到双手握方向盘")。1.72/0.28 下,
+		#   方向盘 9/3 点握点落在屏幕 y≈888(俯角 31°), 平视即可看见双手。
+		"driver": { "pos": Vector3(-0.45, 1.72, 0.45), "fov": 86.0 },
+		"gunner": { "pos": Vector3(0.45, 1.72, 0.45), "fov": 86.0 },
 		"optic": { "pos": Vector3.ZERO, "fov": 86.0 },
 		"motion": {
 			"vibe": 0.007, "accel_pitch": 0.009,
 			"brake_pitch": 0.007, "steer_roll": 0.018,
 			"recoil_pitch": 0.004, "recoil_yaw": 0.002, "recoil_roll": 0.002,
 			"recoil_pos_z": 0.01, "recoil_decay": 9.0,
+		},
+		"reticle": "none",
+	},
+	# 突击摩托(2026-09-11 新增):单座骑姿, 眼位在油箱后方 ~1.34m;
+	# 过弯侧倾大(steer_roll) + 路面颠簸强(vibe), 与"轻、快、飘"的手感一致。
+	"motorcycle": {
+		# [FIX 2026-09-11 v3] 相机必须在**肩的前方**(骑手头前倾在肩前上方): 骨架肩在车体
+		#   z≈0.23, 相机 z≥0.23 时肩甲球就顶进画面(用户报"两个黑球")。z=0.06 ⇒ 肩在相机
+		#   后方 0.17、肘落在 86° 俯角外, 画面里只剩"从下缘伸入的前臂 + 握住把手的手"。
+		"driver": { "pos": Vector3(0.0, 1.36, 0.15), "fov": 90.0 },
+		"gunner": { "pos": Vector3(0.0, 1.34, 0.16), "fov": 90.0 },
+		"optic": { "pos": Vector3(0.0, 1.40, -0.10), "fov": 62.0 },
+		"motion": {
+			"vibe": 0.0125, "accel_pitch": 0.014,
+			"brake_pitch": 0.011, "steer_roll": 0.042,
+			"recoil_pitch": 0.003, "recoil_yaw": 0.002, "recoil_roll": 0.002,
+			"recoil_pos_z": 0.008, "recoil_decay": 10.0,
 		},
 		"reticle": "none",
 	},
@@ -112,6 +144,16 @@ var _trans_veh_pos := Vector3.ZERO
 var _last_view := -1
 var _last_station := -1
 var _gunner_mode := false
+
+# ---- 第一人称稳像(2026-09-11) ----
+# ★玩家反馈"第一人称视角不是跟手、老在偏; 按住 ADS 更乱"。实测鼠标输入本身是**完全线性**的
+#   (静止 8 帧 cam_yaw 恒 0; 每帧注入 10px 精确 +0.022 rad; 停手即停)。真正的来源是
+#   **悬挂振动(_pos_off/_rot_off) 被原样加在相机上** —— 车一开起来画面就持续晃, 按住右键时
+#   手离开鼠标、更没法纠偏, 于是像"自己乱飘"。这里把抖动按系数削弱; 车体本身的
+#   俯仰/侧倾(anchor basis, 过弯侧倾/加速后仰)不受影响, 驾驶感保留。
+const FP_SHAKE_K := 0.55          # 第一人称抖动量
+const FP_SHAKE_K_ADS := 0.16      # 按住 ADS(稳住视线)时几乎不动
+var fp_stabilize := false         # 由 Player 每帧设置: 第一人称 + 按住 ADS
 
 # ---- 悬挂/惯性/机械反馈(全部指数平滑,不跳帧) ----
 var _accel_s := 0.0
@@ -173,6 +215,7 @@ func reset() -> void:
 	_last_station = -1
 	_trans_t = -1.0
 	_gunner_mode = false
+	fp_stabilize = false
 	station = Station.DRIVER
 	_pos_off = Vector3.ZERO
 	_rot_off = Vector3.ZERO
@@ -202,7 +245,7 @@ func set_gunner_mode(on: bool) -> void:
 func set_station(s: int) -> void:
 	if s == station:
 		return
-	station = clampi(s, Station.DRIVER, Station.OBSERVER)
+	station = clampi(s, Station.DRIVER, Station.OBSERVER) as Station
 
 
 ## 战地式:炮手位(驾驶+开炮一体)在任何视角下炮塔都跟随相机瞄准并可开火;
@@ -225,7 +268,7 @@ func apply_tp_orbit(dx: float, dy: float) -> void:
 
 ## 观瞄模式循环:白光 → 热成像 → 微光夜视
 func cycle_optic_mode() -> int:
-	optic_mode = (int(optic_mode) + 1) % 3
+	optic_mode = ((int(optic_mode) + 1) % 3) as OpticMode
 	_apply_optic_effects()
 	return int(optic_mode)
 
@@ -234,7 +277,7 @@ func set_optic_mode(mode: int) -> void:
 	var next: int = clampi(mode, OpticMode.DAY, OpticMode.NIGHT)
 	if next == optic_mode:
 		return
-	optic_mode = next
+	optic_mode = next as OpticMode
 	_apply_optic_effects()
 
 
@@ -551,12 +594,13 @@ func _desired_xf() -> Transform3D:
 		VehView.FP_DRIVER:
 			var anchor: Node3D = _station_anchor(station)
 			var xf_a: Transform3D = anchor.global_transform
-			xf_a.origin += xf_a.basis * _pos_off
+			var shk: float = FP_SHAKE_K_ADS if fp_stabilize else FP_SHAKE_K
+			xf_a.origin += xf_a.basis * (_pos_off * shk)
 			xf_a.origin += xf_a.basis * Vector3(0.0, 0.0, _recoil_pos_z * 0.25)
 			var b_xf := xf_a.basis
 			b_xf = b_xf * Basis(Vector3.UP, look_yaw)
 			b_xf = b_xf * Basis(Vector3.RIGHT, look_pitch)
-			b_xf = b_xf * Basis.from_euler(_rot_off)
+			b_xf = b_xf * Basis.from_euler(_rot_off * shk)
 			xf = Transform3D(b_xf, xf_a.origin)
 		_:
 			# FP_OPTIC(战地式 ADS 目镜):眼位=观瞄锚点,朝向=鼠标 look 角。
@@ -678,10 +722,10 @@ func _update_tp(cam: Camera3D, _dt: float) -> void:
 	var hit = Utils.raycast_world(anchor, -fwd, dist + 0.3)
 	if hit != null:
 		target = anchor - fwd * maxf(1.4, hit["dist"] - 0.3)
-	if G.ground_h.is_valid():
-		var gh: float = G.ground_h.call(target.x, target.z)
-		if target.y < gh + 0.35:
-			target.y = gh + 0.35
+	# 相机地面钳制改走 veh_h(含桥面 drive_ 面): 否则车开上跨线桥后相机会被地面钳下去
+	var gh: float = G.veh_h.call(target.x, target.z, v.pos.y)
+	if target.y < gh + 0.35:
+		target.y = gh + 0.35
 	cam.global_position = target
 	cam.rotation_order = EULER_ORDER_YXZ
 	cam.rotation = Vector3(view_pitch, orbit, 0)

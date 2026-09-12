@@ -120,7 +120,7 @@ static func _mats() -> Dictionary:
 	water.metallic = 0.15
 	water.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_mat_lib["water"] = water
-	_mat_lib["grass"] = mk.call("#4a7a3a", 0.95, 0.0, "gun_wood_diff.jpg", "", 4.0)
+	_mat_lib["grass"] = mk.call("#5b6b43", 0.96, 0.0, "gun_wood_diff.jpg", "", 4.0)
 	_mat_lib["jungle_leaf"] = mk.call("#2e5a28", 0.92, 0.0)
 	_mat_lib["snow"] = mk.call("#e8ecf0", 0.78, 0.0, "sand_01_diff.jpg", "", 2.0)
 	# 集装箱/船体(暮港)
@@ -132,7 +132,89 @@ static func _mats() -> Dictionary:
 	_mat_lib["ship_super"] = mk.call("#dcd8cc", 0.70, 0.10, "metal_plate_diff.jpg", "metal_plate_nor.jpg", 1.4)
 	# 洞口(纯暗,做凹龛/开口用)
 	_mat_lib["dark_opening"] = mk.call("#0a0c0e", 0.98, 0.0)
+	# ============ 秋津市(akitsu)日式城市批次(与 tools/blender/jp_common.ZMAT 同名对应) ============
+	# 湿润沥青(刚下过雨:低粗糙度 → 天光反射/积水感)
+	_mat_lib["asphalt"] = mk.call("#7c7f86", 0.93, 0.0, "asphalt_02_diff.jpg", "", 2.0)
+	_mat_lib["asphalt_w"] = mk.call("#84878e", 0.94, 0.0, "asphalt_02_diff.jpg", "", 3.0)
+	_mat_lib["paint_w"] = mk.call("#d6d6d0", 0.92, 0.0)
+	_mat_lib["paint_y"] = mk.call("#c7a629", 0.92, 0.0)
+	# 神社/寺院
+	_mat_lib["vermilion"] = mk.call("#b8331f", 0.62, 0.0, "plywood_diff.jpg", "", 2.0)
+	_mat_lib["roof_tile"] = mk.call("#3b4350", 0.58, 0.10, "corrugated_iron_diff.jpg", "", 3.0)
+	_mat_lib["plaster"] = mk.call("#dbd9cf", 0.90, 0.0, "rough_concrete_diff.jpg", "", 1.4)
+	_mat_lib["stone"] = mk.call("#8a877e", 0.96, 0.0, "rock_04_diff.jpg", "", 1.6)
+	_mat_lib["stone_d"] = mk.call("#5e5c56", 0.94, 0.0, "rock_04_diff.jpg", "", 1.6)
+	_mat_lib["concrete_d"] = mk.call("#78776f", 0.95, 0.0, "rough_concrete_diff.jpg", "", 1.6)
+	_mat_lib["wood_b"] = mk.call("#6b4d30", 0.86, 0.0, "gun_wood_diff.jpg", "", 2.2)
+	_mat_lib["wood_d"] = mk.call("#4a3826", 0.88, 0.0, "gun_wood_diff.jpg", "", 2.4)
+	_mat_lib["metal_d"] = mk.call("#3e4248", 0.62, 0.65, "gun_dark_diff.jpg", "", 1.8)
+	# 室内货架/柜体:浅灰哑光。旧版货架走 metal_d(深色高金属度),在室内单点补光下整块
+	# 发黑,被读作"莫名其妙的黑箱子"(用户反馈)。
+	#   ★ albedo = 颜色 × 贴图:metal_plate_diff 平均亮度只有 50, 配浅灰会乘成 0.14(=发黑)。
+	#     货架用高亮度波纹铁贴图(mean 175)配浅灰, 最终 ≈0.59 才是"看得见的浅色货架"。
+	_mat_lib["shelf"] = mk.call("#d8dbd8", 0.55, 0.04, "corrugated_iron_diff.jpg", "", 2.0)
+	_mat_lib["dark"] = mk.call("#2b2b2e", 0.96, 0.0)
+	_mat_lib["sand"] = mk.call("#c7b88f", 0.94, 0.0, "sand_01_diff.jpg", "", 2.5)
+	# 樱(春树,暖粉)
+	_mat_lib["cherry"] = mk.call("#e09eb2", 0.90, 0.0)
+	_mat_lib["banner"] = mk.call("#d9d1c0", 0.92, 0.0)
+	_mat_lib["taxi_y"] = mk.call("#d9a61a", 0.42, 0.35, "metal_plate_diff.jpg", "", 1.4)
+
+	# ---------------- 日语标识(UV 图集;不能走三平面,否则 UV 被毁) ----------------
+	# 贴图由 tools/blender/gen_jp_signs.py 生成:4x4 图集(每格 256px)+ 地面报纸 512²。
+	# jp_common.sign_panel() 按格写 UV;材质名与 ZMAT 表同名。
+	var sig := func(file: String, _tiling := 0.0) -> StandardMaterial3D:   # _tiling 未使用(图集靠 UV 取格,不缩放)
+		var m := StandardMaterial3D.new()
+		m.albedo_color = Color.WHITE
+		m.roughness = 0.55
+		m.metallic = 0.0
+		m.texture_repeat = false
+		m.uv1_triplanar = false            # ★ 关键:图集靠 UV 取格,三平面会毁掉
+		# ☆ 勿在此加 uv1_scale/offset 做翻转:图集的"格"就是靠 UV 的 v 区间选的,
+		#   材质端翻 v 会连格子一起换行(实测 cell11 的牌会变成 cell7 的内容)。
+		m.uv1_scale = Vector3.ONE
+		m.albedo_texture = _tex(file)
+		m.cull_mode = BaseMaterial3D.CULL_DISABLED
+		return m
+	_mat_lib["sign_jp_shop"] = sig.call("jp_sign_shop.png")
+	_mat_lib["sign_jp_ad"] = sig.call("jp_sign_ad.png")
+	_mat_lib["sign_jp_notice"] = sig.call("jp_sign_notice.png")
+	_mat_lib["sign_jp_road"] = sig.call("jp_sign_road.png")
+	_mat_lib["sign_jp_banner"] = sig.call("jp_sign_banner.png")
+	_mat_lib["jp_flyer"] = sig.call("jp_flyer.png")
+	# 招牌背板/支架(无贴图)
+	_mat_lib["sign_back"] = mk.call("#4a4e54", 0.80, 0.15, "metal_plate_diff.jpg", "", 1.6)
+	_mat_lib["sign_pole"] = mk.call("#7c8086", 0.62, 0.45, "metal_plate_diff.jpg", "", 1.4)
+	# 招牌/販卖机
+	_mat_lib["sign_r"] = mk.call("#c03028", 0.60, 0.05)
+	_mat_lib["sign_b"] = mk.call("#2857a8", 0.60, 0.05)
+	_mat_lib["sign_g"] = mk.call("#28784a", 0.60, 0.05)
+	_mat_lib["sign_o"] = mk.call("#d17828", 0.60, 0.05)
+	_mat_lib["sign_w"] = mk.call("#e0e0d8", 0.62, 0.05)
+	_mat_lib["soda_red"] = mk.call("#c02929", 0.30, 0.15)
+	_mat_lib["soda_blue"] = mk.call("#2859c0", 0.30, 0.15)
+	_mat_lib["rubber"] = mk.call("#17191b", 0.97, 0.0)
+	_mat_lib["tent"] = mk.call("#5a6048", 0.94, 0.0, "plywood_diff.jpg", "", 2.0)
+	# 和纸灯笼(暖白自发光;街灯/鸟居前灯)
+	var lant := StandardMaterial3D.new()
+	lant.albedo_color = Color(1.0, 0.92, 0.76, 1.0)
+	lant.emission_enabled = true
+	lant.emission = Color(1.0, 0.82, 0.55, 1.0)
+	lant.emission_energy_multiplier = 1.4
+	lant.roughness = 0.45
+	_mat_lib["lamp"] = lant
 	return _mat_lib
+
+
+## 公开材质库(秋津市 GLB 按材质名重贴用)
+static func mat_lib() -> Dictionary:
+	return _mats()
+
+
+## 材质名 → PBR(未注册名回退 rust,不崩)
+static func mat_named(nm: String) -> Material:
+	var lib := _mats()
+	return lib.get(nm, lib["rust"])
 
 
 ## GLB → 按材质名重贴 PBR 的 ArrayMesh(缓存;供 MultiMesh 批绘/单实例共用)

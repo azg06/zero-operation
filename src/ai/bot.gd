@@ -286,10 +286,20 @@ var _dist_p := 999.0                # 距玩家距离缓存
 var _anim_lod := 0                  # 动画 LOD:0=完整(含脚部 IK) 1=简化腿 2=极简(腿摆+不演上半身/持枪)
 # ---- 战场噪音静态日志(听觉感知;cap 48 条环形丢弃) ----
 static var _noise_log: Array = []
-var _crew_pose := ""                # 乘员姿态日志状态:"" / "seat" / "hidden"(仅状态变化时打印)
+var _crew_pose := ""                # 乘员姿态日志状态:"" / "seat" / "ride" / "hidden"
+var _ride_ik_t := 0.0                # 骑姿 IK 重解计时(骑手多, 每帧解会拖垮帧率)
+var _ride_last_steer := 0.0          # 上次解 IK 时的转向量(转向变化才重解)
 # ---- 门户模式(团队死斗 TDM / 大逃杀 BR) ----
 var nav_goal := Vector3.ZERO        # 门户导航点(TDM 巡逻 / BR 物资·进圈)
 var nav_goal_set := false
+# ---- 小队级 A* 路线航点(960m 城区; 由 AIDirector 每拍分发) ----
+var nav := PackedVector2Array()  # 航点序列(世界 x,z; Vector2.y 存 z)
+var nav_i := 0                       # 当前航点索引
+var nav_t := 0.0                     # 当前航点已等待时长(>2.5s 强制跳过, 防"航点在墙那边"永久卡死)
+# ---- 碰撞帧计数(--test-balance 诊断用; 每 12s 清零) ----
+var blk_frames := 0                  # 建筑碰撞修正帧数
+var veh_blk_frames := 0              # 载具碰撞修正帧数
+var _blk_win_t := 0.0
 var br_phase := ""                  # BR 阶段: jump | loot | zone | final
 var br_land_target := Vector3.ZERO  # 跳伞落点
 var br_jump_decided := false        # 落点已决策(单次)
@@ -542,8 +552,9 @@ func formation_pos() -> Vector3:
 	var right := Vector3(ca, 0, -sa)
 	var fwd := Vector3(-sa, 0, -ca)
 	var fp := Vector3(f.pos.x + right.x * o.x + fwd.x * o.y, f.pos.y, f.pos.z + right.z * o.x + fwd.z * o.y)
-	if G.ground_h.is_valid():
-		fp.y = G.ground_h.call(fp.x, fp.z)
+	# ★2026-09-11 与玩家同步: 接地走 stand_h(walk_ 面优先), 否则秋津市的楼梯/站台
+	#   对 AI 也是"上不去的台阶"(y 永远贴地形 0)。
+	fp.y = G.stand_h(f.y, fp.x, fp.z)
 	fp = Utils.move_collide(fp, 0.38, 1.75)
 	return fp
 
@@ -574,8 +585,7 @@ func _go_down(attacker) -> void:
 ## 玩家救治复活:回血起身、武器归位、恢复编队
 func revive(p_pos: Vector3) -> void:
 	pos = Utils.move_collide(p_pos, 0.38, 1.75)
-	if G.ground_h.is_valid():
-		pos.y = G.ground_h.call(pos.x, pos.z)
+	pos.y = G.stand_h(pos.y, pos.x, pos.z)
 	health = 100
 	alive = true
 	downed = false
@@ -1324,6 +1334,55 @@ func _unstuck_override() -> Vector3:
 
 
 ## 互挤推开:附近 1.2m 内其他 bot 互相推开(防扎堆/互堵)
+## 接收小队 A* 路线(世界 x,z 航点)。★跳过脚下首个航点: A* 起点是格中心, 若格中心
+## 恰好落在 bot 身后, 硬走会先掉头。
+func set_nav(pts: PackedVector2Array) -> void:
+	nav = pts
+	nav_i = 0
+	nav_t = 0.0
+	while nav_i < nav.size():
+		var w := nav[nav_i]
+		if Vector2(w.x - pos.x, w.y - pos.z).length() < 9.0:
+			nav_i += 1
+		else:
+			break
+
+
+## 取当前航点并推进。★推进三条件(任一即推进): 到点(<6.5m) / 已越过(下一航点更近) /
+## 同一航点停留 >2.5s。旧版只有"<5m"→ 航点落在墙那边(或 bot 被挡)就**永久卡死**。
+## 返回 Vector2.ZERO = 没有可用航点。
+func _nav_wp(dt: float) -> Vector2:
+	if nav_i >= nav.size():
+		return Vector2.ZERO
+	nav_t += dt
+	var w := nav[nav_i]
+	var d := Vector2(w.x - pos.x, w.y - pos.z).length()
+	var adv := d < 6.5
+	if not adv and nav_i + 1 < nav.size():
+		var nx := nav[nav_i + 1]
+		if Vector2(nx.x - pos.x, nx.y - pos.z).length() < d - 0.5:
+			adv = true              # 已经越过当前航点
+	if nav_t > 2.5:
+		adv = true                  # 兜底: 卡住太久也跳过
+	if adv:
+		nav_i += 1
+		nav_t = 0.0
+		if nav_i >= nav.size():
+			return Vector2.ZERO
+		w = nav[nav_i]
+	return w
+
+
+## 前方是否被挡: **建筑 raycast + 载具前瞻**。
+## ★必须查载具: `Utils.raycast_world` 只收建筑 colliders, 而 60 台载具会把 bot 顶回去
+## (实测被推 106 帧/12s, 表现为"贴着车打转")。
+func _bot_blocked(origin: Vector3, dir: Vector3, dist: float) -> bool:
+	if Utils.raycast_world(origin, dir, dist) != null:
+		return true
+	var to: Vector3 = origin + dir.normalized() * (dist + 0.9)
+	return Vehicle.vehicle_collide(to, 0.38).distance_to(to) > 0.01
+
+
 func _push_away_bots() -> void:
 	# [PERF] 帧错峰:每 12 帧一次、按 id 错开(原 _push_t 固定 0.2s 重置使所有 bot 同帧执行
 	# O(n²) 分离检测 → 周期性尖峰;改为帧错峰后尖峰摊平到 12 帧,稳定 1%Low)
@@ -1335,12 +1394,19 @@ func _push_away_bots() -> void:
 		var dx: float = pos.x - b.pos.x
 		var dz: float = pos.z - b.pos.z
 		var d2 := dx * dx + dz * dz
-		if d2 < 1.21 and d2 > 1e-6:
+		if d2 < 0.81 and d2 > 1e-6:
+			# ★分离推力接线(2026-09-12):原实现算出 push 后**从未应用**, bot 之间允许重叠。
+			#   现在真正把位移落到 pos 上(双方各退一半), 并做一次 move_collide 校验 ——
+			#   直接改 pos 会把 bot 推进墙体。本函数每 12 帧一次、命中半径仅 0.9m,
+			#   调用开销可忽略; 高度随后由 stand_h 统一贴合。
 			var d := sqrt(d2)
-			var push := (1.1 - d) * 0.5
-			pos.x += dx / d * push
-			pos.z += dz / d * push
-
+			var push := (0.9 - d) * 0.35
+			var inv := 1.0 / d
+			var moved: Vector3 = Utils.move_collide(
+				Vector3(pos.x + dx * inv * push * 0.5, pos.y, pos.z + dz * inv * push * 0.5),
+				0.38, 1.75)
+			pos.x = moved.x
+			pos.z = moved.z
 
 ## 攻点计划:围点分配角度位 + 侧翼方向;机枪/狙殿后压制
 func _set_assault_plan(f) -> void:
@@ -1621,11 +1687,13 @@ func _exit_vehicle() -> void:
 	state = "move"
 	cover_valid = false
 	mesh.visible = true
-	var leg_l: Node3D = _ar_leg_l
-	var leg_r: Node3D = _ar_leg_r
-	if leg_l != null:
-		leg_l.visible = true
-		leg_r.visible = true
+	# 下车恢复手骨上的武器(骑摩托时被隐藏)
+	var gm2: Node3D = mesh.get_meta("gun_mount") if mesh.has_meta("gun_mount") else null
+	if gm2 != null:
+		gm2.visible = true
+	# 释放骨架 global pose override(否则步行时腿会僵在坐姿/骑姿)
+	if _ar_skel != null:
+		_ar_skel.clear_bones_global_pose_override()
 	if v != null:
 		pos = Vector3(v.pos.x + 2.4, v.pos.y, v.pos.z)
 		pos = Utils.move_collide(pos, 0.38, 1.75)
@@ -1844,6 +1912,8 @@ func _drive(dt: float) -> void:
 	# ---- 乘员模型:jeep 敞篷坐姿 / 坦克·步战·防空封闭装甲乘员保持隐藏 ----
 	if v.type == "jeep":
 		_crew_sit_pose(v, v.seat_world(), "驾驶")
+	elif v.type == "motorcycle":
+		_crew_ride_pose(v, dt)   # 骑手可见(踩踏板 + 前倾 + 双手抓把)
 	else:
 		# 坦克/步战/防空:封闭装甲乘员不可见(登车已隐藏,驾驶中保持,不出现舱盖探身)
 		mesh.visible = false
@@ -1851,27 +1921,23 @@ func _drive(dt: float) -> void:
 			_crew_pose = "hidden"
 			print("[CREW] bot=%d 驾驶中 %s 封闭装甲乘员隐藏" % [id, v.type])
 
-
 ## 乘员坐姿(吉普敞篷:驾驶位/乘客位可见坐姿;封闭装甲隐藏)
+## 落位/腿姿与玩家 player.gd::_pose_seated 同源(RidePose), 否则同车两人会差半个身位。
 func _crew_sit_pose(v, world_seat: Vector3, seat_name: String) -> void:
 	if v.type == "jeep":
 		mesh.visible = true
 		mesh.rotation_order = EULER_ORDER_YXZ
-		mesh.position = Vector3(world_seat.x, world_seat.y - 1.32, world_seat.z)
-		mesh.rotation = Vector3(0, v.yaw, 0)
-		if _ar_ganim != null:
-			# GLB 骨骼版坐姿:停 locomotion,大腿前抬+小腿垂直(骨骼版)
-			if _ar_ganim.current_animation != "":
-				_ar_ganim.stop()
-			var sk2 := _ar_skel
-			if sk2 != null:
-				for sgn in ["L", "R"]:
-					var ti := sk2.find_bone("Thigh" + sgn)
-					if ti >= 0:
-						sk2.set_bone_pose_rotation(ti, Quaternion(Vector3(1, 0, 0), 1.35))
-					var si := sk2.find_bone("Shin" + sgn)
-					if si >= 0:
-						sk2.set_bone_pose_rotation(si, Quaternion(Vector3(1, 0, 0), -1.35))
+		var rel: Vector3 = (world_seat - v.pos).rotated(Vector3.UP, -v.yaw)
+		var org := Vector3(rel.x, RidePose.JEEP_HIP_Y - 1.00, RidePose.JEEP_HIP_Z)
+		mesh.global_transform = v.mesh.global_transform * Transform3D(Basis(), org)
+		if _ar_ganim != null and _ar_ganim.current_animation != "":
+			_ar_ganim.stop()      # GLB 里没有坐姿动画, 停掉后自己摆骨骼
+		var sk2 := _ar_skel
+		if sk2 != null:
+			RidePose.seat_legs(sk2, org)
+			var bi := sk2.find_bone("Spine")
+			if bi >= 0:
+				sk2.set_bone_pose_rotation(bi, Quaternion(Vector3(1, 0, 0), -0.06))
 		else:
 			var leg_l: Node3D = _ar_leg_l
 			var leg_r: Node3D = _ar_leg_r
@@ -1885,9 +1951,6 @@ func _crew_sit_pose(v, world_seat: Vector3, seat_name: String) -> void:
 				if leg_l_knee != null:
 					leg_l_knee.rotation.x = -1.35
 					leg_r_knee.rotation.x = -1.35
-			var rig: Node3D = _ar_rig
-			if rig != null:
-				rig.rotation.x = 0.1
 		if _crew_pose != "seat":
 			_crew_pose = "seat"
 			print("[CREW] bot=%d %s位坐姿 seat=%s" % [id, seat_name, world_seat])
@@ -1896,6 +1959,50 @@ func _crew_sit_pose(v, world_seat: Vector3, seat_name: String) -> void:
 		if _crew_pose != "hidden":
 			_crew_pose = "hidden"
 			print("[CREW] bot=%d %s位封闭装甲乘员隐藏" % [id, seat_name])
+
+
+## 摩托骑姿(bot, 2026-09-11 v2) —— 与玩家 player.gd::_pose_rider 同源。
+## ★旧版与玩家旧版同病(实拍"人直插车里 + 双臂 T 字张开"): 给 UpperArm 硬编码绕 X 的角度,
+##   而士兵 GLB 的 rest 是**端枪姿态**(双手收在身前); 落位又照搬吉普的 1.32 下沉。
+## 现在: 落位按车体空间臀部落; 腿/手臂全走骨架 2-bone IK(RidePose), 手抓车把握把 ——
+##   握把挂在 Steer_F 下, 左右转向时手臂自动跟随。
+## 性能: 60 名骑手每帧解 IK 需要 480 次骨架重算 ⇒ 只在"首次 / 转向变化 >0.06 / 每 0.25s"重解。
+func _crew_ride_pose(v, dt: float) -> void:
+	mesh.visible = true
+	mesh.rotation_order = EULER_ORDER_YXZ
+	var org: Vector3 = RidePose.MOTO_HIP - Vector3(0.0, 1.00, 0.0)
+	mesh.global_transform = v.mesh.global_transform * Transform3D(Basis(), org)
+	if _ar_ganim != null and _ar_ganim.current_animation != "":
+		_ar_ganim.stop()
+	# 骑摩托双手扶把, 不端枪
+	var gm: Node3D = mesh.get_meta("gun_mount") if mesh.has_meta("gun_mount") else null
+	if gm != null:
+		gm.visible = false
+	var sk := _ar_skel
+	if sk == null:
+		return
+	_ride_ik_t -= dt
+	if _crew_pose != "ride" or _ride_ik_t <= 0.0 or absf(v.steer - _ride_last_steer) > 0.06:
+		_ride_ik_t = 0.25
+		_ride_last_steer = v.steer
+		RidePose.ride_legs(sk, org)
+		for bn in [["Spine", -0.30], ["Chest", -0.12]]:
+			var bi := sk.find_bone(String(bn[0]))
+			if bi >= 0:
+				sk.set_bone_pose_rotation(bi, Quaternion(Vector3(1, 0, 0), float(bn[1])))
+		if not v.has_meta("_grips"):
+			v.set_meta("_grips", [v.mesh.find_child("Grip30", true, false),
+				v.mesh.find_child("Grip-30", true, false)])
+		var gp: Array = v.get_meta("_grips")
+		if gp.size() >= 2 and gp[0] != null and gp[1] != null:
+			var inv: Transform3D = v.mesh.global_transform.affine_inverse()
+			RidePose.ik_chain(sk, "UpperArmR", "ForearmR", "HandR",
+				inv * (gp[0] as Node3D).global_position, Vector3(1.0, -0.8, -0.25))
+			RidePose.ik_chain(sk, "UpperArmL", "ForearmL", "HandL",
+				inv * (gp[1] as Node3D).global_position, Vector3(-1.0, -0.8, -0.25))
+	if _crew_pose != "ride":
+		_crew_pose = "ride"
+		print("[CREW] bot=%d 摩托骑姿 seat=%s" % [id, v.seat_world()])
 
 
 ## 炮手位/乘客位 AI:炮塔瞄准开火(吉普乘客只随车观察,不开火)
@@ -1989,8 +2096,12 @@ func update_bot(dt: float) -> void:
 	# 无可辨差异;被击中/受伤路径在 damage() 里不受影响)。脚本开销大头。
 	_ai_tick += 1
 	# 尸体不降频:死亡布娃娃全帧率播放(旧版远距尸体 1/3 帧率慢动作倒地)
+	# ★2026-09-11 修"敌我步伐太慢": 旧版这里直接 `return` ⇒ **移动积分/朝向/动画也只剩 1/3 帧**,
+	#   远处(>90m)AI 实际速度只有 1.5 m/s(目标 4.6), 玩家看到的就是"全军慢动作散步"。
+	#   现在降频帧把 dt 补成 3 倍: AI 决策/感知仍按 1/3 频率跑(性能收益不变),
+	#   而位移/朝向/步态按真实时间推进。单步 4.6*0.0375=0.17m << 碰撞半径 0.38 ⇒ 不会穿墙。
 	if alive and G.player != null and pos.distance_to(G.player.pos) > 90.0 and _ai_tick % 3 != 1:
-		return
+		dt *= 3.0
 	# 我方队友倒地:平躺姿态、停止一切行为(由战役控制器救治/撤离)
 	if downed:
 		downed_t += dt
@@ -2438,6 +2549,18 @@ func update_bot(dt: float) -> void:
 					nav_goal_set = false  # 到位:下个 think 重新决策
 		_:
 			pass  # idle:原地警戒
+	# ★小队 A* 航点覆盖(960m 城区必需): 有路线时朝当前航点走, 到点/越过/超时自动推进。
+	#   旧版只朝旗点走直线 ⇒ 200m 直线上布满建筑, 撞墙原地打转(实测 148s 只走 70m)。
+	if (state == "move" or state == "assault") and nav_i < nav.size():
+		var wp := _nav_wp(dt)
+		if wp != Vector2.ZERO:
+			var aw_x := wp.x - pos.x
+			var aw_z := wp.y - pos.z
+			var aw_d := Vector2(aw_x, aw_z).length()
+			if aw_d > 0.5:
+				move_x = aw_x / aw_d
+				move_z = aw_z / aw_d
+				speed = maxf(speed, 4.6)
 	# 卡死脱困覆盖:分层脱困阶段强制移动(绕行/重寻路),不再原地发呆
 	var usk := _unstuck_override()
 	if usk != Vector3.ZERO:
@@ -2454,23 +2577,23 @@ func update_bot(dt: float) -> void:
 		move_z /= ml
 		if (Engine.get_process_frames() + id * 7) % 3 == 0 or not _avoid_ok:
 			var origin := Vector3(pos.x, pos.y + 0.9, pos.z)
-			var hit = Utils.raycast_world(origin, Vector3(move_x, 0, move_z), 2.2)
+			var hit := _bot_blocked(origin, Vector3(move_x, 0, move_z), 2.2)
 			_avoid_ok = true
-			if hit != null:
-				var turned := false
+			if hit:
+				# ★避障转向接线(2026-09-12):原实现算出 nx/nz 后**没有写回** move_x/move_z,
+				#   绕障转向从未生效 —— bot 撞上障碍只会硬顶, 全靠分层脱困兜底。
+				#   现在按 左右 × 由近到远(±0.6 → ±1.2, 叠加 avoid_dir 偏置) 试探,
+				#   命中第一个可行方向就采用并跳出; 四个方向都被挡则保持原方向, 交给脱困接管。
 				for a in [0.6, -0.6, 1.2, -1.2]:
 					var ca := cos(a + avoid_dir)
 					var sa := sin(a + avoid_dir)
 					var nx: float = move_x * ca - move_z * sa
 					var nz: float = move_x * sa + move_z * ca
-					if Utils.raycast_world(origin, Vector3(nx, 0, nz), 2.2) == null:
+					if not _bot_blocked(origin, Vector3(nx, 0, nz), 2.2):
 						move_x = nx
 						move_z = nz
-						turned = true
 						break
-				if not turned:
-					move_x = -move_x
-					move_z = -move_z
+			# 缓存本次(可能已转向的)方向, 供中间帧复用
 			_avoid_cache = Vector2(move_x, move_z)
 		else:
 			move_x = _avoid_cache.x
@@ -2484,14 +2607,25 @@ func update_bot(dt: float) -> void:
 		vel.z = Utils.damp(vel.z, 0, 10, dt)
 	pos.x += vel.x * dt
 	pos.z += vel.z * dt
+	var _pb := pos
 	pos = Utils.move_collide(pos, 0.38, 1.75)
+	if _pb.distance_squared_to(pos) > 1e-6:
+		blk_frames += 1
 	# 载具实体碰撞
+	var _pv := pos
 	pos = Vehicle.vehicle_collide(pos, 0.38)
+	if _pv.distance_squared_to(pos) > 1e-6:
+		veh_blk_frames += 1
+	_blk_win_t += dt
+	if _blk_win_t >= 12.0:
+		_blk_win_t = 0.0
+		blk_frames = 0
+		veh_blk_frames = 0
 	# 互挤推开:附近其他 bot 互相分离(防扎堆/互堵)
 	_push_away_bots()
-	# 地形贴合
-	if G.ground_h.is_valid():
-		pos.y = G.ground_h.call(pos.x, pos.z)
+	# 地形贴合: ★stand_h = 可行走面(walk_)优先, 无则回退地形高度场。
+	#   秋津市可走面全在 walk_ 上(楼梯/站台/室内/桥), 只读 ground_h 会让 AI 卡在台阶前。
+	pos.y = G.stand_h(pos.y, pos.x, pos.z)
 
 	# ---- 朝向(平滑分档限速 + 上下半身分离:身体朝目标,腿朝移动方向) ----
 	var want_yaw := yaw

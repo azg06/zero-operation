@@ -544,7 +544,7 @@ func update_player_jump(p, dt: float) -> void:
 	p.spawn_protect = maxf(0.0, p.spawn_protect - dt)
 	var md: Vector2 = G.input_sys.consume_mouse()
 	p.apply_look(md.x, md.y)
-	p.eye_height = 1.62
+	p.eye_height = 1.70   # 与 player.gd 站立眼高一致(低于此值第一人称胸口会被 near 裁掉)
 	if _player_jump == "plane":
 		p.pos = plane_pos + Vector3(0, 0.5, 0)
 		p.vel = Vector3.ZERO
@@ -610,7 +610,7 @@ func _player_update_fall_physics(p, dt: float) -> void:
 
 func _camera_from_player(p, dt: float) -> void:
 	var cam := G.camera
-	cam.global_position = p.pos + Vector3(0, 1.62, 0)
+	cam.global_position = p.pos + Vector3(0, 1.70, 0)   # 同 player.eye_height 站立值
 	cam.rotation_order = EULER_ORDER_YXZ
 	var wind := sin(G.time * 2.0) * 0.012 if _player_jump == "freefall" else 0.0
 	cam.rotation.y = p.yaw + wind
@@ -1141,14 +1141,15 @@ func _build_loot_weapon(h: Node3D, wid: String) -> void:
 	var def = WeaponsData.W().get(wid, null)
 	var kind: String = def.kind if def != null else "rifle"
 	if WeaponModels.has_glb(wid):
-		var g := Node3D.new()
-		if WeaponModels.build_from_glb(wid, g):
-			g.scale = Vector3.ONE * 1.35
-			g.rotation = Vector3(0, Utils.rand(TAU), 0)   # 平躺随机朝向
-			g.position.y = 0.22
-			h.add_child(g)
+		# 改名 g→gg:与下方函数体的 g 同名, 会触发 CONFUSABLE_LOCAL_DECLARATION
+		var gg := Node3D.new()
+		if WeaponModels.build_from_glb(wid, gg):
+			gg.scale = Vector3.ONE * 1.35
+			gg.rotation = Vector3(0, Utils.rand(TAU), 0)   # 平躺随机朝向
+			gg.position.y = 0.22
+			h.add_child(gg)
 			return
-		g.queue_free()
+		gg.queue_free()
 	var metal := WorldBuilder._std_tex(Color(0.32, 0.35, 0.4), 0.45, "metal_plate", 0.5)
 	var wood := WorldBuilder._std_tex(Color(0.55, 0.4, 0.25), 0.6, "plywood", 0.1)
 	var g := Node3D.new()

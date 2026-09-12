@@ -17,7 +17,27 @@ uniform vec3 pal_accent : source_color = vec3(0.0, 1.0, 0.53);
 uniform vec3 pal_gear2 : source_color = vec3(0.34, 0.35, 0.27);
 uniform float roughness : hint_range(0.0, 1.0) = 0.92;
 
+// ★第一人称身体专用:俯角看到底时躯干"让位"(默认关闭 ⇒ NPC 完全不受影响)。
+// 眼位离胸顶只有 25cm,胸口一旦可见就必然把脚挡死(几何无解:视线越过胸顶前缘落到
+// 地面的距离 = 1.65·胸前面/眼到胸顶高),所以低头到底时按模型高度把躯干逐段剔除,
+// 露出大腿/靴子 —— BF/COD 同款处理。只删"视图",网格/骨骼/影子都不动。
+uniform float fp_yield = 0.0;     // 0=正常  1=躯干段完全让位(整段抖动溶解,无硬切边)
+
+varying float v_fp_h;
+
+void vertex() {
+	v_fp_h = VERTEX.y;            // 蒙皮后的模型空间高度(骨骼系 = 世界高度,身体只绕 Y 转)
+}
+
 void fragment() {
+	// 躯干段(0.92~1.55m)按 fp_yield 做屏幕有序抖动溶解:整段一起淡出,
+	// 不会留下"被横切一刀、从断面看进胸腔内部"的硬边。
+	if (fp_yield > 0.002 && v_fp_h > 0.92 && v_fp_h < 1.55) {
+		float thr = fract(sin(dot(FRAGCOORD.xy, vec2(12.9898, 78.233))) * 43758.5453);
+		if (thr < fp_yield) {
+			discard;
+		}
+	}
 	int idx = clamp(int(round(COLOR.r * 10.0)) - 1, 0, 7);
 	vec3 cols[8] = vec3[8](
 		pal_uniform, pal_vest, pal_helmet, pal_gear,

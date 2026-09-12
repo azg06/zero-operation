@@ -547,6 +547,15 @@ static func build_aa() -> Node3D:
 	return g
 
 
+## 突击摩托:无炮塔、无内饰(车把/仪表已在 GLB 内),仅接轮子契约。
+static func build_motorcycle() -> Node3D:
+	var g := _load_veh("motorcycle", "Motorcycle")
+	if g == null:
+		return _legacy_build_jeep()
+	_veh_wire(g, false)
+	return g
+
+
 ## 载入 GLB 外壳并按名字前缀重贴金属板/锈蚀材质
 static func _load_veh(id: String, root_name: String) -> Node3D:
 	var path := VEH_GLB + id + ".glb"
@@ -589,6 +598,8 @@ static func _veh_mats(g: Node3D, id: String) -> void:
 			paint_base = Color.html("#55614a")
 		"apc":
 			paint_base = Color.html("#5d6a50")
+		"motorcycle":
+			paint_base = Color.html("#4f5a44")
 		_:
 			paint_base = Color.html("#6a6a52")
 	# [FIX] 漆面纹理换 gun_metal(avg 160) —— 旧 gun_poly 是黑色聚合物纹理(avg 64),
@@ -597,10 +608,18 @@ static func _veh_mats(g: Node3D, id: String) -> void:
 	# lightened 0.38+ 后侧面才有"上漆"观感
 	var ptex := "gun_metal_diff.jpg"
 	var pnor := "gun_metal_nor.jpg"
+	# 摩托体积小,三档明暗差太大显"花";收紧到 0.34~0.40 保持整车一体
+	var lo := 0.30
+	var mid := 0.44
+	var hi := 0.38
+	if id == "motorcycle":
+		lo = 0.34
+		mid = 0.40
+		hi = 0.37
 	var paint := [
-		_vstd(paint_base.lightened(0.38), 0.78, 0.05, ptex, pnor, 2.5),
-		_vstd(paint_base.lightened(0.44), 0.76, 0.05, ptex, pnor, 2.5),
-		_vstd(paint_base.lightened(0.30), 0.8, 0.05, ptex, pnor, 2.5),
+		_vstd(paint_base.lightened(hi), 0.78, 0.05, ptex, pnor, 2.5),
+		_vstd(paint_base.lightened(mid), 0.76, 0.05, ptex, pnor, 2.5),
+		_vstd(paint_base.lightened(lo), 0.8, 0.05, ptex, pnor, 2.5),
 	]
 	var rubber := _vstd(Color.html("#17181a"), 0.95, 0.0, ptex, pnor, 4.0)
 	var track := _vstd(Color.html("#4a4c46"), 0.6, 0.75, "gun_dark_diff.jpg", "gun_dark_nor.jpg", 5.0)
@@ -625,6 +644,16 @@ static func _veh_mats(g: Node3D, id: String) -> void:
 			picked = hub
 		elif nm.contains("Head") or nm.contains("Light"):
 			picked = chrome
+		# 摩托裸金属件(2026-09-11): 前叉/车把/转向柱/三角台/后视镜/拉杆/轮辐/刹车盘/脚踏
+		elif nm.contains("Fork") or nm.contains("Handlebar") or nm.contains("Steerer") \
+				or nm.contains("Clamp") or nm.contains("Mirror") or nm.contains("Lever") \
+				or nm.contains("Disc") or nm.contains("Spoke") or nm.contains("Peg"):
+			picked = hub
+		# 摩托深色件: 座垫/链条/握把/仪表/摇臂/减震/排气(哑光黑; 排气用亮金属会在侧视压住后轮太扎眼)
+		elif nm.contains("Seat") or nm.contains("Chain") or nm.contains("Grip") \
+				or nm.contains("Dash") or nm.contains("Swingarm") or nm.contains("Shock") \
+				or nm.contains("Muffler") or nm.contains("Pipe"):
+			picked = dark
 		elif nm.contains("FuelDrum") or nm.contains("DrumBracket"):
 			picked = rust
 		elif nm.contains("Barrel") or nm.contains("Brake") or nm.contains("Breech") or nm.contains("Receiver") \
@@ -684,9 +713,16 @@ static func _jeep_cockpit(g: Node3D) -> void:
 		back.position = Vector3(sx, 1.18, 0.66)
 		back.rotation.x = 0.16
 		g.add_child(back)
+	# 方向盘: 第一人称双手抓盘点(GripL/GripR, 9 点 / 3 点方向)挂在盘节点下随盘倾斜。
 	var sw := Node3D.new()
+	sw.name = "SteerWheel"
 	sw.position = Vector3(-0.45, 1.38, -0.28)
 	sw.rotation.x = -0.62
+	for gs in [1.0, -1.0]:
+		var gm := Marker3D.new()
+		gm.name = "GripR" if gs > 0.0 else "GripL"
+		gm.position = Vector3(gs * 0.145, 0.0, 0.0)
+		sw.add_child(gm)
 	var rim := MeshInstance3D.new()
 	var tor := TorusMesh.new()
 	tor.inner_radius = 0.132

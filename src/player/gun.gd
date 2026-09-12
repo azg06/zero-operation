@@ -1,7 +1,7 @@
 class_name Gun extends RefCounted
 ## 枪械手感(对应 weapons.js 的 Gun 类):射击/换弹/后座/视角模型动画
 
-const HIP_POS := Vector3(0.05, -0.155, -0.34)  # [FIX 枪位] x 0.17→0.05:旧值画面偏右 31%,参考战地/全境系持枪应中心偏右约 9%
+const HIP_POS := Vector3(0.05, -0.155, -0.34)  # [FIX 枪位] x 0.17→0.05:旧值画面偏右 31%,参考战地/全境系持枪应中心偏右约 9%  # [FIX 枪位] x 0.17→0.05:旧值画面偏右 31%,参考战地/全境系持枪应中心偏右约 9%
 const ADS_POS := Vector3(0, -0.0755, -0.26)
 # 手臂肘部屏外锚点(枪身局部空间):臂筒自手腕延伸至屏幕外,消除断臂。
 # 锚点必须保持 z < -group.z(约 -0.34),即位于视角相机前方;旧值在相机后方,
@@ -34,6 +34,7 @@ var bloom := 0.0                # 连射扩散
 var kick_z := 0.0
 var kick_rot := 0.0             # 视角模型后坐
 var draw_t := 1.0               # 拔枪动画
+var _dbg_pos := 0               # 诊断: 枪位构成只打印前 3 帧
 var trigger_held := false
 var fire_mode := 0              # 0=全自动 1=半自动(B 键切换;仅步枪可切换)
 var equipped := false
@@ -52,7 +53,7 @@ var inspect_t := 0.0
 var inspect_cam_pitch := 0.0
 var inspect_cam_yaw := 0.0
 var inspect_cam_roll := 0.0
-var _inspect_was_reloading := false  # [保留] 检视中断恢复逻辑的预留位
+# [已移除] _inspect_was_reloading —— 原为"检视中断恢复"预留位, 从未接线, 2026-09-12 清理未使用私有变量警告
 var _inspect_pump_snapshot := 0.0
 var _inspect_bolt_snapshot := 0.0
 var _inspect_cylinder_snapshot := 0.0
@@ -110,6 +111,16 @@ var _right_hand: Node3D = null
 var _left_hand: Node3D = null
 var _right_arm: Node3D = null
 var _left_arm: Node3D = null
+# 骨骼手臂(2026-09-11):挂在 vm_camera 层的单例, 每个 Gun 实例共用一把。
+# 用 preload 取类型而非裸 class_name —— check-only 单脚本模式解析不到全局类缓存。
+const FpArmsScript := preload("res://src/player/fp_arms.gd")
+## ★第一人称手臂整体放大系数(1.0 = FP 模型原尺寸)。
+## FP 手臂按士兵 0.80 缩比建模:实测上臂 0.324 / 前臂 0.329,而士兵 GLB 真实臂段是
+## 0.332 / 0.421(前臂短 22%、整臂短 15%)⇒ 游戏内表现为"手很小、前臂细到几乎看不见"。
+## 1.25 与载具手臂 RIDE_SEG_SCALE 同量级,把手臂放回与身体协调的尺寸。
+const FP_ARM_SCALE := 1.25
+var fp_arms: FpArmsScript = null
+static var _shared_arms: FpArmsScript = null
 var _hand_l0 := Vector3.ZERO
 var _hand_l1 := Vector3.ZERO
 var hand_l2 := Vector3(0.03, -0.34, 0.02)
@@ -322,6 +333,7 @@ func equip() -> void:
 		_holster_tw.kill()
 	_holster_tw = null
 	group.visible = true
+	_sync_arms_visible()
 	draw_t = 0
 	reloading = false
 	if reload_ctl != null:
@@ -341,6 +353,66 @@ func equip() -> void:
 	# 新枪接管程序化运动弹簧:不同重量从零开始建立,不继承旧枪残量
 	if player != null and player.motion != null:
 		player.motion.on_weapon_equipped(self)
+	_fp_arms_setup()
+
+
+## 骨骼手臂接管:隐藏本枪的程序化手/臂筒(仅视觉), 在 vm_camera 层挂一个共用 FpArms。
+## 握把锚点(_right_hand/_left_hand)保持不变 —— 换弹/检视/开镜仍按原逻辑驱动它们,
+## 骨骼手臂每帧把腕部 IK 到锚点上, 因此肘部会跟着自然弯折(旧直筒做不到)。
+func _fp_arms_setup() -> void:
+	if _right_arm != null:
+		_right_arm.visible = false
+	if _left_arm != null:
+		_left_arm.visible = false
+	if _right_hand != null:
+		_right_hand.visible = false
+	if _left_hand != null:
+		_left_hand.visible = false
+	if _shared_arms != null and is_instance_valid(_shared_arms) \
+			and _shared_arms.get_parent() != null:
+		fp_arms = _shared_arms
+		return
+	var host: Node = G.vm_camera if G.vm_camera != null else group.get_parent()
+	if host == null:
+		return
+	fp_arms = FpArmsScript.new()
+	fp_arms.name = "FpArms"
+	# ★整体放大(见 FP_ARM_SCALE):seg_scale 只缩放**零件几何**、不动位置(见 FpArms._place),
+	#   但 IK 用的 len_up/len_fore 必须同步乘同系数,否则肘位置与几何长度不符、接缝错位;
+	#   肩偏移与腕部下移也一起乘,保持"肘弯比例"和"手掌上沿与护木底面相切"的关系。
+	fp_arms.seg_scale = FP_ARM_SCALE
+	fp_arms.len_up = FpArmsScript.LEN_UP * FP_ARM_SCALE
+	fp_arms.len_fore = FpArmsScript.LEN_FORE * FP_ARM_SCALE
+	fp_arms.shoulder_off_l = FpArmsScript.SHOULDER_OFF_L * FP_ARM_SCALE
+	fp_arms.shoulder_off_r = FpArmsScript.SHOULDER_OFF_R * FP_ARM_SCALE
+	fp_arms.guard_drop = FpArmsScript.GUARD_DROP * FP_ARM_SCALE
+	host.add_child(fp_arms)
+	_shared_arms = fp_arms
+
+
+## 手臂(fp_arms)与枪(group)是**两个独立节点** —— 手臂挂在 vm_camera 层(全枪共用一把),
+## 枪是 group。所以收起枪时若不显式隐藏手臂, 手臂会**留在画面上**:
+## 实测"上载具后第一人称手臂仍然显示"(用户指出), 因为 enter_vehicle 只 `for g in guns:
+## g.holster()`, 而 holster 只把 group 设不可见。
+## 这里让手臂严格跟随**玩家身上是否还有可见武器** —— 装备/收起/切枪/上车全部自动一致。
+##
+## ★不能只看自己这把枪的 group.visible(2026-09-12 修):切枪时旧枪走的是带 Tween 的
+##   平滑收枪(0.12s), 而 Tween 结束的回调**晚于**新枪的装备回调执行 —— 那一刻旧枪
+##   早已 group.visible=false, 于是它把刚装备的新枪手臂一起隐藏(用户报"切枪之后手臂消失")。
+##   改为遍历玩家全部武器:只要还有任一把可见就保持手臂可见; 全部收起(上车/菜单)才隐藏。
+func _sync_arms_visible() -> void:
+	if fp_arms == null or not is_instance_valid(fp_arms):
+		return
+	var any_vis := false
+	if player != null and is_instance_valid(player):
+		for g2 in player.guns:
+			if g2 != null and is_instance_valid(g2) and g2.group != null \
+					and is_instance_valid(g2.group) and g2.group.visible:
+				any_vis = true
+				break
+	if not any_vis:
+		any_vis = group != null and is_instance_valid(group) and group.visible
+	fp_arms.visible = any_vis
 
 
 func holster(instant := false) -> void:
@@ -357,6 +429,7 @@ func holster(instant := false) -> void:
 			reload_ctl.on_holster()
 		_stop_inspect()
 		group.visible = false
+		_sync_arms_visible()
 		return
 	if reload_ctl != null:
 		reload_ctl.on_holster()
@@ -364,6 +437,7 @@ func holster(instant := false) -> void:
 	# 尚未真正上手的枪(初始化/换装时批量 holster)直接隐藏,避免同屏重叠
 	if not _holster_ready:
 		group.visible = false
+		_sync_arms_visible()
 		return
 	# 平滑收枪:从当前姿态(可能正在换弹)向屏幕外下方带惯性地收,不做瞬时隐藏
 	if _holster_tw != null and _holster_tw.is_valid():
@@ -380,7 +454,8 @@ func holster(instant := false) -> void:
 	tw.chain().tween_callback(func() -> void:
 		_holster_tw = null
 		if is_instance_valid(group):
-			group.visible = false)
+			group.visible = false
+			_sync_arms_visible())
 
 
 func can_ads() -> bool:
@@ -662,6 +737,11 @@ func update(dt: float) -> void:
 	g.rotation.x = -(1 - draw_t) * 0.9
 	# 冲刺时压低枪口
 	var sp: float = p.sprint_amount
+	if _dbg_pos < 3:
+		_dbg_pos += 1
+		print("[GUNPOS] hip=%s ads=%.2f draw_t=%.2f drop=%.3f sprint=%.2f reload_pose=%s kick_y=%.3f -> pos=%s" % [
+			_hip_pos, ads_amount, draw_t, draw_drop, sp, reload_pose, kick_y,
+			Vector3(g.position.x, g.position.y - sp * 0.06, g.position.z)])
 	g.position.y -= sp * 0.06
 	g.position.x -= sp * 0.05
 	g.rotation.x += -sp * 0.5
@@ -753,8 +833,12 @@ func update(dt: float) -> void:
 	# 臂筒:所有动画件(换弹/泵动/枪栓/左轮/检视)更新完毕后,再让手腕 → 肘锚点连续定向,
 	# 保证手部与泵体/枪机严格同帧同步,不出现手臂滞后或断臂。
 	_align_revolver_reload_wrist()
-	_point_arm(_left_arm, _left_hand.position, ELBOW_L)
-	_point_arm(_right_arm, _right_hand.position, ELBOW_R)
+	if fp_arms != null and fp_arms.ok:
+		# 骨骼手臂:腕部对齐握把锚点(与旧臂筒同一目标), 肘部真实弯折
+		fp_arms.solve(_right_hand, _left_hand)
+	else:
+		_point_arm(_left_arm, _left_hand.position, ELBOW_L)
+		_point_arm(_right_arm, _right_hand.position, ELBOW_R)
 	# 高倍率狙击镜 PIP:ADS 时隐藏镜筒实体/黑目镜,只留高透目镜、细分划与细镜口圈;
 	# 镜外完全透明(正常视野)。非 ADS 时恢复全黑镜筒,避免透明枪筒观感。
 	_update_pip_scope_visuals(g, ads_amount)

@@ -652,6 +652,16 @@ static func dispose_world() -> void:
 		G.world_group.queue_free()
 	G.world_group = null
 	G.map_fx = {}
+	# 可行走面索引随世界销毁(静态 GLB 地图专用;下一张图重建)
+	G.floor_boxes.clear()
+	G.floor_grid.clear()
+	G.floor_big.clear()
+	G.floor_active = false
+	# 可行驶面同理(否则换图后残留上一张图的桥面 → 载具被吸到空中)
+	G.drive_boxes.clear()
+	G.drive_grid.clear()
+	G.drive_big.clear()
+	G.drive_active = false
 
 
 ## ==================== 地图构建 ====================
@@ -765,12 +775,12 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 	# 每图时刻(决定太阳角度与天色;暗夜雷达站为夜晚)
 	# [9/6] city 13.0→15.3:正午顶光阴影全缩在脚下、画面平(对比度差/SSAO 不可辨的根因);
 	# 15.3 与 desert 对齐(下午斜光长影);16.3 实测过暗影响索敌,弃用
-	var tod_time := { "city": 15.3, "desert": 15.2, "snow": 10.0, "bt_jungle": 12.2, "bt_harbor": 16.4, "bt_peak": 22.0, "br_valley": 14.0 }
+	var tod_time := { "city": 15.3, "desert": 15.2, "snow": 10.0, "bt_jungle": 12.2, "bt_harbor": 16.4, "bt_peak": 22.0, "br_valley": 14.0, "akitsu": 15.2 }
 	sky3d.game_time_enabled = false
 	sky3d.tod.current_time = tod_time.get(theme, 12.5)
 	# 每图亮度系数表(修复全图过亮/雪地最严重;bt_peak 暗夜保持原值)
-	var exp_k: float = { "city": 0.86, "desert": 0.8, "snow": 0.66, "bt_jungle": 0.82, "bt_harbor": 0.86, "bt_peak": 1.0, "br_valley": 0.85 }.get(theme, 0.86)
-	var sun_k: float = { "city": 0.9, "desert": 0.85, "snow": 0.7, "bt_jungle": 0.9, "bt_harbor": 0.9, "bt_peak": 1.0, "br_valley": 0.88 }.get(theme, 0.9)
+	var exp_k: float = { "city": 0.86, "desert": 0.8, "snow": 0.66, "bt_jungle": 0.82, "bt_harbor": 0.86, "bt_peak": 1.0, "br_valley": 0.85, "akitsu": 1.50 }.get(theme, 0.86)
+	var sun_k: float = { "city": 0.9, "desert": 0.85, "snow": 0.7, "bt_jungle": 0.9, "bt_harbor": 0.9, "bt_peak": 1.0, "br_valley": 0.88, "akitsu": 0.92 }.get(theme, 0.9)
 	sky3d.fog_enabled = false          # 关闭天空着色器雾,统一用游戏深度/指数雾
 	sky3d.tonemap_exposure = 0.9
 	sky3d.sky.sun_light_energy = T.sun_energy * sun_k          # 太阳能量对齐原主题(×每图系数收敛过亮)
@@ -786,6 +796,7 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 		"bt_harbor": { "cov": 0.55, "cloud": 0.75, "wind": 1.1 },
 		"bt_peak": { "cov": 0.42, "cloud": 0.3, "wind": 1.6 },
 		"br_valley": { "cov": 0.5, "cloud": 0.62, "wind": 1.0 },
+		"akitsu": { "cov": 0.5, "cloud": 0.68, "wind": 1.0 },
 	}
 	var sc: Dictionary = sky_cfg.get(theme, sky_cfg["city"])
 	var sk = sky3d.sky
@@ -824,7 +835,8 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 	G.fog_base = [T.fog_near, T.fog_far]
 	G.map_fx["fog_density_base"] = 2.6 / T.fog_far      # update_map 跟随雾距设置
 	# 体积雾(默认 HIGH+ 开启;Web/低画质自动关闭,性能回退;城市去雾保持关闭)
-	var vfog := hi and not web and theme != "city" and theme != "tdm_city"
+	# akitsu 亦关闭:960m 图需保证远距离交火区(海滨/港区)可辨,雾只保留指数雾
+	var vfog := hi and not web and theme != "city" and theme != "tdm_city" and theme != "akitsu"
 	env.volumetric_fog_enabled = vfog
 	if vfog:
 		var fcol: Color = T.fog_color
@@ -866,6 +878,15 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 	fill.light_energy = 0.12 if T.night else 0.34
 	fill.rotation = sky3d.sun.rotation + Vector3(PI * 0.55, PI, 0)
 	wg.add_child(fill)
+
+	# ==================== 秋津市:全静态 GLB 城市(不走程序化管线) ====================
+	# 10 分区 GLB 按 extra.zones 世界摆位 → 按材质名重贴 PBR → col_ 注册碰撞 / walk_ 注册可行走面;
+	# 旗点/出生点/载具全读 extra;引擎侧不生成地面网格/散布/边界装饰(地表由 GLB 自带)。
+	if theme_id == "akitsu":
+		_akitsu_build(wg, T, minimap_rects, lv, web)
+		G.minimap_rects = minimap_rects
+		Utils.rebuild_collider_grid()
+		return
 
 	# ---------- 地面(起伏地形网格;预计算高度 + 解析法线) ----------
 	var st := SurfaceTool.new()
@@ -1086,10 +1107,11 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 			var cm2: Mesh = Utils.choice(car3a_meshes)
 			(car3a_buf[cm2]["t"] as Array).append(
 				Transform3D(Basis(Vector3.UP, rot), Vector3(x, gh, z)))
-			var sz: Array = car3a_size.get(Utils.choice(car3a_ids), [4.6, 1.86, 1.45])
-			var vw: float = sz[0] if absf(cos(rot)) > 0.5 else sz[1]
-			var dd: float = sz[1] if absf(cos(rot)) > 0.5 else sz[0]
-			add_collider.call(x, 0, z, vw, sz[2], dd)
+			# 改名 sz→csz:本 lambda 与外层函数体各有一个 sz, 触发 CONFUSABLE_LOCAL_DECLARATION
+			var csz: Array = car3a_size.get(Utils.choice(car3a_ids), [4.6, 1.86, 1.45])
+			var vw: float = csz[0] if absf(cos(rot)) > 0.5 else csz[1]
+			var dd: float = csz[1] if absf(cos(rot)) > 0.5 else csz[0]
+			add_collider.call(x, 0, z, vw, csz[2], dd)
 			return
 		# 兜底:GLB 缺失时回退旧版盒堆车
 		var col: Color = col_override if col_override != null else Utils.choice(car_colors)
@@ -1504,6 +1526,250 @@ static func build_world(root: Node3D, theme_id: String) -> void:
 	G.minimap_rects = minimap_rects
 	# 碰撞体空间网格(射线检测加速:AI 视线/弹道/避障)
 	Utils.rebuild_collider_grid()
+
+
+## ==================== 秋津市(全静态 GLB 城市)====================
+## 分区 GLB 摆位 + 材质重贴 + 碰撞/可行走面注册 + 旗点/出生/载具。
+## 引擎无物理:垂直玩法(天桥 y5/月台 y0.9/办公楼 y12/地下 y-3.5)靠 walk_ 面烘焙进 G.floor_h。
+## 秋津市室内/街灯实体光源总开关。
+## 该图光照主题是白天(hemi_energy 2.30 + sun_energy 1.65,太阳高度 95),实体点光源对
+## 观感贡献很小,却要付 163 盏 OmniLight3D 的逐像素代价 —— 用户实测掉帧,要求关掉。
+## 默认 false = 只靠环境光/太阳;将来若把时刻改成夜晚,把这里打开即可恢复室内照明。
+const AKITSU_POINT_LIGHTS := false
+
+
+static func _akitsu_build(wg: Node3D, T, minimap_rects: Array, _lv: int, _web: bool) -> void:
+	var t0 := Time.get_ticks_msec()
+	# 边界:秋津市内容铺到 ±480(Z10 外缘带)。build_world 统一给的 size/2-10 会让玩家
+	# 在可见地面边缘 10m 处撞上隐形墙(实拍被读作"莫名其妙空气墙")→ 收到 ±478。
+	G.bounds = T.size / 2.0 - 2.0
+	var zones: Array = T.extra.get("zones", [])
+	var lib := PropModels.mat_lib()
+	var fb: Material = lib["concrete"]
+	var floor_boxes: Array = []
+	var drive_boxes: Array = []
+	var n_mesh := 0
+	var n_col := 0
+	var n_walk := 0
+	var n_drive := 0
+	var n_light := 0
+
+	# 1) 地图外 = 海(岛国海岸城市:环岛護岸以外全是海,不再是"游乐场平板")
+	#    海床深色大平面兜底(防半透水面下透出虚空);海面比陆地低 0.45m,只出现在護岸之外
+	var bed := MeshInstance3D.new()
+	bed.name = "akitsu_seabed"
+	var bmesh := PlaneMesh.new()
+	bmesh.size = Vector2(60000.0, 60000.0)
+	bed.mesh = bmesh
+	var bed_mat := StandardMaterial3D.new()
+	bed_mat.albedo_color = Color(0.02, 0.045, 0.06, 1.0)
+	bed_mat.roughness = 1.0
+	bed.material_override = bed_mat
+	bed.position = Vector3(0.0, -7.0, 0.0)
+	bed.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	bed.set_meta("no_lod", true)
+	wg.add_child(bed)
+	var sea := MeshInstance3D.new()
+	sea.name = "akitsu_sea"
+	var smesh := PlaneMesh.new()
+	smesh.size = Vector2(60000.0, 60000.0)   # 远到看不见边缘(否则远端露出天穹地平线下暗带)
+	sea.mesh = smesh
+	var sea_mat := StandardMaterial3D.new()
+	sea_mat.albedo_color = Color(0.045, 0.105, 0.145, 1.0)   # 黄昏海:深蓝绿
+	sea_mat.roughness = 0.16                                  # 海面要反光(与地面相反)
+	sea_mat.metallic = 0.30
+	sea_mat.specular = 0.85
+	sea.material_override = sea_mat
+	sea.position = Vector3(0.0, -0.45, 0.0)
+	sea.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	sea.set_meta("no_lod", true)
+	wg.add_child(sea)
+
+	# 2) 逐区实例化
+	for zn in zones:
+		var zid: int = int(zn["id"])
+		var ox: float = float(zn["x"])
+		var oz: float = float(zn["z"])
+		var path := "res://models/map_akitsu/zone_%d.glb" % zid
+		if not ResourceLoader.exists(path):
+			push_warning("[AKITSU] 缺少分区 GLB: " + path)
+			continue
+		var ps: PackedScene = load(path)
+		if ps == null:
+			push_warning("[AKITSU] 分区加载失败: " + path)
+			continue
+		var inst: Node3D = ps.instantiate()
+		inst.name = "akitsu_z%d" % zid
+		inst.position = Vector3(ox, 0.0, oz)
+		wg.add_child(inst)
+		# 2a) 视觉网格:按 GLB 材质名重贴程序化 PBR(GLB 预览材质进游戏发白无质感)
+		for mi in inst.find_children("*", "MeshInstance3D", true, false):
+			var m := mi.mesh as ArrayMesh
+			if m == null:
+				continue
+			for si in m.get_surface_count():
+				var smat := m.surface_get_material(si)
+				var sname := smat.resource_name if smat != null else ""
+				var lmat: Material = lib.get(sname, fb)
+				# 程序化材质库的对象没设 resource_name, 重贴后表面名就丢了 →
+				# 下游"按材质名找灯具面/招牌面"会全部失配(实测: 灯具面聚类拿到 0 个)。
+				if lmat != null and lmat.resource_name.is_empty() and not sname.is_empty():
+					lmat.resource_name = sname
+				m.surface_set_material(si, lmat)
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			mi.set_meta("no_lod", true)
+			n_mesh += 1
+		# 2b) 碰撞 AABB(col_ 节点;Empty 的 scale = 世界系全尺寸 (w, h, d))
+		for nd in inst.find_children("col_*", "Node3D", true, false):
+			var s: Vector3 = nd.scale
+			var c: Vector3 = nd.position + inst.position
+			var b := AABB(Vector3(c.x - s.x * 0.5, c.y - s.y * 0.5, c.z - s.z * 0.5), s)
+			G.colliders.append(b)
+			G.collider_tags[b] = str(nd.name)      # QA 定位"是谁挡的"(如 col_z9_gbb0_p-1)
+			n_col += 1
+			# 大体量水平板(屋顶/楼板/高架桥面)= 建筑 footprint,投影到部署小地图
+			if s.x >= 4.0 and s.z >= 4.0 and s.x * s.z >= 45.0 and minimap_rects.size() < 1100:
+				minimap_rects.append({ "x": c.x, "z": c.z, "w": s.x, "d": s.z })
+		# 2b2) 室内光源(light_ 标记 -> OmniLight3D)
+		#      SDFGI 各画质档全部关闭, 自发光不照亮周围 -> 室内必须给实体光源, 否则全黑(实测)。
+		var zone_light_pos: Array[Vector3] = []
+		var lm_nodes: Array = (inst.find_children("light_*", "Node3D", true, false)
+			if AKITSU_POINT_LIGHTS else [])
+		for ndL in lm_nodes:
+			var ol := OmniLight3D.new()
+			ol.name = "ak_light_%d_%s" % [zid, ndL.name]
+			ol.position = ndL.position + inst.position
+			# 照度按"整间房都能看清家具"标定:旧值(range15/energy2.6/atten1.4)只有灯下
+			# 一圈亮,贴墙的货架/柜体整块发黑(用户读作"莫名其妙的黑箱子")。
+			ol.light_color = Color(1.0, 0.87, 0.70)
+			ol.omni_range = 24.0
+			ol.light_energy = 5.2
+			ol.omni_attenuation = 0.85         # <1 = 衰减更缓, 房间角落也有照度
+			ol.shadow_enabled = false          # 室内补光不投影(省性能)
+			wg.add_child(ol)
+			zone_light_pos.append(ol.position)
+			n_light += 1
+		# 2b2b) 自发光灯具面 -> 实体光源(通用兜底, 不改 GLB 一次覆盖全部分区)
+		#   SDFGI 全档关闭 -> 自发光不照亮邻面。站厅/大堂/地下通道/仓库/地下街这些密闭
+		#   空间在建模时只放了自发光灯具板, 没给实体光就是全黑(用户: "室内莫名其妙的
+		#   黑箱子")。这里直接从合并网格里 lamp/lamp_warm 材质的顶点按 8m(含高度)聚类
+		#   出灯位, 与已有 light_ 标记 5m 内去重。
+		var lamp_cells := {}
+		var lamp_scan: Array = (inst.find_children("*", "MeshInstance3D", true, false)
+			if AKITSU_POINT_LIGHTS else [])
+		for mi2 in lamp_scan:
+			var am2 := mi2.mesh as ArrayMesh
+			if am2 == null:
+				continue
+			for si2 in am2.get_surface_count():
+				var sm2 := am2.surface_get_material(si2)
+				if sm2 == null:
+					continue
+				var nm2 := sm2.resource_name
+				if nm2 != "lamp" and nm2 != "lamp_warm":
+					continue
+				var arr2 := am2.surface_get_arrays(si2)
+				if arr2.size() == 0:
+					continue
+				var vs2: PackedVector3Array = arr2[Mesh.ARRAY_VERTEX]
+				for vv in vs2:
+					var wp: Vector3 = mi2.transform * vv + inst.position
+					var kk := Vector2i(int(floor(wp.x / 8.0)), int(floor(wp.y / 8.0)))
+					if not lamp_cells.has(kk):
+						lamp_cells[kk] = { "p": Vector3.ZERO, "n": 0 }
+					var d0: Dictionary = lamp_cells[kk]
+					d0["p"] = (d0["p"] as Vector3) + wp
+					d0["n"] = int(d0["n"]) + 1
+		for kk2 in lamp_cells.keys():
+			var d1: Dictionary = lamp_cells[kk2]
+			var cen: Vector3 = (d1["p"] as Vector3) / float(maxi(1, int(d1["n"])))
+			var dup := false
+			for ex in zone_light_pos:
+				if ex.distance_to(cen) < 5.0:
+					dup = true
+					break
+			if dup:
+				continue
+			var ol2 := OmniLight3D.new()
+			var kkv: Vector2i = kk2
+			ol2.name = "ak_lamp_%d_%d_%d" % [zid, kkv.x, kkv.y]
+			ol2.position = cen
+			ol2.light_color = Color(1.0, 0.90, 0.76)
+			ol2.omni_range = 20.0
+			ol2.light_energy = 4.0
+			ol2.omni_attenuation = 0.9
+			ol2.shadow_enabled = false
+			wg.add_child(ol2)
+			zone_light_pos.append(cen)
+			n_light += 1
+		# 2b4) 门位标记(door_*): 只给 QA 用, 不参与游戏逻辑
+		for ndD in inst.find_children("door_*", "Node3D", true, false):
+			G.door_marks.append({
+				"x": ndD.position.x + inst.position.x,
+				"z": ndD.position.z + inst.position.z,
+			})
+		# 2c) 可行走面(walk_ 节点;站立高度 = 顶面 y + h/2)
+		for nd2 in inst.find_children("walk_*", "Node3D", true, false):
+			var s2: Vector3 = nd2.scale
+			var c2: Vector3 = nd2.position + inst.position
+			floor_boxes.append(AABB(
+				Vector3(c2.x - s2.x * 0.5, c2.y - s2.y * 0.5, c2.z - s2.z * 0.5), s2))
+			n_walk += 1
+		# 3b) 可行驶面(drive_ 节点;桥面/引道)。载具只认这一组 —— 能上桥, 不爬屋顶。
+		for nd3 in inst.find_children("drive_*", "Node3D", true, false):
+			var s3: Vector3 = nd3.scale
+			var c3: Vector3 = nd3.position + inst.position
+			drive_boxes.append(AABB(
+				Vector3(c3.x - s3.x * 0.5, c3.y - s3.y * 0.5, c3.z - s3.z * 0.5), s3))
+			n_drive += 1
+
+	# 3) 可行走面高度场索引(垂直玩法)
+	G.build_floor_index(floor_boxes)
+	G.set_drive_surfaces(drive_boxes)     # 无 drive_ 面时 drive_active=false → 载具行为不变
+
+	# 4) 隐形地图边界(替代程序化天然边界;可看见的地表由 GLB + 兜底地面承担)
+	var B: float = G.bounds + 4
+	var span := 2.0 * B + 8.0
+	G.colliders.append(AABB(Vector3(-B - 4.0, 0.0, -B - 1.0), Vector3(span, 20.0, 2.0)))
+	G.colliders.append(AABB(Vector3(-B - 4.0, 0.0, B - 1.0), Vector3(span, 20.0, 2.0)))
+	G.colliders.append(AABB(Vector3(-B - 1.0, 0.0, -B - 4.0), Vector3(2.0, 20.0, span)))
+	G.colliders.append(AABB(Vector3(B - 1.0, 0.0, -B - 4.0), Vector3(2.0, 20.0, span)))
+
+	# 4b) 导航格网(960m 城区 AI 寻路;碰撞网格必须先用最终 colliders 重建)
+	Utils.rebuild_collider_grid()
+	G.build_nav_grid()
+
+	# 5) 征服旗点(8 个;落点吸附到最近可行走面,避免旗杆埋进楼板)
+	for fd in (T.extra.get("flags", []) as Array):
+		var fx := float(fd["x"])
+		var fz := float(fd["z"])
+		var fy: float = G.floor_near(0.30, fx, fz, 0.0)
+		var f := Flag.new(str(fd["id"]), fx, fz)
+		f.position.y = fy
+		f.pos.y = fy
+		wg.add_child(f)
+		G.flags.append(f)
+
+	# 6) 出生点(双方基地内散布;吸附可行走面)
+	var sp: Dictionary = T.extra.get("spawns", {})
+	for team in ["us", "ru"]:
+		for p in (sp.get(team, []) as Array):
+			var v: Vector3 = p
+			var sy: float = G.floor_near(0.30, v.x, v.z, 0.0)
+			G.spawns[team].append(Vector3(v.x, sy, v.z))
+
+	# 7) 载具出生(地面路线;载具不上 walk 面)
+	for vs in (T.extra.get("vehicles", []) as Array):
+		G.vehicle_spawns.append({
+			"x": float(vs["x"]), "z": float(vs["z"]),
+			"yaw": float(vs["yaw"]), "type": str(vs["type"]),
+		})
+
+	print("[AKITSU] 分区=%d 网格件=%d 碰撞=%d 可行走面=%d col_=%d walk_=%d drive_=%d 光源=%d 旗=%d 出生(us/ru)=%d/%d 载具=%d 耗时=%dms" % [
+		zones.size(), n_mesh, G.colliders.size(), floor_boxes.size(), n_col, n_walk, n_drive,
+		n_light, G.flags.size(),
+		G.spawns["us"].size(), G.spawns["ru"].size(), G.vehicle_spawns.size(),
+		Time.get_ticks_msec() - t0])
 
 
 ## 动态/特殊节点判定:这些不参与静态合并(爬祖先链到 stop_at 为止)

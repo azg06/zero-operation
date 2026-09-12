@@ -358,6 +358,127 @@ static func build_maps() -> Dictionary:
 		"(村庄 8 + 道路旁 ", br_valley.extra["vehicle_points"].size() - 14, " + 城市 4 + 中心 2)")
 	MD["br_valley"] = br_valley
 
+	# ==================== 秋津市(AKITSU;全 Blender 手工建模静态城市,960m 征服) ====================
+	# 布局真源:tools/blender/jp_city_design.md。10 区 GLB 拼装(models/map_akitsu/zone_N.glb),
+	# 引擎侧不做程序化生成;垂直玩法由 walk_ 面烘焙进 G.floor_h(天桥/月台/屋顶/地下通道)。
+	var akitsu := MapDef.new()
+	akitsu.id = "akitsu"; akitsu.cn = "秋津市"; akitsu.mode = "conquest"
+	akitsu.size = 960; akitsu.road = 120
+	# 黄金黄昏(15.2):暖天穹 + 低斜长影;靠天穹/光色而非压低太阳(用户定,部署界面保持可辨)
+	akitsu.sky_top = Color.html("#3f6398"); akitsu.sky_mid = Color.html("#b08a6a"); akitsu.sky_bot = Color.html("#eab887")
+	akitsu.fog_color = Color.html("#d3b193"); akitsu.fog_near = 320; akitsu.fog_far = 2800   # 960m 图:雾太近会吃掉海滨/港区的远距交火视野
+	akitsu.hemi_sky = Color.html("#f2caa0"); akitsu.hemi_ground = Color.html("#5a5244"); akitsu.hemi_energy = 2.30
+	akitsu.sun_color = Color.html("#ffd7a0"); akitsu.sun_energy = 1.65; akitsu.sun_pos = Vector3(-150, 95, 70)
+	akitsu.cloud_color = Color.html("#ecc8a4")
+	akitsu.tdm_ok = false   # 960m 大图不进 TDM 圈定池
+	akitsu.extra = {
+		# 分区偏移(局部原点 → 世界坐标;与 tools/blender/assemble_jp_city.py 的 ZONES 同源)
+		"zones": [
+			{ "id": 1, "x": -300.0, "z": 60.0 },
+			{ "id": 2, "x": -140.0, "z": -120.0 },
+			{ "id": 3, "x": 50.0, "z": 170.0 },
+			{ "id": 4, "x": 250.0, "z": 340.0 },
+			{ "id": 5, "x": -270.0, "z": 340.0 },
+			{ "id": 6, "x": 325.0, "z": -160.0 },
+			{ "id": 7, "x": -80.0, "z": -360.0 },
+			{ "id": 8, "x": 200.0, "z": -60.0 },
+			{ "id": 9, "x": 0.0, "z": 0.0 },
+			{ "id": 10, "x": 0.0, "z": 0.0 },
+		],
+		# 8 个主要征服点(非对称:西神社/中央车站/东港区/北寺院/南海滨)
+		"flags": [
+			{ "id": "A", "x": -300.0, "z": 60.0 },     # 秋津神社
+			{ "id": "B", "x": 30.0, "z": 60.0 },       # 秋津站前(中央核心)
+			{ "id": "C", "x": -140.0, "z": -100.0 },   # 本町商店街
+			{ "id": "D", "x": 230.0, "z": 310.0 },     # 若叶住宅区
+			{ "id": "E", "x": 340.0, "z": -120.0 },    # 秋津港
+			{ "id": "F", "x": 180.0, "z": -20.0 },     # 临海新都心(办公)
+			{ "id": "G", "x": -60.0, "z": -360.0 },    # 汐见海滨公园
+			{ "id": "H", "x": -260.0, "z": 330.0 },    # 西念寺
+		],
+		# 出生点(2026-09-10 用户定):我方(us) 固定 G 汐见海滨 / 敌方(ru) 固定 D 若叶住宅,
+		# 各 32 个点(离旗 11~35m 的净空环),玩家与 NPC 共用;载具同基地起(离旗 30~64m)。
+		"spawns": {
+			"us": [
+				Vector3(-56.1, 0, -349.7), Vector3(-58.9, 0, -349.1), Vector3(-61.8, 0, -349.1),
+				Vector3(-64.5, 0, -350.0), Vector3(-67.0, 0, -351.5), Vector3(-68.9, 0, -353.6),
+				Vector3(-70.3, 0, -356.1), Vector3(-70.9, 0, -358.9), Vector3(-70.9, 0, -361.8),
+				Vector3(-70.0, 0, -364.5), Vector3(-68.5, 0, -367.0), Vector3(-66.4, 0, -368.9),
+				Vector3(-63.9, 0, -370.3), Vector3(-61.1, 0, -370.9), Vector3(-58.2, 0, -370.9),
+				Vector3(-55.5, 0, -370.0), Vector3(-53.0, 0, -368.5), Vector3(-51.1, 0, -366.4),
+				Vector3(-49.7, 0, -363.9), Vector3(-49.1, 0, -361.1), Vector3(-49.1, 0, -358.2),
+				Vector3(-50.0, 0, -355.5), Vector3(-51.5, 0, -353.0), Vector3(-53.6, 0, -351.1),
+				Vector3(-61.2, 0, -348.6), Vector3(-65.0, 0, -345.9), Vector3(-68.5, 0, -347.6),
+				Vector3(-71.4, 0, -350.3), Vector3(-73.5, 0, -353.6), Vector3(-74.8, 0, -357.3),
+				Vector3(-75.0, 0, -361.2), Vector3(-74.1, 0, -365.0),
+			],
+			"ru": [
+				Vector3(233.9, 0, 320.3), Vector3(231.1, 0, 320.9), Vector3(228.2, 0, 320.9),
+				Vector3(225.5, 0, 320.0), Vector3(223.0, 0, 318.5), Vector3(219.7, 0, 313.9),
+				Vector3(219.1, 0, 311.1), Vector3(219.1, 0, 308.2), Vector3(220.0, 0, 305.5),
+				Vector3(221.5, 0, 303.0), Vector3(226.1, 0, 299.7), Vector3(228.9, 0, 299.1),
+				Vector3(231.8, 0, 299.1), Vector3(234.5, 0, 300.0), Vector3(237.0, 0, 301.5),
+				Vector3(238.9, 0, 303.6), Vector3(240.9, 0, 308.9), Vector3(240.9, 0, 311.8),
+				Vector3(240.0, 0, 314.5), Vector3(238.5, 0, 317.0), Vector3(228.8, 0, 325.0),
+				Vector3(225.0, 0, 324.1), Vector3(221.5, 0, 322.4), Vector3(218.6, 0, 319.7),
+				Vector3(216.5, 0, 316.4), Vector3(215.2, 0, 312.7), Vector3(215.0, 0, 308.8),
+				Vector3(215.9, 0, 305.0), Vector3(217.6, 0, 301.5), Vector3(220.3, 0, 298.6),
+				Vector3(223.6, 0, 296.5), Vector3(227.3, 0, 295.2),
+			],
+		},
+		# 载具出生(24 = 每侧 12:坦克×2 + 步战×3 + 吉普×7),全部固定在 G / D 基地
+		"vehicles": [
+			{ "x": -75.1, "z": -334.1, "yaw": 3.23, "type": "tank" },   # US-1
+			{ "x": -81.3, "z": -338.9, "yaw": 3.39, "type": "tank" },   # US-2
+			{ "x": -86.1, "z": -345.1, "yaw": 3.55, "type": "apc" },   # US-3
+			{ "x": -97.7, "z": -346.6, "yaw": 3.71, "type": "apc" },   # US-4
+			{ "x": -96.1, "z": -377.2, "yaw": 3.87, "type": "apc" },   # US-5
+			{ "x": -90.4, "z": -385.9, "yaw": 3.23, "type": "jeep" },   # US-6
+			{ "x": -105.7, "z": -384.9, "yaw": 3.39, "type": "jeep" },   # US-7
+			{ "x": -97.7, "z": -395.8, "yaw": 3.55, "type": "jeep" },   # US-8
+			{ "x": -87.1, "z": -404.4, "yaw": 3.71, "type": "jeep" },   # US-9
+			{ "x": -74.7, "z": -422.3, "yaw": 3.87, "type": "jeep" },   # US-10
+			{ "x": -58.1, "z": -424.0, "yaw": 3.23, "type": "jeep" },   # US-11
+			{ "x": -41.6, "z": -421.3, "yaw": 3.39, "type": "jeep" },   # US-12
+			{ "x": 214.9, "z": 335.9, "yaw": 0.09, "type": "tank" },   # RU-1
+			{ "x": 208.7, "z": 331.1, "yaw": 0.25, "type": "tank" },   # RU-2
+			{ "x": 201.0, "z": 317.6, "yaw": 0.41, "type": "apc" },   # RU-3
+			{ "x": 192.3, "z": 323.4, "yaw": 0.57, "type": "apc" },   # RU-4
+			{ "x": 190.1, "z": 313.2, "yaw": 0.73, "type": "apc" },   # RU-5
+			{ "x": 207.3, "z": 277.1, "yaw": 0.09, "type": "jeep" },   # RU-6
+			{ "x": 184.3, "z": 285.1, "yaw": 0.25, "type": "jeep" },   # RU-7
+			{ "x": 192.3, "z": 274.2, "yaw": 0.41, "type": "jeep" },   # RU-8
+			{ "x": 202.9, "z": 265.6, "yaw": 0.57, "type": "jeep" },   # RU-9
+			{ "x": 231.9, "z": 246.0, "yaw": 0.73, "type": "jeep" },   # RU-10
+			{ "x": 248.4, "z": 248.7, "yaw": 0.09, "type": "jeep" },   # RU-11
+			{ "x": 263.6, "z": 255.5, "yaw": 0.25, "type": "jeep" },   # RU-12
+			# 基地快速反应摩托(2026-09-11 新增: 960m 图需要快穿插单位)
+			{ "x": -76.2, "z": -352.4, "yaw": 3.55, "type": "motorcycle" },  # US-M1
+			{ "x": -80.6, "z": -357.0, "yaw": 3.71, "type": "motorcycle" },  # US-M2
+			{ "x": -71.8, "z": -357.9, "yaw": 3.39, "type": "motorcycle" },  # US-M3
+			{ "x": 222.4, "z": 251.0, "yaw": 0.41, "type": "motorcycle" },   # RU-M1
+			{ "x": 228.0, "z": 245.6, "yaw": 0.57, "type": "motorcycle" },   # RU-M2
+			{ "x": 219.0, "z": 244.8, "yaw": 0.73, "type": "motorcycle" },   # RU-M3
+			# 旗点就近载具(用户: "刷的载具要多一些") —— 每面中立旗旁 1 吉普 + 1 摩托,
+			# 距旗 20~25m, 便于夺点后快速转场; 具体格子由 safe_spawn_pos 自动避障吸附。
+			{ "x": -322.0, "z": 42.0, "yaw": 1.57, "type": "jeep" },          # A 神社
+			{ "x": -278.0, "z": 42.0, "yaw": 1.57, "type": "motorcycle" },
+			{ "x": 52.0, "z": 42.0, "yaw": 1.57, "type": "jeep" },             # B 站前
+			{ "x": 8.0, "z": 42.0, "yaw": 1.57, "type": "motorcycle" },
+			{ "x": -118.0, "z": -118.0, "yaw": 0.79, "type": "jeep" },         # C 商店街
+			{ "x": -162.0, "z": -118.0, "yaw": 0.79, "type": "motorcycle" },
+			{ "x": 362.0, "z": -138.0, "yaw": 5.50, "type": "jeep" },          # E 秋津港
+			{ "x": 318.0, "z": -138.0, "yaw": 5.50, "type": "motorcycle" },
+			{ "x": 158.0, "z": -38.0, "yaw": 2.36, "type": "jeep" },           # F 临海新都心
+			{ "x": 202.0, "z": -38.0, "yaw": 2.36, "type": "motorcycle" },
+			{ "x": -238.0, "z": 312.0, "yaw": 3.93, "type": "jeep" },          # H 西念寺
+			{ "x": -282.0, "z": 312.0, "yaw": 3.93, "type": "motorcycle" },
+		],
+		# 每队 AI 数:秋津市 960m 大图 → 64 v 64(玩家占我方 1 席,故我方 AI=63)
+		"bot_per_team": 63,
+	}
+	MD["akitsu"] = akitsu
+
 	return MD
 
 

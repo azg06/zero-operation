@@ -11,6 +11,7 @@ class_name AIDirector extends Node
 
 const TICK := 4.0
 var _t := 0.0
+var _path_budget := {}       # 每拍可计算的寻路条数上限(每队独立)
 
 
 func _process(dt: float) -> void:
@@ -51,7 +52,14 @@ func _direct() -> void:
 		stats.append({ "flag": f, "us": us_n, "ru": ru_n, "contested": contested,
 			"progress": float(f.progress), "owner": f.owner_team })
 	var tasks := {}
-	var assigned := {}   # flag_id -> 已分配进攻任务的小队数
+	# 每拍**每队**最多算 4 条小队路线(A* 不宜扎堆)。★ 必须每队独立: 旧版是全局限额,
+	# 而循环顺序固定 ["us","ru"] → US 每拍先吃光名额, RU 永远轮不到算路线(实测 RU 的
+	# bot 路线全是空的 nav=0/0, 于是又回到"直线撞墙"的老路)。
+	_path_budget = { "us": 4, "ru": 4 }
+	# ★ 2026-09-10 修: 名额表必须**每队独立**。旧版全队共用一个 dict 且循环顺序固定
+	# ["us","ru"] → US 每 4 秒都先手把"攻点名额"抢光, RU 只能捡剩下的 → 我方(玩家在 us)
+	# 系统性更主动, 敌方被动挨打(用户: "我方优势巨大")。
+	var assigned := { "us": {}, "ru": {} }
 	for team in ["us", "ru"]:
 		for s in G.squads:
 			if s["team"] != team:
@@ -62,8 +70,37 @@ func _direct() -> void:
 					alive_n += 1
 			if alive_n == 0:
 				continue
-			var task := _pick_task(s, team, stats, assigned)
+			var task := _pick_task(s, team, stats, assigned[team])
 			tasks[s["id"]] = task
+			# 记录目标旗与换目标时刻(供 _pick_task 的任务粘性使用)
+			if task.get("flag") != s.get("task_flag", null):
+				s["task_flag"] = task.get("flag")
+				s["task_t"] = Time.get_ticks_msec() / 1000.0
+			s["task_kind"] = task.get("kind")
+			# ★ 小队级 A* 寻路(960m 城区必需): 目标旗变化或 8s 超时才重算;
+			#   每拍限额 3 条, 避免同一帧集中算路卡帧。
+			var fl: Variant = task.get("flag")
+			if fl != null and is_instance_valid(fl) and G.nav_ok:
+				var now_s := Time.get_ticks_msec() / 1000.0
+				var stale: bool = float(s.get("nav_t", -99.0)) + 25.0 < now_s
+				if s.get("nav_flag", null) != fl or stale:
+					if int(_path_budget.get(team, 0)) > 0:
+						_path_budget[team] = int(_path_budget[team]) - 1
+						var lead = null
+						for m in s["members"]:
+							if m.alive:
+								lead = m
+								break
+						if lead != null:
+							var fnode := fl as Node3D
+							var pth: PackedVector2Array = G.nav_path(
+								lead.pos.x, lead.pos.z, fnode.pos.x, fnode.pos.z)
+							s["nav_t"] = now_s
+							s["nav_flag"] = fl
+							if pth.size() > 0:
+								for m in s["members"]:
+									if m.alive:
+										m.set_nav(pth)
 			for m in s["members"]:
 				if m.alive:
 					m.ai_task = task
@@ -72,12 +109,30 @@ func _direct() -> void:
 
 ## 单队任务选择:回防 > 支援攻点 > 夺旗 > 推进 > 驻守
 func _pick_task(s, team: String, stats: Array, assigned: Dictionary) -> Dictionary:
+	# ★任务粘性(2026-09-11): 小队目标至少保持 20s。旧版每 4s tick 无条件重选 → 目标在
+	#   B/E/F/H 之间反复跳(逐 bot 采样实测 obj 反复变化) → 每跳一次指挥层重算路线、
+	#   `Bot.set_nav` 把 nav_i 清零 → bot 掉头横跳: 12s 净位移 0、速度掉到 1.5,
+	#   到旗距离几乎不降("所有 NPC 在一个地方打转"的最后一层)。
+	var now_s := Time.get_ticks_msec() / 1000.0
+	var pf = s.get("task_flag", null)
+	if pf != null and is_instance_valid(pf) and now_s - float(s.get("task_t", -99.0)) < 20.0:
+		var pk: String = str(s.get("task_kind", "capture"))
+		var still: bool = (pk == "capture" and pf.owner_team != team) \
+			or ((pk == "defend" or pk == "hold") and pf.owner_team == team)
+		if still:
+			var key := str(pf)
+			assigned[key] = int(assigned.get(key, 0)) + 1
+			return { "kind": pk, "flag": pf }
 	var my_flags: Array = []
 	var en_flags: Array = []
 	for st in stats:
 		if st["owner"] == team:
 			my_flags.append(st)
-		elif st["owner"] != "" and st["owner"] != null:
+		else:
+			# ★ 2026-09-10 修: 中立旗(owner=null)过去既不算己方也不算敌方 → **AI 永远
+			# 不去夺取中立点**。开局 8 面旗全是中立时, 所有小队都拿不到进攻目标, 只能
+			# 回防/驻守 → 双方 63 人的 AI 全挤在出生点"打转"(实测: 开局 36s 后仍有 6 面
+			# 中立旗零争夺, 两队质心一动不动)。中立旗同样是可攻目标。
 			en_flags.append(st)
 	# 1) 己方旗被围攻(敌方人多 / 被敌方争夺中) → 回防(全队优先)
 	var best_def = null
@@ -95,7 +150,11 @@ func _pick_task(s, team: String, stats: Array, assigned: Dictionary) -> Dictiona
 		if prio > best_def_prio:
 			best_def_prio = prio
 			best_def = st
-	if best_def != null and best_def_prio >= 1.0:
+	# ★ 2026-09-10 修: 回防**必须限额**。旧版没有 _assign_ok 上限 → 只要有一面己方旗被
+	# 争夺, 全部小队(实测 US 16 支全中)都判成 defend 同一面旗 → 全队挤在一处转圈,
+	# 无人进攻。每面旗最多 3 队回防, 其余走下面的进攻分支。
+	if best_def != null and best_def_prio >= 1.0 and _assign_ok(best_def, team, assigned, 3):
+		_mark(best_def, team, assigned)
 		return { "kind": "defend", "flag": best_def["flag"] }
 	# 2) 敌方旗正在争夺 → 支援攻点(最多 2 队同旗)
 	var best_att = null

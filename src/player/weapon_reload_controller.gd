@@ -742,10 +742,7 @@ func _start_revolver() -> void:
 	# 直接展开阶段,不做循环特殊推进;阶段时长就是真实换弹节奏
 	phase_names = names
 	phase_durs = durs
-	var ttl := 0.0
-	for d in phase_durs:
-		ttl += float(d)
-	var mag_total := ttl
+	# [已移除] mag_total(整段换弹总时长):算了但无消费者, 2026-09-12 清理死代码
 	stage = 0
 	stage_time = 0.0
 	stage_dur = float(phase_durs[0]) if phase_durs.size() > 0 else 0.2
@@ -2693,11 +2690,11 @@ func _mag_insert_pose(p: float) -> Dictionary:
 		var e2 := _ez((p - 0.5) / 0.5)
 		return { "pos": align.lerp(mag_base, e2), "rot": align_rot * (1.0 - e2) }
 	var insert_pose := _mag_insert_start()
-	var e := _ez(p)
+	var ei := _ez(p)   # 改名 e→ei:与上方 if 块内的 e 同名, 会触发 CONFUSABLE_LOCAL_DECLARATION
 	var pos: Vector3 = insert_pose.get("pos", mag_base)
 	var rot: Vector3 = insert_pose.get("rot", Vector3.ZERO)
-	pos = pos.lerp(mag_base, e)
-	rot *= 1.0 - e
+	pos = pos.lerp(mag_base, ei)
+	rot *= 1.0 - ei
 	return { "pos": pos, "rot": rot }
 
 

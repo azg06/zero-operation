@@ -1387,7 +1387,13 @@ func update_effects(dt: float) -> void:
 		_flash_alpha = maxf(0.0, _flash_alpha - dt * 3.6)
 		_flash_rect.modulate.a = _flash_alpha * _flash_alpha
 	# 死亡淡出:阵亡适当压暗(0.35,战场仍可见),重生快速退场
-	var target_fade := 0.35 if G.state == "dead" else 0.0
+	# ★ 但"重新部署视图"里不再压暗 —— 征服/突破死亡即进入实时 3D 高空部署, 玩家看到的
+	#   就是重新部署界面; 旧版状态仍是 dead, 于是压暗层在 enter() 复位后又爬回 0.27,
+	#   界面整体发暗(用户: 所有模式被敌人打死后重新部署界面会变暗)。
+	#   死亡反馈由阵亡瞬间的红闪提供, 不依赖这条常驻压暗。
+	var in_deploy_view: bool = (G.state == "deploy") \
+		or (G.deployment != null and bool(G.deployment.get("active")))
+	var target_fade := 0.35 if (G.state == "dead" and not in_deploy_view) else 0.0
 	if _was_dead != (G.state == "dead"):
 		_was_dead = G.state == "dead"
 		if G.state == "dead":
